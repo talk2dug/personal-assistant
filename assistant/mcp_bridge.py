@@ -32,6 +32,18 @@ import sys
 
 import httpx
 
+# This subprocess's stdio is a pipe, not a console, but Python still picks an encoding
+# for it from the OS locale rather than defaulting to UTF-8 -- on Windows that's cp1252.
+# The CLI parent sends and expects real UTF-8 JSON-RPC over these pipes (tool arguments
+# and results routinely carry real non-ASCII text: em-dashes, curly quotes, a BOM read
+# back from a file), so left at the platform default, every one of those characters gets
+# decoded as cp1252 on the way in and mis-encoded again on the way out -- silent
+# corruption, not a crash, so it went unnoticed until a git_read_file/write round-trip
+# corrupted a file badly enough (a BOM landing outside its string literal) to break
+# Python's own parser. Confirmed directly: sys.stdout.encoding reports cp1252 here.
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
 PROTOCOL_VERSION = "2024-11-05"
 
 

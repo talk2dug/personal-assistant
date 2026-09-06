@@ -134,7 +134,10 @@ class GitOpsClient:
         if not target.is_file():
             raise GitOpsError(f"no such file: {path!r}")
         try:
-            content = target.read_text(encoding="utf-8")
+            # utf-8-sig strips a leading BOM rather than returning it as a literal
+            # U+FEFF character mixed into the content -- several files in this repo
+            # carry one, and it has no business appearing in what a model reads back.
+            content = target.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
             return {"ok": False, "error": "binary file, cannot display as text"}
         return {"ok": True, "path": path, "content": content}

@@ -70,6 +70,34 @@ OPS_PLAN_TOOLS = [
     }},
 ]
 
+# The one tool every employee has, regardless of tier -- including the otherwise
+# tool-less research tier. If a job needs a capability you don't have, the answer is to
+# ask for it here, never to guess, stub, or fabricate work around the gap. A real
+# incident motivated this: an employee assigned real development work had no way to even
+# see the actual repo, so it invented a tech stack from nothing and stubbed a real,
+# already-working integration rather than saying it was blocked.
+REQUEST_CAPABILITY_TOOLS = [
+    {"type": "function", "function": {
+        "name": "request_capability",
+        "description": (
+            "Ask the owner to grant a higher capability tier when the assignment needs "
+            "one you don't have -- e.g. you were asked to write real code or touch a "
+            "real server/repository but can currently only search and report. This "
+            "creates a Review-page item; if the owner approves, the tier is granted "
+            "immediately and automatically, no further action needed from you. Never "
+            "guess, stub, or fabricate work around a missing capability -- ask instead "
+            "and say plainly in your output that you're blocked pending approval."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "requested_tier": {
+                "type": "string", "enum": ["research", "authoring", "media", "execute"],
+                "description": "The capability tier this assignment actually needs.",
+            },
+            "reason": {"type": "string", "description": "Why this assignment needs it."},
+        }, "required": ["requested_tier", "reason"]},
+    }},
+]
+
 BUSINESS_TOOLS = [
     {"type": "function", "function": {
         "name": "business_status",
@@ -871,6 +899,13 @@ def apply_review_decision(db_path: str, owner: int, item: dict, decision: str, s
             ops_plans.set_plan_status(db_path, ref_id, target)
             if target == "approved" and ssh_ops is not None:
                 ops_plans.run_plan_async(db_path, ref_id, ssh_ops)
+        elif ref_table == "capability_requests":
+            # An employee asked for a higher tier instead of guessing or stubbing around
+            # a missing capability -- approving here is the actual grant, so nothing
+            # further is needed from the owner or from the employee itself.
+            if target == "approved":
+                payload = json.loads(item.get("detail") or "{}")
+                staff.set_capability_override(db_path, payload["employee_key"], payload["requested_tier"])
         else:
             return None
     except Exception:

@@ -1,5 +1,9 @@
-"""Git/GitHub tools for the dev-team agents: branch, write files, push, open a PR,
-check its status, and (gated) merge it.
+"""Git/GitHub tools for the dev-team agents: list/read the real repo, branch, write
+files, push, open a PR, check its status, and (gated) merge it. Read tools exist so an
+employee never has to guess at the actual tech stack, layout, or what's already built --
+a real gap found live: an employee with only write tools invented a Node/Postgres stack
+from nothing and stubbed a real, already-working integration, because it had no way to
+look at the repo it was supposedly contributing to.
 
 Local repo operations (clone/fetch/worktree/commit/push) shell out to the real `git`
 binary with a fixed argv list per call -- never a shell string, same discipline
@@ -102,6 +106,39 @@ class GitOpsClient:
 
     # -- tools ------------------------------------------------------------------
 
+    def _readable_root(self, branch_name: str | None) -> Path:
+        """Resolves which checkout to read from: the given branch's worktree, or the
+        main clone (fetched fresh first) when none is given -- so 'look at the repo'
+        always means the real, current thing, never a stale local copy."""
+        if branch_name is None:
+            self._ensure_main_clone()
+            return self._main_clone
+        root = self._worktree_dir(branch_name)
+        if not root.exists():
+            raise GitOpsError(f"no such branch checkout {branch_name!r} -- call create_branch first")
+        return root
+
+    def list_files(self, path: str = "", branch_name: str | None = None) -> dict:
+        root = self._readable_root(branch_name)
+        target = _safe_join(root, path or ".")
+        if not target.is_dir():
+            raise GitOpsError(f"not a directory: {path!r}")
+        entries = sorted(
+            (f"{p.name}/" if p.is_dir() else p.name) for p in target.iterdir() if p.name != ".git"
+        )
+        return {"ok": True, "path": path or ".", "entries": entries}
+
+    def read_file(self, path: str, branch_name: str | None = None) -> dict:
+        root = self._readable_root(branch_name)
+        target = _safe_join(root, path)
+        if not target.is_file():
+            raise GitOpsError(f"no such file: {path!r}")
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "binary file, cannot display as text"}
+        return {"ok": True, "path": path, "content": content}
+
     def create_branch(self, branch_name: str, base_branch: str = "main") -> dict:
         self._ensure_main_clone()
         worktree_dir = self._worktree_dir(branch_name)
@@ -173,6 +210,10 @@ class GitOpsClient:
 
     def call_tool(self, name: str, arguments: dict) -> dict:
         try:
+            if name == "git_list_files":
+                return self.list_files(arguments.get("path", ""), arguments.get("branch_name"))
+            if name == "git_read_file":
+                return self.read_file(arguments["path"], arguments.get("branch_name"))
             if name == "git_create_branch":
                 return self.create_branch(arguments["branch_name"], arguments.get("base_branch", "main"))
             if name == "git_commit_and_push":

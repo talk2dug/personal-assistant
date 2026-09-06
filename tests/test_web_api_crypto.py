@@ -118,7 +118,7 @@ def test_analyst_reasoning_is_returned_in_full_not_summarized(client, cfg):
     staff.set_data_feeds(cfg.db_path, key, "market")
 
     class RecommendingLLM:
-        def research(self, prompt, system_prompt=None, timeout=None):
+        def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
             return ("BTC: HOLD, flat and range-bound.\n"
                     'DASH: WATCH, up 30% on a Grayscale note.\n'
                     '{"alert": false, "urgency": "low", "headline": "quiet"}')

@@ -4,6 +4,32 @@ list and system note live here, the actual client lives in git_ops.py.
 
 GIT_TOOLS = [
     {"type": "function", "function": {
+        "name": "git_list_files",
+        "description": (
+            "List files under a directory of the real Jarvis repository. Use this before "
+            "writing anything -- never assume a tech stack, module layout, or whether an "
+            "integration already exists; look first. Defaults to the repo root on main; "
+            "pass branch_name to look inside a branch you're already working on."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "Directory path relative to the repo root. Defaults to the root."},
+            "branch_name": {"type": "string", "description": "Defaults to 'main'."},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "git_read_file",
+        "description": (
+            "Read a file's real, current content from the Jarvis repository. Use this "
+            "before writing code that touches an area you haven't already read -- "
+            "guessing at what exists (a framework, a module, an already-built "
+            "integration) produces work that doesn't fit the real codebase."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "File path relative to the repo root."},
+            "branch_name": {"type": "string", "description": "Defaults to 'main'."},
+        }, "required": ["path"]},
+    }},
+    {"type": "function", "function": {
         "name": "git_create_branch",
         "description": (
             "Create a new git branch off a base branch (default 'main') and check it "
@@ -68,13 +94,17 @@ GIT_TOOLS = [
 ]
 
 GIT_SYSTEM_NOTE = (
-    " You also have real git/GitHub tools for development work. git_create_branch and "
-    "git_commit_and_push let you stage real code changes on a branch — always create a "
-    "branch first, then write files to it, then git_open_pr to put it up for CI and "
-    "review. None of that touches main or anything deployed. git_get_pr_status shows CI "
-    "results. git_merge_pr is different: it actually changes what's on main, so calling "
-    "it does not execute immediately — it stages the action and you must clearly state "
-    "which PR and describe what merging it will do, then ask the owner to explicitly "
-    "confirm before it happens. Never claim a PR is merged unless you actually called "
-    "git_merge_pr and it was confirmed."
+    " You also have real git/GitHub tools for development work. git_list_files and "
+    "git_read_file show you the actual, current Jarvis codebase — use them before "
+    "writing anything. Never assume a tech stack, framework, file layout, or whether an "
+    "integration already exists; look first, every time, even if you think you already "
+    "know. Guessing wrong produces code that doesn't fit the real repo and is wasted "
+    "work. git_create_branch and git_commit_and_push let you stage real code changes on "
+    "a branch — always create a branch first, then write files to it, then git_open_pr "
+    "to put it up for CI and review. None of that touches main or anything deployed. "
+    "git_get_pr_status shows CI results. git_merge_pr is different: it actually changes "
+    "what's on main, so calling it does not execute immediately — it stages the action "
+    "and you must clearly state which PR and describe what merging it will do, then ask "
+    "the owner to explicitly confirm before it happens. Never claim a PR is merged "
+    "unless you actually called git_merge_pr and it was confirmed."
 )

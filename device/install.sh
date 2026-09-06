@@ -155,6 +155,7 @@ cat > "$INSTALL_DIR/device.json" <<EOF
   "vad_margin": 2.5,
   "input_device": null,
   "output_device": null,
+  "output_rate": null,
   "chime": true
 }
 EOF

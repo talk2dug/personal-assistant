@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import business_db, db
+from . import business_db, db, staff
 from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
 from . import location_tools
@@ -1203,7 +1203,36 @@ def _dispatch_tool_call(
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None,
     git_ops: "GitOpsContext | None" = None,
+    employee_key: str | None = None,
 ) -> str:
+    if name == "request_capability":
+        # The one tool every employee has regardless of tier -- see
+        # business_tools.REQUEST_CAPABILITY_TOOLS. Approving the review item this
+        # creates is the actual grant (business_tools.apply_review_decision), so the
+        # owner doesn't have to separately go find and run the grant themselves.
+        emp = staff.get_staff(db_path, employee_key) if employee_key else None
+        who = emp["title"] if emp else "An employee"
+        tier = arguments.get("requested_tier", "")
+        item_id = business_db.create_review_item(
+            db_path, requesting_user_id,
+            title=f"{who} requests {tier} access", kind="other",
+            summary=arguments.get("reason", ""),
+            detail=json.dumps({
+                "employee_key": employee_key, "requested_tier": tier,
+                "reason": arguments.get("reason", ""),
+            }),
+            source_agent=employee_key or "unknown",
+            ref_table="capability_requests", ref_id=(emp["id"] if emp else None),
+        )
+        return json.dumps({
+            "ok": True, "review_item_id": item_id,
+            "message": (
+                "On the Review page now, awaiting the owner's approval. State plainly in "
+                "your output that this assignment is blocked pending that approval -- do "
+                "not guess, stub, or otherwise work around the missing capability."
+            ),
+        })
+
     if name == "add_reminder":
         due_at_utc = _local_to_utc_iso(arguments["due_at"], tz_name)
         reminder_id = db.add_reminder(

@@ -1,4 +1,4 @@
-ï»¿"""Shared startup wiring for anything that needs Era/Calendar context â€” used by both
+﻿"""Shared startup wiring for anything that needs Era/Calendar context — used by both
 main.py (Telegram) and web_main.py (the web UI), so the two entrypoints don't duplicate
 this logic.
 """
@@ -7,16 +7,18 @@ import os
 import shutil
 from pathlib import Path
 
-from . import business_db, db, gpu_bridge, market_data, paper_trading, personal_db, staff
+from . import business_db, db, gpu_bridge, market_data, ops_plans, paper_trading, personal_db, staff
 from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
 from .claude_cli import ClaudeCLIClient
 from .engine import (
-    AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, HomeAssistantContext,
-    KrogerContext, LetterStreamContext, MailContext, ObsidianContext, PersonalContext, PhoneContext,
-    TicketmasterContext,
+    AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, GitOpsContext,
+    HomeAssistantContext, KrogerContext, LetterStreamContext, MailContext, ObsidianContext,
+    PersonalContext, PhoneContext, TicketmasterContext,
 )
+from .git_ops import GitOpsClient
+from .git_tools import GIT_TOOLS
 from .personal_tools import PersonalClient
 from .home_assistant_client import HomeAssistantClient
 from .kroger_recipe import RECIPE_TOOL_SCHEMA, KrogerRecipeClient
@@ -24,6 +26,7 @@ from .mail_client import MailClient
 from .mcp_client import MCPClient
 from .mcp_stdio_client import StdioMCPClient
 from .obsidian_client import ObsidianClient
+from .ssh_ops import SSHOpsClient
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +59,8 @@ def build_notifier(cfg, telegram_notify, home_assistant=None):
 
     This is what makes "send your notifications to my phone when I'm out" actually mean
     something. Without it the policy would only govern notifications Jarvis chose to send
-    during a conversation, while reminders â€” the ones that matter most when you're not at
-    a screen â€” would keep going to Telegram regardless.
+    during a conversation, while reminders — the ones that matter most when you're not at
+    a screen — would keep going to Telegram regardless.
 
     Policy lives in the settings table and is read per send, not cached, so changing it in
     chat takes effect on the next reminder rather than the next restart.
@@ -88,9 +91,9 @@ def build_notifier(cfg, telegram_notify, home_assistant=None):
                     if policy != "both":
                         return
                 else:
-                    logger.warning("phone notify failed (%s) â€” falling back to Telegram", result["error"])
+                    logger.warning("phone notify failed (%s) — falling back to Telegram", result["error"])
             except Exception:
-                logger.exception("phone notify failed â€” falling back to Telegram")
+                logger.exception("phone notify failed — falling back to Telegram")
 
         telegram_notify(chat_id, text)
 
@@ -99,7 +102,7 @@ def build_notifier(cfg, telegram_notify, home_assistant=None):
 
 def build_gpu_bridge(cfg):
     """simrig is a real machine that gets gamed on, rebooted and unplugged. An
-    unreachable bridge must only disable offloading, never take down the assistant â€”
+    unreachable bridge must only disable offloading, never take down the assistant —
     same defensive posture as the phone and Home Assistant contexts. It's still returned
     when unreachable, so the queue accepts work and drains when the box comes back."""
     if not cfg.gpu_bridge_enabled or not cfg.gpu_bridge_host:
@@ -125,14 +128,14 @@ def build_gpu_bridge(cfg):
             f", MISSING: {missing}" if missing else "",
         )
     else:
-        logger.warning("GPU bridge: %s unreachable at startup â€” jobs will queue until it returns",
+        logger.warning("GPU bridge: %s unreachable at startup — jobs will queue until it returns",
                        cfg.gpu_bridge_host)
     return bridge
 
 
 def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None) -> BusinessContext | None:
     """The business side is owner-only and entirely local, so unlike Era/mail/HA there's
-    no network dependency to fail at startup â€” if a profile is configured and we know who
+    no network dependency to fail at startup — if a profile is configured and we know who
     the owner is, it works."""
     if not cfg.business or owner_user_id is None:
         return None
@@ -140,21 +143,47 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     staff.init_staff_db(cfg.db_path)
     market_data.init_market_db(cfg.db_path)
     paper_trading.init_paper_db(cfg.db_path)
-    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge)
+    ops_plans.init_ops_plans_db(cfg.db_path)
+    # ssh_hosts defaults to {} (no hosts registered) rather than gating on a whole
+    # separate enabled flag -- propose_ops_plan already refuses any step targeting an
+    # unregistered host, so an empty registry is already a safe, self-explaining no-op.
+    ssh_ops = SSHOpsClient(cfg.ssh_hosts) if cfg.ssh_hosts else None
+    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge, ssh_ops=ssh_ops)
     scheduled = cfg.business_agents_enabled and hasattr(llm, "research")
     logger.info(
         "Business: %s (%s), agents %s", cfg.business.name, cfg.business.location,
         "scheduled" if scheduled
         else ("on-demand only" if hasattr(llm, "research") else "unavailable on this LLM backend"),
     )
+    if ssh_ops is not None:
+        logger.info("Ops plans: %d SSH host(s) registered (%s)", len(cfg.ssh_hosts), ", ".join(sorted(cfg.ssh_hosts)))
     return BusinessContext(
         mcp_client=client, profile=cfg.business, agents_scheduled=scheduled,
         has_gpu_bridge=bridge is not None,
     )
 
 
+# Merging to main is the only git tool with real consequence -- see GitOpsContext's
+# docstring. Branch/write/push/PR-open (including reading the repo) are all reversible
+# and execute immediately.
+GIT_SENSITIVE_TOOLS = {"git_merge_pr"}
+
+
+def build_git_ops_context(cfg) -> GitOpsContext | None:
+    """Dev-team git tools: off unless both a target repo and a PAT are configured."""
+    if not cfg.github_repo or not cfg.github_pat:
+        return None
+    client = GitOpsClient(
+        cfg.github_repo, cfg.github_pat, cfg.git_workspace_path,
+        author_name=cfg.git_author_name, author_email=cfg.git_author_email,
+    )
+    logger.info("Git ops: targeting %s, %d tools, %d gated as sensitive",
+               cfg.github_repo, len(GIT_TOOLS), len(GIT_SENSITIVE_TOOLS))
+    return GitOpsContext(mcp_client=client, git_tools=GIT_TOOLS, sensitive_tools=GIT_SENSITIVE_TOOLS)
+
+
 def build_personal_context(cfg, owner_user_id: int | None, letterstream: LetterStreamContext | None = None) -> PersonalContext | None:
-    """The owner's own projects/tasks/errands/pantry/credit tracking â€” core owner data,
+    """The owner's own projects/tasks/errands/pantry/credit tracking — core owner data,
     not an opt-in feature like the business profile, so the only real gate is knowing who
     the owner is.
 
@@ -190,7 +219,7 @@ def build_era_context(cfg) -> EraContext | None:
 
 def build_phone_context(cfg) -> PhoneContext | None:
     """Unlike Era/CalDAV (stable cloud APIs), the phone MCP server runs on an Android
-    phone that can be asleep, backgrounded, off wifi, or mid-reboot at any given moment â€”
+    phone that can be asleep, backgrounded, off wifi, or mid-reboot at any given moment —
     far more likely to be unreachable at startup. That must only disable the phone
     feature, never take down the whole assistant (Telegram/reminders/web), so failures
     here are caught and logged rather than propagated."""
@@ -200,7 +229,7 @@ def build_phone_context(cfg) -> PhoneContext | None:
         mcp_client = MCPClient(cfg.phone_mcp_url)
         discovered = mcp_client.list_tools()
     except Exception as e:
-        logger.warning("Phone MCP server unreachable at startup (%s) â€” phone tools disabled this session", e)
+        logger.warning("Phone MCP server unreachable at startup (%s) — phone tools disabled this session", e)
         return None
     phone_tools = [
         {
@@ -214,7 +243,7 @@ def build_phone_context(cfg) -> PhoneContext | None:
 
 
 def build_mail_context(cfg) -> MailContext | None:
-    """iCloud Mail shares the CalDAV Apple ID/app-specific password (Phase 3) â€” same
+    """iCloud Mail shares the CalDAV Apple ID/app-specific password (Phase 3) — same
     account, different protocol. A bad password or Apple-side account change should
     only disable mail, never take down the rest of the assistant, so the startup
     connectivity check is guarded the same way build_phone_context's is."""
@@ -224,14 +253,14 @@ def build_mail_context(cfg) -> MailContext | None:
     try:
         client.list_recent(limit=1)
     except Exception as e:
-        logger.warning("iCloud Mail unreachable/auth failed at startup (%s) â€” mail tools disabled this session", e)
+        logger.warning("iCloud Mail unreachable/auth failed at startup (%s) — mail tools disabled this session", e)
         return None
     logger.info("Mail: iCloud IMAP/SMTP connected, %d tools gated as sensitive", len(cfg.mail_sensitive_tools))
     return MailContext(mcp_client=client, sensitive_tools=set(cfg.mail_sensitive_tools))
 
 
 def build_obsidian_context(cfg) -> ObsidianContext | None:
-    """The Obsidian vault is just a folder on disk â€” no auth, no network. A missing
+    """The Obsidian vault is just a folder on disk — no auth, no network. A missing
     vault path disables it; a real filesystem error (permissions, a bad drive letter)
     should only disable the vault, never take down the rest of the assistant, same
     defensive posture as the other optional contexts."""
@@ -241,7 +270,7 @@ def build_obsidian_context(cfg) -> ObsidianContext | None:
         client = ObsidianClient(cfg.obsidian_vault_path)
         client.list_notes()  # cheap sanity check that the vault path is real/readable
     except Exception as e:
-        logger.warning("Obsidian vault unreachable at startup (%s) â€” vault tools disabled this session", e)
+        logger.warning("Obsidian vault unreachable at startup (%s) — vault tools disabled this session", e)
         return None
     logger.info("Obsidian: vault connected at %s", cfg.obsidian_vault_path)
     return ObsidianContext(mcp_client=client)
@@ -249,7 +278,7 @@ def build_obsidian_context(cfg) -> ObsidianContext | None:
 
 def build_home_assistant_context(cfg) -> HomeAssistantContext | None:
     """Home Assistant is a real device on the LAN that could be off/rebooting/
-    unreachable at any moment â€” same reasoning as build_phone_context, only disable
+    unreachable at any moment — same reasoning as build_phone_context, only disable
     the smart-home tools on failure, never take down the rest of the assistant."""
     if not cfg.ha_base_url or not cfg.ha_token:
         return None
@@ -257,7 +286,7 @@ def build_home_assistant_context(cfg) -> HomeAssistantContext | None:
         client = HomeAssistantClient(cfg.ha_base_url, cfg.ha_token, cfg.ha_notify_target)
         client.list_entities()
     except Exception as e:
-        logger.warning("Home Assistant unreachable at startup (%s) â€” HA tools disabled this session", e)
+        logger.warning("Home Assistant unreachable at startup (%s) — HA tools disabled this session", e)
         return None
     logger.info(
         "Home Assistant: connected at %s, sensitive domains: %s", cfg.ha_base_url, cfg.ha_sensitive_domains
@@ -316,7 +345,7 @@ def build_airbnb_context(cfg) -> AirbnbContext | None:
     exe = _npm_global_bin("mcp-server-airbnb")
     if exe is None:
         logger.warning(
-            "Airbnb MCP server not found (npm install -g @openbnb/mcp-server-airbnb) â€” disabled this session"
+            "Airbnb MCP server not found (npm install -g @openbnb/mcp-server-airbnb) — disabled this session"
         )
         return None
     # --ignore-robots-txt: without it, Airbnb's own robots.txt blocks the one search path
@@ -326,7 +355,7 @@ def build_airbnb_context(cfg) -> AirbnbContext | None:
     try:
         tools = _mcp_tool_schemas(client.list_tools())
     except Exception as e:
-        logger.warning("Airbnb MCP server failed to start (%s) â€” disabled this session", e)
+        logger.warning("Airbnb MCP server failed to start (%s) — disabled this session", e)
         return None
     logger.info("Airbnb: %d tools discovered", len(tools))
     return AirbnbContext(mcp_client=client, airbnb_tools=tools)
@@ -340,7 +369,7 @@ def build_ticketmaster_context(cfg) -> TicketmasterContext | None:
     exe = _npm_global_bin("mcp-server-ticketmaster")
     if exe is None:
         logger.warning(
-            "Ticketmaster MCP server not found (npm install -g @delorenj/mcp-server-ticketmaster) â€” "
+            "Ticketmaster MCP server not found (npm install -g @delorenj/mcp-server-ticketmaster) — "
             "disabled this session"
         )
         return None
@@ -348,7 +377,7 @@ def build_ticketmaster_context(cfg) -> TicketmasterContext | None:
     try:
         tools = _mcp_tool_schemas(client.list_tools())
     except Exception as e:
-        logger.warning("Ticketmaster MCP server failed to start (%s) â€” disabled this session", e)
+        logger.warning("Ticketmaster MCP server failed to start (%s) — disabled this session", e)
         return None
     logger.info("Ticketmaster: %d tools discovered", len(tools))
     return TicketmasterContext(mcp_client=client, ticketmaster_tools=tools)
@@ -371,7 +400,7 @@ def build_kroger_context(cfg) -> KrogerContext | None:
     exe = str(Path(__file__).resolve().parents[2] / ".venv-kroger" / "Scripts" / "kroger-mcp.exe")
     if not Path(exe).exists():
         logger.warning("Kroger MCP server not found at %s (pip install kroger-mcp into "
-                       ".venv-kroger) â€” disabled this session", exe)
+                       ".venv-kroger) — disabled this session", exe)
         return None
     raw_client = StdioMCPClient(exe, env={
         "KROGER_CLIENT_ID": cfg.kroger_client_id,
@@ -381,7 +410,7 @@ def build_kroger_context(cfg) -> KrogerContext | None:
     try:
         tools = _mcp_tool_schemas(raw_client.list_tools())
     except Exception as e:
-        logger.warning("Kroger MCP server failed to start (%s) â€” disabled this session", e)
+        logger.warning("Kroger MCP server failed to start (%s) — disabled this session", e)
         return None
     # add_recipe_to_cart is synthetic (Jarvis's own, not part of kroger-mcp's catalog) --
     # see kroger_recipe.py for why matching a recipe's ingredients to real products is a
@@ -454,14 +483,14 @@ def build_ccxt_context(cfg) -> CCXTContext | None:
     exe = _npm_global_bin("mcp-server-ccxt")
     if exe is None:
         logger.warning(
-            "CCXT MCP server not found (npm install -g @mcpfun/mcp-server-ccxt) â€” disabled this session"
+            "CCXT MCP server not found (npm install -g @mcpfun/mcp-server-ccxt) — disabled this session"
         )
         return None
     raw = StdioMCPClient(exe, env={"DEFAULT_EXCHANGE": cfg.ccxt_exchange})
     try:
         discovered = raw.list_tools()
     except Exception as e:
-        logger.warning("CCXT MCP server failed to start (%s) â€” disabled this session", e)
+        logger.warning("CCXT MCP server failed to start (%s) — disabled this session", e)
         return None
 
     tools = [
@@ -496,7 +525,7 @@ def build_letterstream_context(cfg) -> LetterStreamContext | None:
     if not all(required_from_fields):
         logger.warning(
             "LetterStream is configured but the return address is incomplete "
-            "(letterstream_from_name/address/city/state/zip) â€” disabled this session"
+            "(letterstream_from_name/address/city/state/zip) — disabled this session"
         )
         return None
 
@@ -506,7 +535,7 @@ def build_letterstream_context(cfg) -> LetterStreamContext | None:
     try:
         status = client.account_status()
     except Exception as e:
-        logger.warning("LetterStream account check failed (%s) â€” disabled this session", e)
+        logger.warning("LetterStream account check failed (%s) — disabled this session", e)
         return None
 
     from_addr = {

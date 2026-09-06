@@ -74,14 +74,10 @@ class ClaudeCLIClient:
 
     # ---- internals -------------------------------------------------------
 
-    def _base_command(self, system_prompt: str, prompt: str) -> list[str]:
+    def _base_command(self) -> list[str]:
         return [
-            self.cli_path, "-p", prompt,
+            self.cli_path, "-p",
             "--model", self.model,
-            # Replaces Claude Code's built-in coding-agent system prompt outright rather
-            # than appending to it — Jarvis is not a coding agent and shouldn't inherit
-            # those instructions.
-            "--system-prompt", system_prompt,
             "--restricted",
             # Ignore any MCP servers configured globally for the user's own Claude Code
             # use; this subprocess gets Jarvis's bridge and nothing else.
@@ -90,16 +86,34 @@ class ClaudeCLIClient:
             "--output-format", "json",
         ]
 
-    def _run(self, command: list[str], env: dict | None = None, cwd: str | None = None) -> str:
+    @staticmethod
+    def _write_system_prompt(workdir: str, system_prompt: str) -> str:
+        """Writes the system prompt to a file and returns its path, for
+        --system-prompt-file. Replaces Claude Code's built-in coding-agent system prompt
+        outright rather than appending to it — Jarvis is not a coding agent and shouldn't
+        inherit those instructions."""
+        path = os.path.join(workdir, "system_prompt.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(system_prompt)
+        return path
+
+    def _run(self, command: list[str], prompt: str, env: dict | None = None, cwd: str | None = None) -> str:
         """Runs the CLI and returns the final assistant text.
+
+        The prompt is piped over stdin rather than passed as a command-line argument
+        (with -p given no value): Windows caps a process's total command line at roughly
+        32K characters, and a rendered conversation history routinely blows past that,
+        failing with WinError 206 ("the filename or extension is too long"). Stdin has
+        no such limit. The system prompt gets the same treatment via
+        --system-prompt-file, for the same reason.
 
         Failures raise, so handle_message can report them honestly rather than passing a
         blank or half-formed answer off as an answer.
         """
         try:
             proc = subprocess.run(
-                command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=self.timeout, env=env, cwd=cwd,
+                command, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=self.timeout, env=env, cwd=cwd,
             )
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"the request took longer than {self.timeout}s")
@@ -195,7 +209,8 @@ class ClaudeCLIClient:
         # tools to the working directory, so if a camera snapshot makes Read necessary,
         # the only thing in reach is that snapshot.
         with tempfile.TemporaryDirectory(prefix="jarvis-claude-") as workdir:
-            command = self._base_command(system_prompt, prompt)
+            command = self._base_command()
+            command += ["--system-prompt-file", self._write_system_prompt(workdir, system_prompt)]
 
             if tools:
                 self._setup_tool_bridge(workdir, tools, env, command)
@@ -206,14 +221,14 @@ class ClaudeCLIClient:
                     f.write(image_bytes)
                 denied.remove("Read")
                 allowed.append("Read")
-                command[2] += (
+                prompt += (
                     f"\n\nThe user attached a photo from their camera with this message. "
                     f"Read the image file 'snapshot.jpg' in the current directory to see it, "
                     f"and take it into account when replying."
                 )
 
             command += ["--allowed-tools", ",".join(allowed), "--disallowed-tools", ",".join(denied)]
-            return self._run(command, env=env, cwd=workdir)
+            return self._run(command, prompt, env=env, cwd=workdir)
 
     def research(self, instructions: str, system_prompt: str | None = None, timeout: int | None = None) -> str:
         """One-shot research task with web search, for the background agents.
@@ -224,20 +239,21 @@ class ClaudeCLIClient:
         running unattended on a timer should gather and report, not quietly send email
         or change the house. Anything actionable comes back as a row the owner reviews.
         """
-        command = self._base_command(
-            system_prompt or "You are a research assistant. Be accurate and concise.", instructions,
-        )
-        command += [
-            "--allowed-tools", "WebSearch",
-            "--disallowed-tools", ",".join(t for t in DENIED_TOOLS if t != "WebSearch"),
-        ]
-        previous_timeout = self.timeout
-        try:
-            if timeout:
-                self.timeout = timeout
-            return self._run(command)
-        finally:
-            self.timeout = previous_timeout
+        with tempfile.TemporaryDirectory(prefix="jarvis-research-") as workdir:
+            command = self._base_command()
+            command += ["--system-prompt-file", self._write_system_prompt(
+                workdir, system_prompt or "You are a research assistant. Be accurate and concise.")]
+            command += [
+                "--allowed-tools", "WebSearch",
+                "--disallowed-tools", ",".join(t for t in DENIED_TOOLS if t != "WebSearch"),
+            ]
+            previous_timeout = self.timeout
+            try:
+                if timeout:
+                    self.timeout = timeout
+                return self._run(command, instructions, cwd=workdir)
+            finally:
+                self.timeout = previous_timeout
 
     def engineer(
         self, instructions: str, system_prompt: str, tools: list[dict], timeout: int | None = None,
@@ -261,7 +277,8 @@ class ClaudeCLIClient:
         denied = list(DENIED_TOOLS)
 
         with tempfile.TemporaryDirectory(prefix="jarvis-engineer-") as workdir:
-            command = self._base_command(system_prompt, instructions)
+            command = self._base_command()
+            command += ["--system-prompt-file", self._write_system_prompt(workdir, system_prompt)]
             self._setup_tool_bridge(workdir, tools, env, command)
             command += ["--allowed-tools", "mcp__jarvis,WebSearch", "--disallowed-tools", ",".join(denied)]
 
@@ -269,7 +286,7 @@ class ClaudeCLIClient:
             try:
                 if timeout:
                     self.timeout = timeout
-                return self._run(command, env=env, cwd=workdir)
+                return self._run(command, instructions, env=env, cwd=workdir)
             finally:
                 self.timeout = previous_timeout
 
@@ -285,9 +302,11 @@ class ClaudeCLIClient:
             f"{'Jarvis' if m.get('role') == 'assistant' else 'User'}: {m.get('content', '')}"
             for m in messages if m.get("role") != "system"
         )
-        command = self._base_command(system or "You are Jarvis.", body)
-        command += ["--disallowed-tools", ",".join(DENIED_TOOLS)]
-        return {"role": "assistant", "content": self._run(command)}
+        with tempfile.TemporaryDirectory(prefix="jarvis-chat-") as workdir:
+            command = self._base_command()
+            command += ["--system-prompt-file", self._write_system_prompt(workdir, system or "You are Jarvis.")]
+            command += ["--disallowed-tools", ",".join(DENIED_TOOLS)]
+            return {"role": "assistant", "content": self._run(command, body, cwd=workdir)}
 
 
 def _python_executable() -> str:

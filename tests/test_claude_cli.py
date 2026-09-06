@@ -62,15 +62,21 @@ def test_render_omits_history_block_for_a_first_message(client):
 def test_current_time_goes_in_the_prompt_not_the_system_prompt(client):
     """A timestamp in the system prompt would bust Anthropic's prompt cache every turn,
     re-billing Claude Code's ~25k-token preamble instead of reading it back cheaply."""
-    with patch("subprocess.run", return_value=ok()) as run:
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        sp_path = command[command.index("--system-prompt-file") + 1]
+        captured["system_prompt"] = open(sp_path, encoding="utf-8").read()
+        captured["input"] = kwargs["input"]
+        return ok()
+
+    with patch("subprocess.run", side_effect=fake_run):
         client.converse(
             system_prompt="You are Jarvis.", history=[{"role": "user", "content": "hi"}],
             now="2026-09-03T10:00:00", tz_name="America/New_York",
         )
-    command = run.call_args.args[0]
-    system_prompt = command[command.index("--system-prompt") + 1]
-    assert "2026-09-03T10:00:00" not in system_prompt
-    assert "2026-09-03T10:00:00" in command[2]
+    assert "2026-09-03T10:00:00" not in captured["system_prompt"]
+    assert "2026-09-03T10:00:00" in captured["input"]
 
 
 def test_sandbox_denies_every_known_escape_path(client):
@@ -131,7 +137,7 @@ def test_image_unlocks_read_only_inside_the_per_turn_workdir(client):
     denied = command[command.index("--disallowed-tools") + 1].split(",")
     allowed = command[command.index("--allowed-tools") + 1].split(",")
     assert "Read" in allowed and "Read" not in denied
-    assert "snapshot.jpg" in command[2]
+    assert "snapshot.jpg" in kwargs["input"]
     # cwd is the throwaway per-turn directory, so --restricted's file confinement means
     # Read can only reach the snapshot itself.
     assert kwargs["cwd"] is not None and "jarvis-claude-" in kwargs["cwd"]
@@ -234,8 +240,7 @@ def test_engineer_has_no_conversation_history_rendering(client):
     into the prompt, unlike converse()'s history-block rendering."""
     with patch("subprocess.run", return_value=ok()) as run:
         client.engineer("branch and push the fix", system_prompt="s", tools=[])
-    command = run.call_args.args[0]
-    assert command[2] == "branch and push the fix"
+    assert run.call_args.kwargs["input"] == "branch and push the fix"
 
 
 def test_engineer_respects_a_custom_timeout_and_restores_the_default(client):

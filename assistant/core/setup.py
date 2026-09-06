@@ -7,7 +7,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import business_db, db, gpu_bridge, market_data, paper_trading, personal_db, staff
+from . import business_db, db, gpu_bridge, market_data, ops_plans, paper_trading, personal_db, staff
 from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
@@ -19,6 +19,7 @@ from .engine import (
 )
 from .git_ops import GitOpsClient
 from .git_tools import GIT_TOOLS
+from .ssh_ops import SSHOpsClient
 from .personal_tools import PersonalClient
 from .home_assistant_client import HomeAssistantClient
 from .kroger_recipe import RECIPE_TOOL_SCHEMA, KrogerRecipeClient
@@ -142,13 +143,20 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     staff.init_staff_db(cfg.db_path)
     market_data.init_market_db(cfg.db_path)
     paper_trading.init_paper_db(cfg.db_path)
-    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge)
+    ops_plans.init_ops_plans_db(cfg.db_path)
+    # ssh_hosts defaults to {} (no hosts registered) rather than gating on a whole
+    # separate enabled flag -- propose_ops_plan already refuses any step targeting an
+    # unregistered host, so an empty registry is already a safe, self-explaining no-op.
+    ssh_ops = SSHOpsClient(cfg.ssh_hosts) if cfg.ssh_hosts else None
+    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge, ssh_ops=ssh_ops)
     scheduled = cfg.business_agents_enabled and hasattr(llm, "research")
     logger.info(
         "Business: %s (%s), agents %s", cfg.business.name, cfg.business.location,
         "scheduled" if scheduled
         else ("on-demand only" if hasattr(llm, "research") else "unavailable on this LLM backend"),
     )
+    if ssh_ops is not None:
+        logger.info("Ops plans: %d SSH host(s) registered (%s)", len(cfg.ssh_hosts), ", ".join(sorted(cfg.ssh_hosts)))
     return BusinessContext(
         mcp_client=client, profile=cfg.business, agents_scheduled=scheduled,
         has_gpu_bridge=bridge is not None,

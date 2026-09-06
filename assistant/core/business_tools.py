@@ -10,12 +10,65 @@ notes, tasks, leads, expense rows. Nothing leaves the machine, nothing spends mo
 nothing touches the physical world, which is the line the confirmation gate exists to
 guard. The agents that DO reach the internet run unattended on a timer and deliberately
 have no tools at all (see agents.py).
+
+The one deliberate exception is the ops-plan workflow (propose_ops_plan/decide_review_item):
+it touches real servers, but through the existing Review-page approval gate rather than
+pending_actions -- the owner's own requirement was one approval for a whole plan (what,
+how tested, how verified, rollback), not a yes/no per command. See ops_plans.py.
 """
 import json
 import threading
 from datetime import date, timedelta
 
-from . import agents, business_db, market_data, paper_trading, staff
+from . import agents, business_db, market_data, ops_plans, paper_trading, staff
+
+# Split out from BUSINESS_TOOLS (rather than just another entry in that one big list) so
+# staff.py's execute-tier employees can be handed exactly this narrow set alongside
+# GIT_TOOLS, without also getting hiring/market-data/paper-trading and everything else
+# business tools cover -- same "purpose-built, not the whole catalog" principle Phase 2
+# established for git tools.
+OPS_PLAN_TOOLS = [
+    {"type": "function", "function": {
+        "name": "propose_ops_plan",
+        "description": (
+            "Propose a plan of real changes to one or more servers. Nothing runs until "
+            "the owner approves the WHOLE plan on the Review page; there is no per-"
+            "command confirmation. Steps run in the order given for phase in "
+            "change/test/verify, stopping at the first failure; if that happens every "
+            "rollback step then runs. A plan needs at least one rollback step -- what "
+            "happens if it fails is not optional. Refer to hosts only by their short "
+            "registered name (check list_ops_plans or ask the owner if unsure which "
+            "names exist) -- never guess an IP or credential."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "summary": {"type": "string", "description": "One or two sentences: what this plan does and why."},
+            "steps": {
+                "type": "array",
+                "description": "Ordered. Include change steps (the actual work), test steps (validate the change itself), verify steps (confirm the whole system still works), and at least one rollback step.",
+                "items": {"type": "object", "properties": {
+                    "phase": {"type": "string", "enum": ["change", "test", "verify", "rollback"]},
+                    "host": {"type": "string", "description": "A registered host name, not a raw address."},
+                    "command": {"type": "string"},
+                    "purpose": {"type": "string", "description": "One line: why this step, for the owner's review."},
+                }, "required": ["phase", "host", "command"]},
+            },
+        }, "required": ["summary", "steps"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_ops_plans",
+        "description": "Ops plans and their status -- proposed/awaiting approval, running, succeeded, or failed.",
+        "parameters": {"type": "object", "properties": {
+            "status": {"type": "string", "enum": ["proposed", "approved", "rejected", "running", "succeeded", "failed"]},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "get_ops_plan_status",
+        "description": "One plan's full detail: every step, its status, and its output so far. Use this to check on a running or finished plan.",
+        "parameters": {"type": "object", "properties": {
+            "plan_id": {"type": "integer"},
+        }, "required": ["plan_id"]},
+    }},
+]
 
 BUSINESS_TOOLS = [
     {"type": "function", "function": {
@@ -649,7 +702,7 @@ BUSINESS_TOOLS = [
             "limit": {"type": "integer"},
         }, "required": []},
     }},
-]
+] + OPS_PLAN_TOOLS
 
 BUSINESS_SYSTEM_NOTE = (
     " You are also the owner's second in command for his business, {business_name}, based in "
@@ -684,6 +737,17 @@ BUSINESS_SYSTEM_NOTE = (
     "one, and attach generated images by their file path so he can actually see them. Check "
     "list_review_queue before acting on anything that needed approval, and never treat an "
     "un-decided item as approved."
+    " Real changes to real servers go through the SAME Review page, via propose_ops_plan — "
+    "this is different from every other business tool because it can actually touch a "
+    "live system. A plan is a list of steps (each one tagged change/test/verify/rollback, "
+    "referring to a host only by its short registered name, never a raw address you'd "
+    "have to guess) and it must include what will be done, how the change itself will be "
+    "tested, how the whole system will be verified to still work, and a rollback step for "
+    "if any of that fails — a plan with no rollback step is refused outright. Nothing runs "
+    "until the owner approves the WHOLE plan once; there is no per-command confirmation "
+    "and you must never imply one step already ran before the plan is approved. Once "
+    "approved it runs unattended and list_ops_plans/get_ops_plan_status show how it's "
+    "going or what happened."
     " You can also hire. Beyond the fixed agents above, the owner can add specialists — a "
     "developer, a front end designer, a copywriter — and you create them with hire_employee "
     "from a job description. The job description is not flavour text: it is the "
@@ -782,12 +846,17 @@ def _describe_shift(emp) -> str:
 class BusinessClient:
     """Executes the business tools. Same call_tool shape as the other integrations."""
 
-    def __init__(self, db_path: str, owner_user_id: int, llm=None, profile=None, bridge=None):
+    def __init__(self, db_path: str, owner_user_id: int, llm=None, profile=None, bridge=None, ssh_ops=None):
         self.db_path = db_path
         self.owner_user_id = owner_user_id
         self.llm = llm
         self.profile = profile
         self.bridge = bridge
+        # The ops-plan workflow's SSHOpsClient -- held here (not a separate engine.py
+        # Context) since proposing/approving a plan is a business-tools concern like
+        # hiring, and run_command is deliberately never exposed as its own callable tool
+        # (see ssh_ops.py's docstring); this is the only place it's ever invoked from.
+        self.ssh_ops = ssh_ops
 
     # -- agent triggering ----------------------------------------------------
 
@@ -978,9 +1047,54 @@ class BusinessClient:
                         business_db.update_store_listing(db_path, owner, ref_id, status=target)
                     elif ref_table == "social_posts":
                         business_db.update_social_post(db_path, owner, ref_id, status=target)
+                    elif ref_table == "ops_plans":
+                        # This is the actual trigger: approving the review item is the
+                        # owner's one approval for the whole plan, and only here does the
+                        # background runner actually start touching a real server.
+                        ops_plans.set_plan_status(db_path, ref_id, target)
+                        if target == "approved" and self.ssh_ops is not None:
+                            ops_plans.run_plan_async(db_path, ref_id, self.ssh_ops)
                 except Exception:
                     pass
             return {"ok": True, "item": item}
+
+        if name == "propose_ops_plan":
+            steps = arguments.get("steps") or []
+            if self.ssh_ops is not None:
+                known = set(self.ssh_ops.list_hosts())
+                unknown = sorted({s.get("host") for s in steps if s.get("host") not in known})
+                if unknown:
+                    return {"ok": False, "error": (
+                        f"unknown host(s) {', '.join(unknown)}; registered hosts: "
+                        f"{', '.join(sorted(known)) or '(none configured)'}")}
+            try:
+                plan_id = ops_plans.create_plan(db_path, owner, arguments["summary"], steps)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            detail = ops_plans.render_plan_detail(arguments["summary"], ops_plans.get_plan(db_path, plan_id)["steps"])
+            item_id = business_db.create_review_item(
+                db_path, owner, f"Ops plan: {arguments['summary'][:60]}", "other",
+                summary=arguments["summary"], detail=detail, source_agent="ops-plan",
+                ref_table="ops_plans", ref_id=plan_id, priority="normal",
+            )
+            ops_plans.set_review_item_id(db_path, plan_id, item_id)
+            return {
+                "ok": True, "plan_id": plan_id, "review_item_id": item_id,
+                "message": (
+                    "On the Review page now, awaiting the owner's approval for the whole "
+                    "plan. Nothing runs until he approves it there or in chat — tell him "
+                    "it's waiting, do not claim any of it has happened yet."
+                ),
+            }
+
+        if name == "list_ops_plans":
+            return {"plans": ops_plans.list_plans(db_path, owner, arguments.get("status"))}
+
+        if name == "get_ops_plan_status":
+            plan = ops_plans.get_plan(db_path, arguments["plan_id"])
+            if plan is None or plan["owner_user_id"] != owner:
+                return {"ok": False, "error": f"no such plan {arguments['plan_id']}"}
+            return {"ok": True, "plan": plan}
 
         if name == "generate_media":
             if self.bridge is None:

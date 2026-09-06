@@ -743,7 +743,9 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> 
                     "this LLM backend has no engineer() method, so execute-tier "
                     "employees cannot be given real tool access on it")
             from .git_tools import GIT_TOOLS
-            output = llm.engineer(prompt, system_prompt=emp["system_prompt"], tools=GIT_TOOLS, timeout=timeout)
+            from .business_tools import OPS_PLAN_TOOLS
+            output = llm.engineer(prompt, system_prompt=emp["system_prompt"],
+                                  tools=GIT_TOOLS + OPS_PLAN_TOOLS, timeout=timeout)
         else:
             output = llm.research(prompt, system_prompt=emp["system_prompt"], timeout=timeout)
         status, error = "delivered", None

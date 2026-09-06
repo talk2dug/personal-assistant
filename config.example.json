@@ -73,6 +73,10 @@
   "git_workspace_path": "../jarvis-git-workspace",
   "git_author_name": "Jarvis",
   "git_author_email": "jarvis@localhost",
+  "_comment_ssh_hosts": "Named hosts the ops-plan workflow may target — short name to {host, user, key_path or password}. The model only ever refers to a host by its short name; real address/credential stay server-side.",
+  "ssh_hosts": {
+    "example-host": {"host": "192.168.1.50", "user": "pi", "key_path": "~/.ssh/id_ed25519"}
+  },
   "users": [
     {"telegram_chat_id": "REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID", "display_name": "Dug", "role": "owner", "web_password": "PICK_A_PASSWORD"},
     {"telegram_chat_id": "REPLACE_WITH_GF_TELEGRAM_CHAT_ID", "display_name": "GF", "role": "partner", "web_password": "PICK_A_PASSWORD"}

@@ -11,7 +11,7 @@ import json
 import pytest
 
 from assistant.config import BusinessProfile
-from assistant.core import agents, business_db, staff
+from assistant.core import agents, business_db, ops_plans, staff
 from assistant.core.business_tools import BUSINESS_TOOLS, BusinessClient
 from assistant.core.engine import BusinessContext, _dispatch_tool_call, build_system_prompt, select_tools
 
@@ -429,3 +429,140 @@ def test_scheduler_registers_no_agent_jobs_when_disabled(tmp_path):
         assert "reminder_poll" in job_ids  # ordinary assistant work is untouched
     finally:
         started.shutdown(wait=False)
+
+
+# --- ops-plan workflow ----------------------------------------------------------
+
+class FakeSSHOps:
+    def __init__(self, hosts=("simrig", "touch1")):
+        self._hosts = list(hosts)
+        self.run_calls = []
+
+    def list_hosts(self):
+        return self._hosts
+
+    def run_command(self, host, command, timeout=120):
+        self.run_calls.append((host, command))
+        return {"ok": True, "host": host, "command": command, "exit_code": 0, "output": "ok"}
+
+
+def _plan_steps():
+    return [
+        {"phase": "change", "host": "simrig", "command": "do the thing", "purpose": "make the change"},
+        {"phase": "verify", "host": "simrig", "command": "check the thing", "purpose": "confirm it worked"},
+        {"phase": "rollback", "host": "simrig", "command": "undo the thing", "purpose": "revert if needed"},
+    ]
+
+
+def test_propose_ops_plan_creates_a_plan_and_a_linked_review_item(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps())
+
+    result = client.call_tool("propose_ops_plan", {"summary": "Fix the thing", "steps": _plan_steps()})
+
+    assert result["ok"] is True
+    plan = ops_plans.get_plan(db_path, result["plan_id"])
+    assert plan["status"] == "proposed"
+    assert plan["review_item_id"] == result["review_item_id"]
+    review_item = business_db.list_review_items(db_path, 1, status="pending")[0]
+    assert review_item["id"] == result["review_item_id"]
+    assert review_item["ref_table"] == "ops_plans" and review_item["ref_id"] == result["plan_id"]
+    assert "What will be done" in review_item["detail"]
+    assert "Plan of attack" in review_item["detail"]
+
+
+def test_propose_ops_plan_rejects_an_unregistered_host(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps(hosts=["simrig"]))
+
+    steps = _plan_steps()
+    steps[0]["host"] = "some-random-box"
+    result = client.call_tool("propose_ops_plan", {"summary": "Bad host", "steps": steps})
+
+    assert result["ok"] is False
+    assert "some-random-box" in result["error"]
+    assert ops_plans.list_plans(db_path, 1) == []  # nothing was created
+
+
+def test_propose_ops_plan_rejects_a_plan_with_no_rollback_step(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps())
+
+    steps = [s for s in _plan_steps() if s["phase"] != "rollback"]
+    result = client.call_tool("propose_ops_plan", {"summary": "No rollback", "steps": steps})
+
+    assert result["ok"] is False
+    assert "rollback" in result["error"]
+
+
+def test_propose_ops_plan_works_without_ssh_ops_configured(db_path):
+    """No host-validation possible without a registry, but proposing (and the owner
+    reviewing) must not require ssh_ops to already be wired up."""
+    ops_plans.init_ops_plans_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=None)
+
+    result = client.call_tool("propose_ops_plan", {"summary": "No ssh yet", "steps": _plan_steps()})
+
+    assert result["ok"] is True
+
+
+def test_list_and_get_ops_plan_status(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps())
+    created = client.call_tool("propose_ops_plan", {"summary": "Check on this", "steps": _plan_steps()})
+
+    listed = client.call_tool("list_ops_plans", {})
+    assert len(listed["plans"]) == 1 and listed["plans"][0]["id"] == created["plan_id"]
+
+    status = client.call_tool("get_ops_plan_status", {"plan_id": created["plan_id"]})
+    assert status["ok"] is True
+    assert len(status["plan"]["steps"]) == 3
+
+
+def test_get_ops_plan_status_refuses_someone_elses_plan(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    other_owner_plan = ops_plans.create_plan(db_path, 2, "Not yours", _plan_steps())
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps())
+
+    result = client.call_tool("get_ops_plan_status", {"plan_id": other_owner_plan})
+
+    assert result["ok"] is False
+
+
+def test_approving_the_review_item_actually_runs_the_plan(db_path, monkeypatch):
+    """The real trigger: approving on the Review page is the owner's one approval for
+    the whole plan, and this is the only place execution may start from."""
+    ops_plans.init_ops_plans_db(db_path)
+    ssh = FakeSSHOps()
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=ssh)
+    proposed = client.call_tool("propose_ops_plan", {"summary": "Run me", "steps": _plan_steps()})
+
+    # Run synchronously in-test rather than on a background thread, for determinism.
+    from assistant.core import business_tools
+    monkeypatch.setattr(business_tools.ops_plans, "run_plan_async", business_tools.ops_plans.run_plan)
+
+    result = client.call_tool("decide_review_item", {
+        "item_id": proposed["review_item_id"], "decision": "approved",
+    })
+
+    assert result["ok"] is True
+    plan = ops_plans.get_plan(db_path, proposed["plan_id"])
+    assert plan["status"] == "succeeded"
+    assert ("simrig", "do the thing") in ssh.run_calls
+    assert ("simrig", "undo the thing") not in ssh.run_calls  # never failed, so no rollback
+
+
+def test_rejecting_the_review_item_never_runs_anything(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    ssh = FakeSSHOps()
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=ssh)
+    proposed = client.call_tool("propose_ops_plan", {"summary": "Don't run me", "steps": _plan_steps()})
+
+    result = client.call_tool("decide_review_item", {
+        "item_id": proposed["review_item_id"], "decision": "rejected",
+    })
+
+    assert result["ok"] is True
+    plan = ops_plans.get_plan(db_path, proposed["plan_id"])
+    assert plan["status"] == "rejected"
+    assert ssh.run_calls == []

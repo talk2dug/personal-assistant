@@ -150,6 +150,12 @@ class Config:
     scan_ssh_password: str | None = None
     scan_ssh_users: list[str] = field(default_factory=lambda: ["pi", "jack"])
     scan_subnet: str = "192.168.0"
+    # Named registry of hosts the ops-plan workflow (assistant/core/ssh_ops.py) may
+    # target: {name: {"host", "user", "key_path"?, "password"?}}. The employee/model only
+    # ever refers to a host by its short name here -- the real address and credential are
+    # injected server-side, same principle as every other credential-injecting wrapper in
+    # this codebase (CCXT, git_ops), never a tool argument the model could leak or forge.
+    ssh_hosts: dict = field(default_factory=dict)
     piper_voice_path: str | None = None
     generated_media_path: str = "generated"
     # Master switch for unattended agent runs. Off by default and currently off in the
@@ -263,6 +269,7 @@ def load_config(path: str = "config.json") -> Config:
         scan_ssh_password=data.get("scan_ssh_password"),
         scan_ssh_users=data.get("scan_ssh_users", ["pi", "jack"]),
         scan_subnet=data.get("scan_subnet", "192.168.0"),
+        ssh_hosts=data.get("ssh_hosts", {}),
         piper_voice_path=data.get("piper_voice_path"),
         generated_media_path=data.get("generated_media_path", "generated"),
         business_agents_enabled=data.get("business_agents_enabled", False),

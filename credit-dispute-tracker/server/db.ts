@@ -61,6 +61,35 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_dispute_items_bureau_state
       ON dispute_items (bureau, state);
+
+    CREATE TABLE IF NOT EXISTS dispute_letters (
+      id TEXT PRIMARY KEY,
+      dispute_item_id TEXT NOT NULL REFERENCES dispute_items(id) ON DELETE CASCADE,
+      letter_text TEXT NOT NULL,
+      recipient_name TEXT NOT NULL,
+      recipient_address_line1 TEXT NOT NULL,
+      recipient_address_line2 TEXT,
+      recipient_city TEXT NOT NULL,
+      recipient_state TEXT NOT NULL,
+      recipient_zip TEXT NOT NULL,
+      letterstream_order_id TEXT,        -- set after letterstream_send_mail (quote)
+      quoted_cost_cents INTEGER,
+      quote_currency TEXT DEFAULT 'USD',
+      quoted_at TEXT,
+      confirmed_by_user INTEGER NOT NULL DEFAULT 0,  -- 0/1, set true only after explicit user confirm
+      confirmed_at TEXT,
+      authorized INTEGER NOT NULL DEFAULT 0,          -- 0/1, true only after letterstream_authorize_mail succeeds
+      authorized_at TEXT,
+      letterstream_tracking_id TEXT,
+      mail_status TEXT NOT NULL DEFAULT 'not_sent'
+        CHECK (mail_status IN ('not_sent','quoted','mailed','in_transit','delivered','returned','failed')),
+      mail_status_updated_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dispute_letters_item
+      ON dispute_letters (dispute_item_id);
   `);
 }
 

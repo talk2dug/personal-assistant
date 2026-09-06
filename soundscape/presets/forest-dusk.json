@@ -1,0 +1,46 @@
+{
+  "name": "Forest at dusk",
+  "bed": {
+    "files": ["forest/wind-leaves-bed.wav"],
+    "gain_db": -8.0,
+    "crossfade_sec": 8.0
+  },
+  "layers": [
+    {
+      "name": "songbirds",
+      "files": ["forest/wood-thrush-*.wav", "forest/towhee-*.wav", "forest/wren-*.wav"],
+      "interval_sec": [30, 110],
+      "gain_db": [-26, -14],
+      "pan": [-0.9, 0.9],
+      "rate_jitter": 0.08,
+      "play_at_night": false
+    },
+    {
+      "name": "peepers",
+      "files": ["forest/peeper-*.wav"],
+      "interval_sec": [20, 70],
+      "gain_db": [-30, -20],
+      "pan": [-0.8, 0.8],
+      "rate_jitter": 0.05,
+      "play_at_night": true
+    },
+    {
+      "name": "owl",
+      "files": ["forest/barred-owl-*.wav"],
+      "interval_sec": [240, 900],
+      "gain_db": [-28, -18],
+      "pan": [-0.5, 0.5],
+      "rate_jitter": 0.04,
+      "play_at_night": true
+    },
+    {
+      "name": "crickets",
+      "files": ["forest/cricket-*.wav"],
+      "interval_sec": [60, 180],
+      "gain_db": [-32, -24],
+      "pan": [-0.9, 0.9],
+      "rate_jitter": 0.06,
+      "play_at_night": true
+    }
+  ]
+}

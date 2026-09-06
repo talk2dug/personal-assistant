@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis Core personal assistant service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/jarvis
+ExecStart=/home/pi/jarvis/.venv/bin/python -m assistant.main
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

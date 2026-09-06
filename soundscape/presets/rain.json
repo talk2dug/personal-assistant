@@ -1,0 +1,28 @@
+{
+  "name": "Rain",
+  "bed": {
+    "files": ["rain/steady-rain-bed.wav"],
+    "gain_db": -7.0,
+    "crossfade_sec": 10.0
+  },
+  "layers": [
+    {
+      "name": "thunder",
+      "files": ["rain/distant-thunder-*.wav"],
+      "interval_sec": [120, 600],
+      "gain_db": [-26, -14],
+      "pan": [-0.6, 0.6],
+      "rate_jitter": 0.05,
+      "play_at_night": true
+    },
+    {
+      "name": "drips",
+      "files": ["rain/drip-*.wav"],
+      "interval_sec": [15, 60],
+      "gain_db": [-34, -24],
+      "pan": [-0.9, 0.9],
+      "rate_jitter": 0.10,
+      "play_at_night": true
+    }
+  ]
+}

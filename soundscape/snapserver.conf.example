@@ -1,0 +1,38 @@
+# Merge these into /etc/snapserver.conf -- do not clobber the file, Music Assistant and
+# any existing streams live in it too.
+
+[stream]
+# The ambient daemon's FIFO.
+#
+# mode MUST be `read` or `create` -- snapserver 0.27 rejects anything else outright with
+# "create mode for fifo must be read or create" and refuses to start. Use `read`: the
+# daemon creates the FIFO itself, and letting snapserver create it instead leaves it
+# owned by _snapserver, which the daemon then cannot write.
+#
+# The path must not be under /tmp (fs.protected_fifos=1 on any modern kernel), and
+# sampleformat must match the daemon exactly: 48kHz, 16-bit, stereo.
+#
+# PERMISSIONS: snapserver runs as _snapserver, and the daemon creates the FIFO as
+# soundscape:soundscape mode 0640. The reader must therefore be in the writer's group:
+#     sudo usermod -aG soundscape _snapserver
+# Without it snapserver starts, finds the stream, and then cannot open it.
+source = pipe:///run/soundscape/ambient?name=Ambient&mode=read&sampleformat=48000:16:2
+
+# Music Assistant attaches to this same server as an external Snapserver
+# (Settings > Player Providers > Snapcast > advanced > external server; needs >= 0.27.0).
+# Its built-in server only accepts connections from Music Assistant itself, so a custom
+# pipe source cannot be added to that one -- run this server and point MA at it.
+
+# Buffer is the round-trip latency budget. 1000ms is generous and rock solid over wifi;
+# drop toward 400 if every client is wired and you want ambient to duck faster.
+buffer = 1000
+codec = flac
+
+[http]
+enabled = true
+bind_to_address = 0.0.0.0
+port = 1780
+
+[tcp]
+enabled = true
+port = 1705

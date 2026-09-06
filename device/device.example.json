@@ -1,0 +1,14 @@
+﻿{
+  "server": "http://192.168.0.148:8080",
+  "device_id": "touch1",
+  "device_name": "Touch1",
+  "api_key": "PUT_DEVICE_API_KEY_HERE",
+  "wake_model": "hey_jarvis",
+  "wake_threshold": 0.5,
+  "inference_framework": "tflite",
+  "vad_floor": 0.006,
+  "vad_margin": 2.5,
+  "input_device": null,
+  "output_device": null,
+  "chime": true
+}

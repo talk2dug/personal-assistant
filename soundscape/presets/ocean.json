@@ -1,0 +1,37 @@
+{
+  "name": "Ocean",
+  "bed": {
+    "files": ["ocean/waves-bed.wav"],
+    "gain_db": -6.0,
+    "crossfade_sec": 8.0
+  },
+  "layers": [
+    {
+      "name": "gulls",
+      "files": ["ocean/gull-*.wav"],
+      "interval_sec": [45, 150],
+      "gain_db": [-26, -15],
+      "pan": [-0.85, 0.85],
+      "rate_jitter": 0.07,
+      "play_at_night": false
+    },
+    {
+      "name": "shorebirds",
+      "files": ["ocean/shorebird-*.wav"],
+      "interval_sec": [90, 260],
+      "gain_db": [-30, -20],
+      "pan": [-0.6, 0.6],
+      "rate_jitter": 0.06,
+      "play_at_night": false
+    },
+    {
+      "name": "foghorn",
+      "files": ["ocean/foghorn-*.wav"],
+      "interval_sec": [400, 1500],
+      "gain_db": [-32, -24],
+      "pan": [-0.3, 0.3],
+      "rate_jitter": 0.02,
+      "play_at_night": false
+    }
+  ]
+}

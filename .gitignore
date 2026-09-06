@@ -1,0 +1,29 @@
+.venv/
+.venv-kroger/
+.venv-vision/
+__pycache__/
+*.pyc
+config.json
+jarvis.db
+jarvis.db-wal
+jarvis.db-shm
+jarvis.db.stale-local-backup
+test_verify.db
+hop1_out.json
+.pytest_cache/
+
+# Large binary model/voice assets — download separately, don't commit
+*.pt
+voices/
+
+# GPU bridge output, logs, vendored third-party project
+generated/
+logs/
+pixel-agents-main/
+
+# Frontend build artifacts
+web/node_modules/
+web/dist/
+
+# Claude Code's own local session/tool state — not part of the app
+.claude/

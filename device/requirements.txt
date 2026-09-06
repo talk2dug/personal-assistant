@@ -1,0 +1,10 @@
+﻿# Jarvis voice terminal — Raspberry Pi client dependencies.
+# Deliberately small: the Pi does wake word, capture and playback only.
+# numpy MUST stay below 2: tflite-runtime's wheel is built against NumPy's 1.x C-ABI and
+# fails with an obscure ImportError (not an obvious version-mismatch message) on NumPy 2.
+# This has broken this project twice already -- pin it before openwakeword pulls
+# tflite-runtime in, don't rely on remembering to check afterward.
+numpy<2
+openwakeword>=0.6.0
+sounddevice>=0.4.6
+httpx>=0.27.0

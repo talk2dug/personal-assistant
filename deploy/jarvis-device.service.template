@@ -1,0 +1,20 @@
+[Unit]
+Description=Jarvis voice terminal
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%INSTALL_DIR%
+ExecStart=%INSTALL_DIR%/.venv/bin/python3 %INSTALL_DIR%/jarvis_device.py --config %INSTALL_DIR%/device.json
+Restart=always
+RestartSec=3
+# openWakeWord + tflite loading is the slow part of a cold start; give it real room
+# before systemd decides the unit is failing to start rather than just starting slowly.
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

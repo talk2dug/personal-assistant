@@ -1,0 +1,187 @@
+# Ambient soundscape control for Home Assistant.
+#
+# Drop in config/packages/soundscape.yaml, replace SOUNDSCAPE_HOST and the three
+# media_player.*_jarvis placeholders, then reload.
+#
+# Gives you: script.ambient_house, script.ambient_bedtime, script.ambient_off,
+# and sensor.soundscape.
+
+rest_command:
+  soundscape_play:
+    url: "http://SOUNDSCAPE_HOST:8099/play"
+    method: POST
+    content_type: "application/json"
+    payload: >-
+      {"preset": "{{ preset }}", "level": {{ level | default(1.0) }},
+       "fade_sec": {{ fade | default(5) }}, "night": {{ (night | default(false)) | tojson }}}
+
+  soundscape_stop:
+    url: "http://SOUNDSCAPE_HOST:8099/stop"
+    method: POST
+    content_type: "application/json"
+    payload: '{"fade_sec": {{ fade | default(5) }}}'
+
+  soundscape_volume:
+    url: "http://SOUNDSCAPE_HOST:8099/volume"
+    method: POST
+    content_type: "application/json"
+    payload: '{"level": {{ level }}, "fade_sec": {{ fade | default(2) }}}'
+
+  soundscape_duck:
+    url: "http://SOUNDSCAPE_HOST:8099/duck"
+    method: POST
+    content_type: "application/json"
+    payload: '{"level": {{ level | default(0.12) }}, "fade_sec": {{ fade | default(0.4) }}}'
+
+  soundscape_unduck:
+    url: "http://SOUNDSCAPE_HOST:8099/unduck"
+    method: POST
+    content_type: "application/json"
+    payload: '{"fade_sec": {{ fade | default(1.5) }}}'
+
+  soundscape_sleep:
+    url: "http://SOUNDSCAPE_HOST:8099/sleep"
+    method: POST
+    content_type: "application/json"
+    payload: >-
+      {"preset": "{{ preset }}", "duration_min": {{ minutes | default(45) }},
+       "level": {{ level | default(0.6) }}}
+
+sensor:
+  - platform: rest
+    name: Soundscape
+    resource: "http://SOUNDSCAPE_HOST:8099/status"
+    method: GET
+    value_template: >-
+      {% if value_json.playing %}{{ value_json.preset_name }}{% else %}off{% endif %}
+    json_attributes:
+      - preset
+      - playing
+      - level
+      - duck
+      - ducked
+      - night
+      - sleep_remaining_sec
+      - layers
+      - voices
+    scan_interval: 30
+
+script:
+  ambient_house:
+    alias: "Ambient - house"
+    fields:
+      preset:
+        description: "Which soundscape"
+        example: "forest-dusk"
+        default: "forest-dusk"
+      level:
+        description: "0 to 1"
+        default: 0.7
+    sequence:
+      - service: rest_command.soundscape_play
+        data:
+          preset: "{{ preset | default('forest-dusk') }}"
+          level: "{{ level | default(0.7) }}"
+          fade: 8
+          night: false
+
+  ambient_bedtime:
+    alias: "Ambient - bedtime"
+    fields:
+      preset:
+        description: "Which soundscape"
+        default: "ocean"
+      minutes:
+        description: "Fade to silence over this many minutes"
+        default: 45
+    sequence:
+      - service: rest_command.soundscape_sleep
+        data:
+          preset: "{{ preset | default('ocean') }}"
+          minutes: "{{ minutes | default(45) }}"
+          level: 0.6
+
+  ambient_off:
+    alias: "Ambient - off"
+    sequence:
+      - service: rest_command.soundscape_stop
+        data:
+          fade: 6
+
+automation:
+  # The one automation not to skip. Without it Jarvis spends the rest of his life
+  # talking over ocean waves.
+  - alias: "Ambient - duck for speech and music"
+    id: ambient_duck_for_audio
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - media_player.kitchen_jarvis
+          - media_player.living_room_jarvis
+          - media_player.bedroom_jarvis
+        to: "playing"
+    action:
+      - service: rest_command.soundscape_duck
+        data:
+          level: 0.12
+          fade: 0.4
+
+  - alias: "Ambient - unduck when quiet again"
+    id: ambient_unduck
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - media_player.kitchen_jarvis
+          - media_player.living_room_jarvis
+          - media_player.bedroom_jarvis
+        from: "playing"
+        for: "00:00:03"
+    condition:
+      # Only lift the duck once nothing at all is still playing.
+      - condition: template
+        value_template: >-
+          {{ expand('media_player.kitchen_jarvis',
+                    'media_player.living_room_jarvis',
+                    'media_player.bedroom_jarvis')
+             | selectattr('state', 'eq', 'playing') | list | count == 0 }}
+    action:
+      - service: rest_command.soundscape_unduck
+        data:
+          fade: 1.5
+
+  # This is the one that makes voice usable while ambient is playing at all. It drops the
+  # bed out from under the microphone the instant the wake word fires, before the
+  # pipeline starts listening, so recognition runs against near-silence rather than
+  # against your own speaker. Ambient audio is otherwise the worst thing you can do to
+  # far-field ASR.
+  - alias: "Ambient - duck on wake word"
+    id: ambient_duck_wake_word
+    mode: restart
+    trigger:
+      - platform: event
+        event_type: esphome.voice_assistant_started
+    action:
+      - service: rest_command.soundscape_duck
+        data:
+          level: 0.05
+          fade: 0.15
+      # Safety net: if the pipeline dies without ever reporting finished, the duck would
+      # otherwise stick and the house would stay quiet until someone noticed.
+      - delay: "00:00:30"
+      - service: rest_command.soundscape_unduck
+        data:
+          fade: 1.5
+
+  - alias: "Ambient - unduck after voice"
+    id: ambient_unduck_wake_word
+    mode: restart
+    trigger:
+      - platform: event
+        event_type: esphome.voice_assistant_finished
+    action:
+      - delay: "00:00:01"
+      - service: rest_command.soundscape_unduck
+        data:
+          fade: 1.5

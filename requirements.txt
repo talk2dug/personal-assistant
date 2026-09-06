@@ -1,0 +1,15 @@
+ollama>=0.4.0
+python-telegram-bot>=21.0
+APScheduler>=3.10
+pytest>=8.0
+mcp>=1.0.0
+caldav>=1.3.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+itsdangerous>=2.2.0
+python-multipart>=0.0.9
+faster-whisper>=1.0.0
+# Used directly by home_assistant_client and the Claude CLI backend's MCP bridge. It
+# arrives transitively via mcp/fastapi anyway, but the bridge runs as its own subprocess
+# and shouldn't depend on another package's dependency tree to keep working.
+httpx>=0.27.0

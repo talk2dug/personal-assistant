@@ -2,12 +2,12 @@
 certified mail, and flats, printed and mailed on the owner's account.
 
 This is a real API client (like mail_client.py, home_assistant_client.py), not an MCP
-server â€” LetterStream has no MCP wrapper, and the raw API is simple enough not to need
+server — LetterStream has no MCP wrapper, and the raw API is simple enough not to need
 one: authenticate with an HMAC-style hash, POST a job, get XML/JSON back.
 
 The account is prepaid ("required to maintain funds on account to cover the cost of
 your submitted mailings") and every successful job costs real money and puts a real
-piece of mail in the actual USPS system â€” walking a letter back once it's mailed isn't
+piece of mail in the actual USPS system — walking a letter back once it's mailed isn't
 possible. LetterStream's own API is built around exactly this risk with a native
 two-step release:
 
@@ -15,7 +15,7 @@ two-step release:
     doauth=<authcode from the preauth response>  ->  actually released to production
 
 send_mail() always submits with preauth=1. Nothing is ever mailed by this client without
-a second, explicit call to authorize() with the code that call returns â€” which is exactly
+a second, explicit call to authorize() with the code that call returns — which is exactly
 the seam engine.py's confirmation gate hooks into: send_mail (the quote) runs freely,
 authorize (the release) is the one sensitive tool.
 """
@@ -48,7 +48,7 @@ def _unique_id() -> str:
     """A numeric id LetterStream will only accept once, ever.
 
     Unix seconds (their own docs' example) collides if two requests land in the same
-    second â€” plausible for a status check right after a submission. Milliseconds keeps
+    second — plausible for a status check right after a submission. Milliseconds keeps
     the same 10-18 digit numeric requirement (13 digits until the year 10889) with far
     finer resolution.
     """
@@ -56,7 +56,7 @@ def _unique_id() -> str:
 
 
 def _hash(api_key: str, unique_id: str) -> str:
-    """md5(base64(last-6-of-unique-id + api_key + first-6-of-unique-id)) â€” LetterStream's
+    """md5(base64(last-6-of-unique-id + api_key + first-6-of-unique-id)) — LetterStream's
     documented scheme. The key itself is never transmitted, only this per-request hash."""
     string_to_hash = unique_id[-6:] + api_key + unique_id[:6]
     encoded = base64.b64encode(string_to_hash.encode("utf-8"))
@@ -67,7 +67,7 @@ def _format_address(name_1: str, name_2: str, addr_1: str, addr_2: str,
                     city: str, state: str, zip_code: str, doc_id: str | None = None) -> str:
     """LetterStream's colon/pipe-delimited address format. Pipe is used here (their docs
     allow either) so a legitimate colon in an address (e.g. a suite label) can't be
-    silently mistaken for a field boundary â€” the same reasoning applies to '|', so any
+    silently mistaken for a field boundary — the same reasoning applies to '|', so any
     field containing one is rejected rather than corrupting the parse silently.
     """
     parts = [name_1, name_2 or "", addr_1, addr_2 or "", city, state, zip_code]
@@ -183,7 +183,7 @@ class LetterStreamClient:
 
 class LetterStreamTools:
     """Adapts LetterStreamClient to the call_tool(name, arguments) shape every
-    tool-bearing engine.py context exposes (same pattern as MailClient.call_tool) â€” so
+    tool-bearing engine.py context exposes (same pattern as MailClient.call_tool) — so
     _dispatch_tool_call and the confirmation gate don't need anything LetterStream-
     specific beyond the sensitive_tools set.
 

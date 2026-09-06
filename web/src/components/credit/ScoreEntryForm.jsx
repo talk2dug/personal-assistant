@@ -60,7 +60,7 @@ export default function ScoreEntryForm({ onAdded }) {
       <input type="date" value={recordedOn} onChange={(e) => setRecordedOn(e.target.value)} />
       <input placeholder="Source (optional)" value={source} onChange={(e) => setSource(e.target.value)} />
       <input placeholder="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      <button type="submit" disabled={busy}>{busy ? 'Savingâ€¦' : 'Add score'}</button>
+      <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Add score'}</button>
       {error && <span className="credit-form-error">{error}</span>}
     </form>
   )

@@ -1,4 +1,4 @@
-"""Chat-facing tools for the owner's own life â€” separate from business_tools.py the same way
+"""Chat-facing tools for the owner's own life — separate from business_tools.py the same way
 personal_db.py is separate from business_db.py: personal to-dos, personal projects, errands
 he's delegated ("find me a doctor"), pantry status, and now credit score tracking and
 credit-report dispute letters have nothing to do with the print business.
@@ -82,7 +82,7 @@ PERSONAL_TOOLS = [
     {"type": "function", "function": {
         "name": "create_personal_task",
         "description": (
-            "Add a personal to-do â€” errands, chores, appointments to book, anything for his "
+            "Add a personal to-do — errands, chores, appointments to book, anything for his "
             "own life rather than the business (that's create_task). Create these proactively "
             "when he mentions something he needs to do."
         ),
@@ -95,7 +95,7 @@ PERSONAL_TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "update_personal_task",
-        "description": "Update a personal task â€” mark it done, change priority, move it, reword it.",
+        "description": "Update a personal task — mark it done, change priority, move it, reword it.",
         "parameters": {"type": "object", "properties": {
             "task_id": {"type": "integer"},
             "text": {"type": "string"},
@@ -109,7 +109,7 @@ PERSONAL_TOOLS = [
         "description": (
             "Queue a personal errand for the background agent, which searches the web and "
             "writes back a practical answer. Use this whenever he asks you to find or look "
-            "into something for him personally that deserves real digging â€” a doctor or "
+            "into something for him personally that deserves real digging — a doctor or "
             "dentist near him, a service provider, comparing options, how to handle "
             "something. Tell him you've put it in hand and will report back; do not answer "
             "from memory when this is the right call."
@@ -130,10 +130,10 @@ PERSONAL_TOOLS = [
     {"type": "function", "function": {
         "name": "update_pantry_status",
         "description": (
-            "Set what's on hand for a pantry/grocery item â€” 'have', 'low', or 'out'. Use "
+            "Set what's on hand for a pantry/grocery item — 'have', 'low', or 'out'. Use "
             "this whenever he mentions running low on or out of something ('I'm about out "
             "of milk', 'we're low on eggs'), or confirms he just bought something ('have'). "
-            "This is a simple status, not a quantity â€” never ask him for a count."
+            "This is a simple status, not a quantity — never ask him for a count."
         ),
         "parameters": {"type": "object", "properties": {
             "item": {"type": "string"},
@@ -151,7 +151,7 @@ PERSONAL_TOOLS = [
     {"type": "function", "function": {
         "name": "list_credit_scores",
         "description": (
-            "List the owner's manually-recorded credit score history â€” there is no live "
+            "List the owner's manually-recorded credit score history — there is no live "
             "credit-bureau feed, so this is only ever what he's told Jarvis after checking "
             "a score himself. Returned oldest-first, so it plots as a trend over time."
         ),
@@ -192,13 +192,13 @@ PERSONAL_TOOLS = [
             "Start tracking a new disputed credit report item for one bureau. Use when he "
             "identifies something inaccurate on a report he wants disputed. If the same "
             "inaccurate item is reported by more than one bureau, create one item per "
-            "bureau â€” each is disputed and mailed separately."
+            "bureau — each is disputed and mailed separately."
         ),
         "parameters": {"type": "object", "properties": {
             "bureau": {"type": "string", "enum": ["experian", "equifax", "transunion", "other"]},
             "creditor_name": {"type": "string"},
             "item_description": {"type": "string", "description": "What's being disputed."},
-            "reason": {"type": "string", "description": "Why it's inaccurate â€” this goes into the dispute letter."},
+            "reason": {"type": "string", "description": "Why it's inaccurate — this goes into the dispute letter."},
             "account_reference": {"type": "string", "description": "Account/reference number on the report, if any."},
         }, "required": ["bureau", "creditor_name", "item_description", "reason"]},
     }},
@@ -206,7 +206,7 @@ PERSONAL_TOOLS = [
         "name": "update_dispute_item",
         "description": (
             "Update a dispute item's status or details. Only move it to 'resolved' once "
-            "he's told you the bureau actually responded or fixed it â€” LetterStream has no "
+            "he's told you the bureau actually responded or fixed it — LetterStream has no "
             "way to know that on its own; mailing a letter only ever moves an item to "
             "'mailed', never 'resolved'."
         ),
@@ -225,7 +225,7 @@ PERSONAL_TOOLS = [
         "description": (
             "Compose and QUOTE a physical dispute letter for a tracked item via "
             "LetterStream. This only prices and queues the mailing (LetterStream's preauth "
-            "step) â€” it never sends anything and never spends money. Write the actual "
+            "step) — it never sends anything and never spends money. Write the actual "
             "letter_text yourself first: a formal dispute letter identifying the item, the "
             "reason it's inaccurate, and a request that the bureau investigate and correct "
             "or remove it. If the item's bureau is experian, equifax, or transunion and no "
@@ -234,7 +234,7 @@ PERSONAL_TOOLS = [
             "than a bureau) recipient_name/address/city/state/zip are required. After this "
             "returns, tell him the exact recipient, the exact letter text, and the quoted "
             "cost, and do not call letterstream_authorize_mail until he explicitly confirms "
-            "he wants it actually mailed â€” never before."
+            "he wants it actually mailed — never before."
         ),
         "parameters": {"type": "object", "properties": {
             "dispute_item_id": {"type": "integer"},
@@ -247,7 +247,7 @@ PERSONAL_TOOLS = [
             "recipient_zip": {"type": "string"},
             "mail_type": {
                 "type": "string", "enum": ["firstclass", "certified", "certnoerr"],
-                "description": "Defaults to certified â€” dispute letters normally want proof of mailing.",
+                "description": "Defaults to certified — dispute letters normally want proof of mailing.",
             },
         }, "required": ["dispute_item_id", "letter_text"]},
     }},
@@ -255,7 +255,7 @@ PERSONAL_TOOLS = [
         "name": "list_dispute_letters",
         "description": (
             "List every LetterStream quote/mailing recorded against one dispute item, most "
-            "recent first â€” check this before drafting a follow-up letter so an earlier "
+            "recent first — check this before drafting a follow-up letter so an earlier "
             "authcode or tracking number isn't lost track of."
         ),
         "parameters": {"type": "object", "properties": {
@@ -265,7 +265,7 @@ PERSONAL_TOOLS = [
     {"type": "function", "function": {
         "name": "record_dispute_letter_mailed",
         "description": (
-            "Bookkeeping only â€” never calls LetterStream. Call this immediately after "
+            "Bookkeeping only — never calls LetterStream. Call this immediately after "
             "letterstream_authorize_mail has actually succeeded for a dispute letter's "
             "authcode, so the tracker reflects that it was really mailed. Never call this "
             "before authorize_mail has actually run and succeeded, and never as a substitute "
@@ -291,13 +291,13 @@ PERSONAL_SYSTEM_NOTE = (
     "a standing responsibility. When he mentions something he's personally working on, record "
     "it with create_personal_project; when he mentions something he needs to do, record it with "
     "create_personal_task rather than replying with encouragement and letting it evaporate. When "
-    "he asks you to find or look into something personal that deserves real digging â€” a doctor, "
-    "a service, comparing options â€” queue it with request_personal_research rather than "
+    "he asks you to find or look into something personal that deserves real digging — a doctor, "
+    "a service, comparing options — queue it with request_personal_research rather than "
     "answering from memory: it runs a real web search in the background and reports back, so "
     "say you'll look into it rather than pretending you already know. Never confuse this with "
-    "the business tools (create_project/create_task/request_research) â€” those are for the "
+    "the business tools (create_project/create_task/request_research) — those are for the "
     "print business, these are for him."
-    " You also track what's in his kitchen with update_pantry_status/list_pantry â€” a simple "
+    " You also track what's in his kitchen with update_pantry_status/list_pantry — a simple "
     "have/low/out status per item, not a quantity. Whenever he says he's running low on or "
     "out of something, or that he just bought something, update it yourself immediately "
     "rather than just acknowledging it in conversation."
@@ -305,13 +305,13 @@ PERSONAL_SYSTEM_NOTE = (
     "checked (never estimate one yourself), and the credit-report dispute tracker "
     "(create_dispute_item, update_dispute_item, draft_dispute_letter, list_dispute_letters, "
     "track_dispute_letter). draft_dispute_letter only quotes a letter through LetterStream's "
-    "preauth step â€” it never spends money or mails anything by itself. After drafting, always "
+    "preauth step — it never spends money or mails anything by itself. After drafting, always "
     "relay the exact recipient, the exact letter text, and the quoted cost, and wait for his "
-    "explicit yes before ever calling letterstream_authorize_mail â€” that is the one call that "
+    "explicit yes before ever calling letterstream_authorize_mail — that is the one call that "
     "releases real postage and puts a real, unrecallable piece of mail in the system, and it "
     "requires his confirmation every single time, no matter how routine the dispute feels. The "
     "instant an authorization actually succeeds, call record_dispute_letter_mailed so the "
-    "tracker reflects reality â€” but only then, never before, and never as a stand-in for "
+    "tracker reflects reality — but only then, never before, and never as a stand-in for "
     "getting the confirmation itself."
 )
 
@@ -320,7 +320,7 @@ class PersonalClient:
     """Executes the personal tools. Same call_tool shape as every other integration.
 
     letterstream, when given, is the raw call_tool(name, arguments) object LetterStream's
-    own raw tools use (LetterStreamTools) â€” not the whole LetterStreamContext dataclass.
+    own raw tools use (LetterStreamTools) — not the whole LetterStreamContext dataclass.
     Loose coupling on purpose: this class only needs something it can call
     letterstream_send_mail/letterstream_track_mail on, the same way MailClient or any
     other integration is handed in elsewhere. None of the money-spending logic
@@ -368,7 +368,7 @@ class PersonalClient:
                 "ok": True, "research_id": rid,
                 "message": (
                     "Queued for the background research agent. Tell him you've put it in hand "
-                    "and will report back â€” you do not have findings yet."
+                    "and will report back — you do not have findings yet."
                 ),
             }
         if name == "list_personal_research":

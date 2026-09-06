@@ -5,7 +5,7 @@ import logging
 import uvicorn
 
 from .config import load_config
-from .core import db, media_scan
+from .core import business_db, db, media_scan
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_home_assistant_context,
@@ -29,6 +29,10 @@ def main() -> None:
     # run on a fresh install — create the tables here so the Media page returns empty
     # results rather than a 500.
     media_scan.init_media_db(cfg.db_path)
+    # review_items is the Review page's single decision queue -- pending_actions (Kroger/
+    # CCXT/mail/HA/git confirmations) get a linked row there regardless of whether the
+    # business feature itself is configured, so this can't stay gated behind that flag.
+    business_db.init_business_db(cfg.db_path)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)
 

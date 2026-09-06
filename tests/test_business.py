@@ -566,3 +566,18 @@ def test_rejecting_the_review_item_never_runs_anything(db_path):
     plan = ops_plans.get_plan(db_path, proposed["plan_id"])
     assert plan["status"] == "rejected"
     assert ssh.run_calls == []
+
+
+@pytest.mark.parametrize("ref_table", ["pending_actions", "git_pull_requests"])
+def test_deciding_a_pending_action_or_pr_card_from_chat_is_refused(db_path, ref_table):
+    """These need context (era/kroger/ccxt/git_ops/etc.) this business-tools client
+    doesn't have -- refusing beats silently marking the card decided while the Kroger
+    cart write or PR merge it stands for never actually happens."""
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE)
+    item_id = business_db.create_review_item(
+        db_path, 1, "Confirm: something", ref_table=ref_table, ref_id=99)
+
+    result = client.call_tool("decide_review_item", {"item_id": item_id, "decision": "approved"})
+
+    assert "error" in result
+    assert business_db.get_review_item(db_path, 1, item_id)["status"] == "pending"

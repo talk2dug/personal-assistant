@@ -949,6 +949,22 @@ def decide_review_item(
     return get_review_item(db_path, owner_user_id, item_id)
 
 
+def get_review_item_by_ref(db_path: str, owner_user_id: int, ref_table: str, ref_id: int):
+    """Looks up the review item standing in for a specific pipeline row -- used to keep
+    a card in sync when its underlying decision gets made somewhere other than this
+    page (e.g. a pending action confirmed in chat), so the same thing isn't left
+    dangling as still-pending on the Review page."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            """SELECT * FROM review_items WHERE owner_user_id = ? AND ref_table = ? AND ref_id = ?
+               ORDER BY id DESC LIMIT 1""",
+            (owner_user_id, ref_table, ref_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return _attach_options(conn, [dict(row)])[0]
+
+
 def get_review_option_media(db_path: str, owner_user_id: int, option_id: int) -> str | None:
     """The file path for one option, scoped to its owner so an id from elsewhere can't
     be used to read someone else's media."""

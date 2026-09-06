@@ -6,13 +6,14 @@ test_engine_kroger.py / test_engine_ccxt.py's suites.
 """
 import pytest
 
-from assistant.core import db, engine
+from assistant.core import business_db, db, engine
 
 
 @pytest.fixture
 def db_path(tmp_path):
     path = str(tmp_path / "test.db")
     db.init_db(path)
+    business_db.init_business_db(path)
     return path
 
 

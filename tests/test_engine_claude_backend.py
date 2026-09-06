@@ -7,7 +7,7 @@ happens after. Only the middle changes.
 """
 import pytest
 
-from assistant.core import db
+from assistant.core import business_db, db
 from assistant.core.engine import HomeAssistantContext, build_system_prompt, handle_message, select_tools
 
 
@@ -46,6 +46,7 @@ class FakeOllama:
 def db_path(tmp_path):
     path = str(tmp_path / "test.db")
     db.init_db(path)
+    business_db.init_business_db(path)
     return path
 
 

@@ -650,6 +650,24 @@ def get_pending_action(db_path: str, user_id: int):
     }
 
 
+def get_pending_action_by_id(db_path: str, action_id: int):
+    """Looks up a specific pending action regardless of whether it's the most recent one
+    for its user -- get_pending_action() only ever returns the latest, so this is what
+    lets the Review page resolve one by id instead of only the newest."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            """SELECT id, user_id, tool_name, arguments, status, created_at
+               FROM pending_actions WHERE id = ?""",
+            (action_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row[0], "user_id": row[1], "tool_name": row[2],
+        "arguments": json.loads(row[3]), "status": row[4], "created_at": row[5],
+    }
+
+
 def resolve_pending_action(db_path: str, action_id: int, status: str) -> None:
     if status not in ("confirmed", "cancelled"):
         raise ValueError(f"invalid resolution status: {status!r}")

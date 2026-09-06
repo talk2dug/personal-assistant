@@ -3,7 +3,7 @@ import asyncio
 import logging
 
 from .config import load_config
-from .core import db
+from .core import business_db, db
 from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     cfg = load_config()
     db.init_db(cfg.db_path)
+    # review_items is the Review page's single decision queue -- pending_actions (Kroger/
+    # CCXT/mail/HA/git confirmations) get a linked row there regardless of whether the
+    # business feature itself is configured, so this can't stay gated behind that flag.
+    business_db.init_business_db(cfg.db_path)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)
 

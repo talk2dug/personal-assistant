@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import db
+from . import business_db, db
 from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
 from . import location_tools
@@ -1242,7 +1242,7 @@ def _dispatch_tool_call(
 
     if era is not None and name in era.tool_names:
         if name in era.sensitive_tools:
-            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1258,7 +1258,7 @@ def _dispatch_tool_call(
 
     if phone is not None and name in phone.tool_names:
         if name in phone.sensitive_tools:
-            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1274,7 +1274,7 @@ def _dispatch_tool_call(
 
     if mail is not None and name in mail.tool_names:
         if name in mail.sensitive_tools:
-            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1314,7 +1314,7 @@ def _dispatch_tool_call(
 
     if kroger is not None and name in kroger.tool_names:
         if name in kroger.sensitive_tools:
-            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1330,7 +1330,7 @@ def _dispatch_tool_call(
 
     if git_ops is not None and name in git_ops.tool_names:
         if name in git_ops.sensitive_tools:
-            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1341,13 +1341,29 @@ def _dispatch_tool_call(
                 ),
             })
         try:
-            return json.dumps(git_ops.mcp_client.call_tool(name, arguments))
+            result = git_ops.mcp_client.call_tool(name, arguments)
+            pr_number = result.get("pr_number") if name == "git_open_pr" and result.get("ok") else None
+            if pr_number is not None:
+                # Ambient, not confirmation-gated: opening a PR is already unattended
+                # (Phase 1), so this just puts "ready to merge" in front of the owner the
+                # same way anything else the team produces shows up — nothing runs on
+                # approval beyond the merge itself, gated exactly like git_merge_pr above.
+                business_db.create_review_item(
+                    db_path, requesting_user_id,
+                    title=f"PR #{pr_number}: {arguments.get('title', '')}"[:200],
+                    kind="other",
+                    summary=f"{arguments.get('branch_name')} -> {arguments.get('base_branch', 'main')}"
+                            f" · {result.get('url', '')}",
+                    detail=arguments.get("body", ""), source_agent="git",
+                    ref_table="git_pull_requests", ref_id=pr_number,
+                )
+            return json.dumps(result)
         except Exception as e:
             return json.dumps({"error": str(e)})
 
     if ccxt is not None and name in ccxt.tool_names:
         if name in ccxt.sensitive_tools:
-            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1368,7 +1384,7 @@ def _dispatch_tool_call(
 
     if letterstream is not None and name in letterstream.tool_names:
         if name in letterstream.sensitive_tools:
-            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1408,7 +1424,7 @@ def _dispatch_tool_call(
         # Sensitivity here depends on the *domain* argument, not the tool name — call_service
         # is one tool that can touch anything from a light to a door lock.
         if name == "call_service" and arguments.get("domain") in home_assistant.sensitive_domains:
-            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1454,6 +1470,62 @@ def _classify_confirmation(llm, user_text: str) -> str:
     return "unclear"
 
 
+def create_pending_action_and_review(db_path: str, user_id: int, name: str, arguments: dict) -> int:
+    """Every sensitive tool call gets both a pending_actions row (the existing chat
+    "yes/no" flow) and a linked review_items row -- one choke point, so a Kroger cart
+    write, a CCXT trade, a mail release, an HA lock/alarm change, or a PR-merge
+    confirmation is exactly as visible on the Review page as anything an employee
+    produces, regardless of which integration raised it."""
+    pending_id = db.create_pending_action(db_path, user_id, name, arguments)
+    business_db.create_review_item(
+        db_path, user_id, title=f"Confirm: {name}", kind="other",
+        summary=f"{name} — {json.dumps(arguments)[:200]}",
+        detail=json.dumps(arguments, indent=2), source_agent="pending_action",
+        ref_table="pending_actions", ref_id=pending_id,
+    )
+    return pending_id
+
+
+def execute_pending_action(
+    pending: dict, era: EraContext | None = None, phone: PhoneContext | None = None,
+    mail: MailContext | None = None, home_assistant: HomeAssistantContext | None = None,
+    kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
+    letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
+):
+    """Finds whichever context owns this pending action's tool and calls it for real.
+    Shared by the chat confirmation flow (_resolve_pending_action) and the Review page's
+    decide endpoint, so approving a Kroger cart write or a PR merge executes identically
+    regardless of which one approved it."""
+    if era is not None and pending["tool_name"] in era.tool_names:
+        context = era
+    elif phone is not None and pending["tool_name"] in phone.tool_names:
+        context = phone
+    elif mail is not None and pending["tool_name"] in mail.tool_names:
+        context = mail
+    elif kroger is not None and pending["tool_name"] in kroger.tool_names:
+        context = kroger
+    elif ccxt is not None and pending["tool_name"] in ccxt.tool_names:
+        context = ccxt
+    elif letterstream is not None and pending["tool_name"] in letterstream.tool_names:
+        context = letterstream
+    elif git_ops is not None and pending["tool_name"] in git_ops.tool_names:
+        context = git_ops
+    else:
+        context = home_assistant
+    return context.mcp_client.call_tool(pending["tool_name"], pending["arguments"])
+
+
+def _sync_review_item(db_path: str, pending: dict, decision: str) -> None:
+    """Marks the linked Review-page card decided when its pending action is resolved
+    via chat instead, so it doesn't linger there as still-pending after the fact."""
+    item = business_db.get_review_item_by_ref(db_path, pending["user_id"], "pending_actions", pending["id"])
+    if item is not None:
+        try:
+            business_db.decide_review_item(db_path, pending["user_id"], item["id"], decision)
+        except Exception:
+            pass
+
+
 def _resolve_pending_action(
     db_path: str, llm, era: EraContext | None, phone: PhoneContext | None, mail: MailContext | None,
     home_assistant: HomeAssistantContext | None, pending: dict, user_text: str,
@@ -1465,29 +1537,17 @@ def _resolve_pending_action(
 
     if decision == "confirm":
         db.resolve_pending_action(db_path, pending["id"], "confirmed")
-        if era is not None and pending["tool_name"] in era.tool_names:
-            context = era
-        elif phone is not None and pending["tool_name"] in phone.tool_names:
-            context = phone
-        elif mail is not None and pending["tool_name"] in mail.tool_names:
-            context = mail
-        elif kroger is not None and pending["tool_name"] in kroger.tool_names:
-            context = kroger
-        elif ccxt is not None and pending["tool_name"] in ccxt.tool_names:
-            context = ccxt
-        elif letterstream is not None and pending["tool_name"] in letterstream.tool_names:
-            context = letterstream
-        elif git_ops is not None and pending["tool_name"] in git_ops.tool_names:
-            context = git_ops
-        else:
-            context = home_assistant
+        _sync_review_item(db_path, pending, "approved")
         try:
-            result = context.mcp_client.call_tool(pending["tool_name"], pending["arguments"])
+            result = execute_pending_action(
+                pending, era=era, phone=phone, mail=mail, home_assistant=home_assistant,
+                kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops)
             reply = f"Done. {pending['tool_name']} executed — result: {result}"
         except Exception as e:
             reply = f"I confirmed it but the call failed: {e}"
     elif decision == "cancel":
         db.resolve_pending_action(db_path, pending["id"], "cancelled")
+        _sync_review_item(db_path, pending, "rejected")
         reply = "Okay, cancelled — nothing happened."
     else:
         reply = (

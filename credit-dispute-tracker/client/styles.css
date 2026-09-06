@@ -1,0 +1,31 @@
+.hint { color: #555; font-size: 0.9em; }
+.error { color: #b00020; }
+.empty-state { color: #888; font-style: italic; }
+
+.credit-score-entry-form { display: flex; flex-direction: column; gap: 8px; max-width: 420px; }
+.credit-score-entry-form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
+
+.dispute-board { display: flex; gap: 16px; }
+.dispute-column { flex: 1; background: #f7f7f8; border-radius: 8px; padding: 12px; min-height: 200px; }
+.dispute-card { display: block; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; margin-bottom: 8px; text-decoration: none; color: inherit; }
+.dispute-card .bureau-tag { font-size: 0.75em; text-transform: uppercase; color: #666; }
+.outcome { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; margin-top: 4px; }
+.outcome-removed { background: #d4edda; color: #155724; }
+.outcome-updated { background: #fff3cd; color: #856404; }
+.outcome-verified { background: #e2e3e5; color: #383d41; }
+.outcome-no_change { background: #f8d7da; color: #721c24; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.confirm-mail-modal { background: #fff; border-radius: 8px; padding: 24px; max-width: 520px; width: 90%; max-height: 85vh; overflow-y: auto; }
+.confirm-mail-modal .letter-preview { white-space: pre-wrap; background: #f7f7f8; padding: 10px; border-radius: 4px; max-height: 200px; overflow-y: auto; }
+.confirm-mail-modal .quoted-cost { font-size: 1.4em; font-weight: bold; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+button.danger { background: #b00020; color: #fff; border: none; padding: 8px 14px; border-radius: 4px; }
+button.danger:disabled { background: #ccc; }
+
+.mail-status-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px; }
+.mail-status-not_sent { background: #e2e3e5; }
+.mail-status-quoted { background: #cfe2ff; }
+.mail-status-mailed, .mail-status-in_transit { background: #fff3cd; }
+.mail-status-delivered { background: #d4edda; }
+.mail-status-returned, .mail-status-failed { background: #f8d7da; }

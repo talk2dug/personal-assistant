@@ -12,6 +12,15 @@ const mailingService = new MailingService(new LetterStreamHttpClient());
 export const mailingRouter = Router();
 mailingRouter.use(requireAuth);
 
+// GET /api/disputes/:disputeId/letters -- all letter versions for a dispute.
+mailingRouter.get(
+  '/:disputeId/letters',
+  asyncHandler(async (req, res) => {
+    const letters = await mailingService.listLettersForDispute(req.userId, req.params.disputeId);
+    res.json({ letters });
+  })
+);
+
 const draftSchema = z.object({
   consumer: z.object({
     fullName: z.string().min(1),

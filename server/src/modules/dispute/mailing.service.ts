@@ -52,6 +52,17 @@ export class InvalidLetterStateError extends Error {}
 export class MailingService {
   constructor(private readonly letterstream: LetterStreamClient) {}
 
+  /** All letters (all versions) for a dispute, most recent first. */
+  async listLettersForDispute(userId: string, disputeId: string): Promise<DisputeLetter[]> {
+    const dispute = await getDispute(userId, disputeId);
+    if (!dispute) throw new Error('dispute not found');
+    const { rows } = await pool.query(
+      `SELECT * FROM dispute_letters WHERE dispute_id = $1 ORDER BY letter_version DESC`,
+      [disputeId]
+    );
+    return rows.map(rowToLetter);
+  }
+
   /** Step 1: build the letter, get a quote. Does NOT mail anything. */
   async draftLetter(
     userId: string,

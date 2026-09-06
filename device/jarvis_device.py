@@ -81,6 +81,13 @@ class Config:
         self.inference_framework: str = data.get("inference_framework", "tflite")
         self.input_device = data.get("input_device")     # None = system default
         self.output_device = data.get("output_device")
+        # Set only for a speaker known to reject Piper's native 22050Hz outright (see
+        # Speaker's docstring) -- skips the doomed first sd.play() attempt at 22050Hz
+        # entirely, rather than discovering the rejection at reply time. On the USB
+        # Composite Device speaker here, that failed attempt wasn't a clean, silent
+        # failure before falling back: it audibly started playing the reply and then
+        # cut off partway through, so every first reply after a restart was truncated.
+        self.output_rate: int | None = data.get("output_rate")
         # Floor only. The real threshold is calibrated against the room â€” a fixed value
         # is wrong the moment the device moves. Measured ambient noise on the first unit
         # was already above the naive 0.012 default, which would have meant it never
@@ -220,9 +227,12 @@ class Speaker:
     So: try the native rate, and on refusal resample to whatever the device does accept.
     """
 
-    def __init__(self, output_device=None):
+    def __init__(self, output_device=None, output_rate: int | None = None):
         self.output_device = output_device
-        self._resample_to: float | None = None    # learned on first refusal, then reused
+        # Learned on first refusal and reused from then on -- unless a caller already
+        # knows the device's real rate (Config.output_rate), in which case start there
+        # and skip the doomed native-rate attempt altogether.
+        self._resample_to: float | None = float(output_rate) if output_rate else None
 
     def _device_rate(self) -> float:
         try:
@@ -448,7 +458,7 @@ def main() -> int:
     cfg = Config(pathlib.Path(args.config))
     resolve_audio_devices(cfg)
     client = JarvisClient(cfg)
-    speaker = Speaker(cfg.output_device)
+    speaker = Speaker(cfg.output_device, cfg.output_rate)
 
     client.wait_for_server()
     client.start_heartbeat()

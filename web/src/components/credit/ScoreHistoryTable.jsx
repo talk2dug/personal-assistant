@@ -9,7 +9,7 @@ export default function ScoreHistoryTable({ entries, onChange }) {
   }
 
   if (entries.length === 0) {
-    return <p className="empty-hint">No scores recorded yet â€” add one above after you check it somewhere.</p>
+    return <p className="empty-hint">No scores recorded yet — add one above after you check it somewhere.</p>
   }
 
   const newestFirst = [...entries].sort(
@@ -27,9 +27,9 @@ export default function ScoreHistoryTable({ entries, onChange }) {
             <td>{e.recorded_on}</td>
             <td className={`credit-bureau-${e.bureau}`}>{BUREAU_LABEL[e.bureau] || e.bureau}</td>
             <td>{e.score}</td>
-            <td>{e.source || 'â€”'}</td>
-            <td>{e.notes || 'â€”'}</td>
-            <td><button className="credit-row-remove" onClick={() => remove(e.id)} title="Delete">âœ•</button></td>
+            <td>{e.source || '—'}</td>
+            <td>{e.notes || '—'}</td>
+            <td><button className="credit-row-remove" onClick={() => remove(e.id)} title="Delete">✕</button></td>
           </tr>
         ))}
       </tbody>

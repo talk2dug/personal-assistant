@@ -23,7 +23,7 @@ export default function DisputeCreateForm({ onCreated }) {
   async function submit(e) {
     e.preventDefault()
     if (!creditorName.trim() || !itemDescription.trim() || !reason.trim()) {
-      setError('Creditor, whatâ€™s wrong, and the reason are all required.')
+      setError('Creditor, what’s wrong, and the reason are all required.')
       return
     }
     setBusy(true)
@@ -67,10 +67,10 @@ export default function DisputeCreateForm({ onCreated }) {
             value={itemDescription} onChange={(e) => setItemDescription(e.target.value)}
           />
           <textarea
-            placeholder="Why it's inaccurate â€” goes into the dispute letter" rows={2}
+            placeholder="Why it's inaccurate — goes into the dispute letter" rows={2}
             value={reason} onChange={(e) => setReason(e.target.value)}
           />
-          <button type="submit" disabled={busy}>{busy ? 'Savingâ€¦' : 'Start tracking'}</button>
+          <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Start tracking'}</button>
           {error && <span className="credit-form-error">{error}</span>}
         </form>
       )}

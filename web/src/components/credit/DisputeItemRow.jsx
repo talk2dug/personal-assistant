@@ -34,7 +34,7 @@ Sincerely,
 }
 
 function formatCost(cost) {
-  if (cost === null || cost === undefined || cost === '') return 'â€”'
+  if (cost === null || cost === undefined || cost === '') return '—'
   return /^\d+(\.\d+)?$/.test(String(cost)) ? `$${cost}` : cost
 }
 
@@ -75,7 +75,7 @@ function DraftLetterForm({ item, onDrafted }) {
       !recipientName.trim() || !recipientAddress.trim() ||
       !recipientCity.trim() || !recipientState.trim() || !recipientZip.trim()
     )) {
-      setError('This dispute has no standard bureau address on file â€” full recipient details are required.')
+      setError('This dispute has no standard bureau address on file — full recipient details are required.')
       return
     }
     setBusy(true)
@@ -133,7 +133,7 @@ function DraftLetterForm({ item, onDrafted }) {
         </div>
       )}
 
-      <button type="submit" disabled={busy}>{busy ? 'Getting quoteâ€¦' : 'Get quote from LetterStream'}</button>
+      <button type="submit" disabled={busy}>{busy ? 'Getting quote…' : 'Get quote from LetterStream'}</button>
       {error && <p className="credit-form-error">{error}</p>}
     </form>
   )
@@ -149,8 +149,8 @@ function LetterRow({ letter, onOpenMail, onTrack }) {
           {letter.recipient_city}, {letter.recipient_state} {letter.recipient_zip}
         </div>
         <div className="dispute-letter-meta">
-          {letter.mail_type} Â· quoted {formatCost(letter.quoted_cost)} Â· {formatWhen(letter.quoted_at)}
-          {letter.tracking_number && ` Â· tracking ${letter.tracking_number}`}
+          {letter.mail_type} · quoted {formatCost(letter.quoted_cost)} · {formatWhen(letter.quoted_at)}
+          {letter.tracking_number && ` · tracking ${letter.tracking_number}`}
         </div>
       </div>
       <div className="dispute-letter-actions">
@@ -235,7 +235,7 @@ export default function DisputeItemRow({ item, onChange }) {
         <span className="dispute-item-bureau">{BUREAU_LABEL[item.bureau] || item.bureau}</span>
         <span className="dispute-item-creditor">{item.creditor_name}</span>
         <span className="dispute-item-desc">{item.item_description}</span>
-        <span className="dispute-item-expand">{expanded ? 'â–¾' : 'â–¸'}</span>
+        <span className="dispute-item-expand">{expanded ? '▾' : '▸'}</span>
       </button>
 
       {expanded && (
@@ -254,7 +254,7 @@ export default function DisputeItemRow({ item, onChange }) {
 
             {showDraftForm && <DraftLetterForm item={item} onDrafted={afterDraft} />}
 
-            {letters === null && <p className="empty-hint">Loadingâ€¦</p>}
+            {letters === null && <p className="empty-hint">Loading…</p>}
             {letters && letters.length === 0 && !showDraftForm && (
               <p className="empty-hint">No letters drafted yet.</p>
             )}
@@ -276,7 +276,7 @@ export default function DisputeItemRow({ item, onChange }) {
                 value={resolution} onChange={(e) => setResolution(e.target.value)}
               />
               <div>
-                <button type="submit" disabled={busy}>{busy ? 'Savingâ€¦' : 'Save resolution'}</button>
+                <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save resolution'}</button>
                 <button type="button" onClick={() => setShowResolve(false)}>Cancel</button>
               </div>
             </form>

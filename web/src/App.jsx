@@ -21,7 +21,7 @@ function NavState() {
   )
 }
 
-/** Pending approvals, polled in the shell so the badge is visible from any page â€”
+/** Pending approvals, polled in the shell so the badge is visible from any page —
  *  work waiting on you shouldn't only be discoverable by visiting the Review tab. */
 function usePendingReviews() {
   const [pending, setPending] = useState(0)
@@ -82,9 +82,9 @@ function Gate() {
   // A voice terminal renders before any auth check: it sits on a shelf with nobody to
   // sign it in, and authenticates with the device key already in its URL.
   if (window.location.pathname === '/device') return <Device />
-  if (user === undefined) return <div className="loading-screen">Loadingâ€¦</div>
+  if (user === undefined) return <div className="loading-screen">Loading…</div>
   if (user === null) return <Login />
-  // The Jarvis session is created only once signed in â€” it fetches history and holds the
+  // The Jarvis session is created only once signed in — it fetches history and holds the
   // mic, neither of which makes sense on the login screen.
   return (
     <JarvisProvider>

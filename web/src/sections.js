@@ -1,5 +1,5 @@
 // The modularity convention for the whole UI: a future agent section is a new page
-// component plus one entry here â€” nothing else needs to change. App.jsx maps this
+// component plus one entry here — nothing else needs to change. App.jsx maps this
 // list into both the nav sidebar and the router.
 import Agents from './pages/Agents'
 import Chat from './pages/Chat'

@@ -55,7 +55,7 @@ export default function Credit() {
       <section>
         <h3>Score history</h3>
         {scores === null ? (
-          <p className="empty-hint">Loadingâ€¦</p>
+          <p className="empty-hint">Loading…</p>
         ) : (
           <>
             <ScoreHistoryChart entries={scores} />
@@ -74,7 +74,7 @@ export default function Credit() {
         </div>
         <DisputeCreateForm onCreated={loadDisputes} />
         {disputes === null ? (
-          <p className="empty-hint">Loadingâ€¦</p>
+          <p className="empty-hint">Loading…</p>
         ) : disputes.length === 0 ? (
           <p className="empty-hint">No disputes tracked yet.</p>
         ) : (

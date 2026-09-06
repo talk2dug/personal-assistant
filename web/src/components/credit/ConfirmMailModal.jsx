@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { api } from '../../api'
 
 function formatCost(cost) {
-  if (cost === null || cost === undefined || cost === '') return 'â€”'
+  if (cost === null || cost === undefined || cost === '') return '—'
   return /^\d+(\.\d+)?$/.test(String(cost)) ? `$${cost}` : cost
 }
 
@@ -100,7 +100,7 @@ export default function ConfirmMailModal({ letter, onClose, onMailed }) {
         <div className="confirm-mail-actions">
           <button className="confirm-mail-cancel" onClick={onClose} disabled={busy}>Cancel</button>
           <button className="confirm-mail-go" onClick={handleMail} disabled={!canConfirm}>
-            {busy ? 'Mailingâ€¦' : 'Mail this letter now'}
+            {busy ? 'Mailing…' : 'Mail this letter now'}
           </button>
         </div>
       </div>

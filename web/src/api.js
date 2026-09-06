@@ -39,7 +39,7 @@ export const api = {
   chatHistory: () => request('/api/chat/history'),
   sendMessage: (text, image) =>
     request('/api/chat/message', { method: 'POST', body: JSON.stringify(image ? { text, image } : { text }) }),
-  // FormData, not JSON â€” must NOT go through request()'s helper, which force-sets
+  // FormData, not JSON — must NOT go through request()'s helper, which force-sets
   // Content-Type: application/json; the browser needs to set the multipart boundary itself.
   transcribe: async (audioBlob) => {
     const form = new FormData()

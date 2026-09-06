@@ -76,7 +76,7 @@ class HomeAssistantClient:
             body = resp.json()
             forecast = (body.get("service_response", body).get(entity_id) or {}).get("forecast", [])
         except Exception as e:
-            # Current conditions are still worth returning on their own â€” a forecast
+            # Current conditions are still worth returning on their own — a forecast
             # failure shouldn't turn "it's 93 degrees" into an error.
             forecast = [{"error": f"forecast unavailable: {e}"}]
 

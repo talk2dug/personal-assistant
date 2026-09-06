@@ -1,4 +1,4 @@
-"""Credit score history and the credit-report dispute tracker, over the web UI â€” the
+"""Credit score history and the credit-report dispute tracker, over the web UI — the
 same personal_db rows the chat tools in personal_tools.py read and write, so a score or
 dispute entered in chat shows up here and vice versa. Owner-only, like Finance/Crypto/
 Personal.

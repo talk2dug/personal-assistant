@@ -1,8 +1,8 @@
-"""Storage for the owner's personal (non-business) life â€” projects, to-dos, errands
+"""Storage for the owner's personal (non-business) life — projects, to-dos, errands
 delegated to Jarvis ("find me a doctor"), pantry status, and now credit score history
 and credit-report dispute tracking.
 
-A sibling of business_db.py, which is itself a sibling of db.py â€” same reasoning applies
+A sibling of business_db.py, which is itself a sibling of db.py — same reasoning applies
 one level down: personal errands have nothing to do with the business's agent roster,
 office sprites, or market/trend pipeline, so they get their own bounded-context module
 rather than a scope column bolted onto business_projects/business_tasks. Same discipline

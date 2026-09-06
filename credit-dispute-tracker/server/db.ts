@@ -42,6 +42,25 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_credit_score_recorded_at
       ON credit_score_entries (recorded_at);
+
+    CREATE TABLE IF NOT EXISTS dispute_items (
+      id TEXT PRIMARY KEY,
+      bureau TEXT NOT NULL CHECK (bureau IN ('equifax','experian','transunion')),
+      creditor_name TEXT NOT NULL,
+      account_number_last4 TEXT,
+      item_description TEXT NOT NULL,
+      dispute_reason TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'drafted'
+        CHECK (state IN ('drafted','mailed','resolved')),
+      resolution_outcome TEXT
+        CHECK (resolution_outcome IN (NULL,'removed','updated','verified','no_change')),
+      resolution_notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dispute_items_bureau_state
+      ON dispute_items (bureau, state);
   `);
 }
 

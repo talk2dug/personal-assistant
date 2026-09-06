@@ -37,8 +37,8 @@ OPS_PLAN_TOOLS = [
             "change/test/verify, stopping at the first failure; if that happens every "
             "rollback step then runs. A plan needs at least one rollback step -- what "
             "happens if it fails is not optional. Refer to hosts only by their short "
-            "registered name (check list_ops_plans or ask the owner if unsure which "
-            "names exist) -- never guess an IP or credential."
+            "registered name (check list_ssh_hosts if unsure which names exist) -- "
+            "never guess an IP or credential."
         ),
         "parameters": {"type": "object", "properties": {
             "summary": {"type": "string", "description": "One or two sentences: what this plan does and why."},
@@ -53,6 +53,16 @@ OPS_PLAN_TOOLS = [
                 }, "required": ["phase", "host", "command"]},
             },
         }, "required": ["summary", "steps"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_ssh_hosts",
+        "description": (
+            "The real, current list of registered SSH hosts a plan can target. There is "
+            "no other way to see this -- never guess or claim ignorance of a host "
+            "without checking here first, and never claim a host exists without it "
+            "showing up in this list."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
     }},
     {"type": "function", "function": {
         "name": "list_ops_plans",
@@ -1118,6 +1128,9 @@ class BusinessClient:
             # advances the pipeline identically to one clicked on the Review page.
             apply_review_decision(db_path, owner, item, arguments["decision"], ssh_ops=self.ssh_ops)
             return {"ok": True, "item": item}
+
+        if name == "list_ssh_hosts":
+            return {"hosts": sorted(self.ssh_ops.list_hosts()) if self.ssh_ops is not None else []}
 
         if name == "propose_ops_plan":
             steps = arguments.get("steps") or []

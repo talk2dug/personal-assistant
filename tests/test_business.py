@@ -454,6 +454,21 @@ def _plan_steps():
     ]
 
 
+def test_list_ssh_hosts_returns_the_real_registry(db_path):
+    """The only reliable way Jarvis can see what hosts actually exist -- without this,
+    the model can only ever learn a host's name by coincidence, from a past plan that
+    happened to target it."""
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE,
+                             ssh_ops=FakeSSHOps(hosts=("simrig", "touch1", "jarvisaudio1")))
+    result = client.call_tool("list_ssh_hosts", {})
+    assert result["hosts"] == ["jarvisaudio1", "simrig", "touch1"]
+
+
+def test_list_ssh_hosts_with_no_ssh_configured_returns_empty(db_path):
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=None)
+    assert client.call_tool("list_ssh_hosts", {}) == {"hosts": []}
+
+
 def test_propose_ops_plan_creates_a_plan_and_a_linked_review_item(db_path):
     ops_plans.init_ops_plans_db(db_path)
     client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps())

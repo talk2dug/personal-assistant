@@ -1,8 +1,12 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { fetchDisputeItem } from '../api/disputeApi';
-import { fetchLetterForDispute, draftLetter as draftLetterApi, quoteLetter as quoteLetterApi, confirmAndMailLetter } from '../api/letterApi';
+import {
+  fetchLetterForDispute, draftLetter as draftLetterApi, quoteLetter as quoteLetterApi,
+  confirmAndMailLetter, refreshMailStatus,
+} from '../api/letterApi';
 import ConfirmMailModal from '../components/ConfirmMailModal';
+import MailStatusBadge from '../components/MailStatusBadge';
 import type { DisputeItem, DisputeLetter } from '../types';
 
 export default function DisputeDetailPage() {
@@ -51,6 +55,14 @@ export default function DisputeDetailPage() {
     await load();
   };
 
+  const handleRefreshStatus = async () => {
+    if (!letter) return;
+    setBusy(true); setError(null);
+    try {
+      setLetter(await refreshMailStatus(letter.id));
+    } catch (err: any) { setError(err.message); } finally { setBusy(false); }
+  };
+
   return (
     <div className="dispute-detail-page">
       <h2>{item.creditorName} â€” {item.bureau}</h2>
@@ -95,9 +107,10 @@ export default function DisputeDetailPage() {
 
       {letter && letter.authorized && (
         <section>
-          <h3>Mailed</h3>
-          <p>Status: {letter.mailStatus}</p>
+          <h3>Mailed <MailStatusBadge status={letter.mailStatus} /></h3>
           <p>Tracking ID: {letter.letterstreamTrackingId}</p>
+          <p>Last updated: {letter.mailStatusUpdatedAt}</p>
+          <button onClick={handleRefreshStatus} disabled={busy}>Refresh status</button>
         </section>
       )}
 

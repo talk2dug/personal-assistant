@@ -45,3 +45,9 @@ export async function confirmAndMailLetter(
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Failed to mail letter (${res.status})`);
   return (await res.json()).letter;
 }
+
+export async function refreshMailStatus(letterId: string): Promise<DisputeLetter> {
+  const res = await fetch(`${BASE}/${letterId}/refresh-status`, { method: 'POST' });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Failed to refresh status (${res.status})`);
+  return (await res.json()).letter;
+}

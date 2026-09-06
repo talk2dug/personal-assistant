@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import {
-  draftLetter, quoteLetter, confirmAndMailLetter, getLetterForDispute, getLetter,
+  draftLetter, quoteLetter, confirmAndMailLetter, getLetterForDispute, getLetter, refreshMailStatus,
   ConfirmationMismatchError,
 } from '../services/disputeLetterService';
 
@@ -57,6 +57,16 @@ router.post('/:id/confirm-and-mail', async (req, res) => {
     res.json({ letter });
   } catch (err: any) {
     if (err instanceof ConfirmationMismatchError) return res.status(409).json({ error: err.message });
+    res.status(502).json({ error: err.message });
+  }
+});
+
+/** Step 4: status refresh via letterstream_track_mail -- read-only. */
+router.post('/:id/refresh-status', async (req, res) => {
+  try {
+    const letter = await refreshMailStatus(req.params.id);
+    res.json({ letter });
+  } catch (err: any) {
     res.status(502).json({ error: err.message });
   }
 });

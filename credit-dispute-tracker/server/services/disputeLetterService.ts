@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getDb, nowIso } from '../db';
 import { getDisputeItem, transitionDisputeState } from '../models/dispute';
-import { letterstream_send_mail, letterstream_authorize_mail } from '../integrations/letterstream/client';
+import { letterstream_send_mail, letterstream_authorize_mail, letterstream_track_mail } from '../integrations/letterstream/client';
 import type { LetterStreamAddress } from '../integrations/letterstream/types';
 
 export interface DraftLetterInput {
@@ -222,6 +222,30 @@ export async function confirmAndMailLetter(letterId: string, confirmation: MailC
   // the single place that transition happens, guaranteeing it can
   // never occur without a real LetterStream authorization behind it.
   transitionDisputeState(letter.disputeItemId, 'mailed');
+
+  return getLetter(letterId)!;
+}
+
+/**
+ * Step 4: refreshes mail status for a letter that has already been
+ * authorized, via letterstream_track_mail. Read-only against
+ * LetterStream -- never touches money or authorization state.
+ */
+export async function refreshMailStatus(letterId: string) {
+  const letter = getLetter(letterId);
+  if (!letter) throw new Error(`Letter ${letterId} not found`);
+  if (!letter.authorized || !letter.letterstreamOrderId) {
+    throw new Error(`Letter ${letterId} has not been mailed yet -- nothing to track`);
+  }
+  const status = await letterstream_track_mail(letter.letterstreamOrderId);
+
+  const db = getDb();
+  const at = nowIso();
+  db.prepare(`
+    UPDATE dispute_letters
+    SET mail_status = @status, mail_status_updated_at = @at, updated_at = @at
+    WHERE id = @id
+  `).run({ id: letterId, status: status.status, at });
 
   return getLetter(letterId)!;
 }

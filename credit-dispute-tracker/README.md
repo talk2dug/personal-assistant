@@ -15,14 +15,19 @@ credit-dispute-tracker/
     __tests__/                         unit tests for the state machine + confirm gate
   client/
     types.ts
-    api/                                fetch wrappers
+    api/                               fetch wrappers
     components/
-    pages/CreditScorePage.tsx
-    pages/DisputeTrackerPage.tsx
-    pages/DisputeDetailPage.tsx
+      CreditScoreEntryForm.tsx
+      CreditScoreHistoryChart.tsx
+      DisputeCard.tsx
+      ConfirmMailModal.tsx              hard confirm-before-mail gate UI
+      MailStatusBadge.tsx
+    pages/
+      CreditScorePage.tsx
+      DisputeTrackerPage.tsx
+      DisputeDetailPage.tsx
     routes.example.tsx                 example react-router wiring
 ```
-(Built up across the commits in this branch -- see commit history for the sub-tasks.)
 
 ## New npm dependencies (add to the app's existing package.json -- not modified here since I can't see its current contents)
 - `express` (if not already present)
@@ -39,8 +44,23 @@ credit-dispute-tracker/
 | `DISPUTE_LETTER_SENDER_NAME` / `_ADDRESS1` / `_CITY` / `_STATE` / `_ZIP` | return address on outgoing dispute letters -- placeholders (`REPLACE_ME`) until set |
 | `DASHBOARD_DATA_DIR` / `DASHBOARD_DB_PATH` | override where the sqlite file lives |
 
+## API surface
+- `GET/POST /api/credit-score`, `DELETE /api/credit-score/:id`
+- `GET/POST /api/disputes`, `GET /api/disputes/:id`, `POST /api/disputes/:id/transition`
+- `GET /api/dispute-letters/by-dispute/:disputeItemId`
+- `POST /api/dispute-letters/draft` (local only)
+- `POST /api/dispute-letters/:id/quote` (-> `letterstream_send_mail`)
+- `POST /api/dispute-letters/:id/confirm-and-mail` (hard-gated -> `letterstream_authorize_mail`)
+- `POST /api/dispute-letters/:id/refresh-status` (-> `letterstream_track_mail`)
+
 ## Safety note
 `letterstream_authorize_mail` (real postage, real money) is only reachable through `POST /api/dispute-letters/:id/confirm-and-mail`, which requires the exact current recipient name + quoted cost to be echoed back plus `userApproved: true`. Nothing else in this module calls it. See DESIGN.md section 3 for the full flow.
 
 ## Status
-All 4 scope items from Phase 5 are implemented at the module level. Not yet wired into the live dashboard app or tested against a real LetterStream account/credentials -- see the integration checklist in DESIGN.md.
+All 4 scope items from Phase 5 are implemented at the module level:
+1. Credit score manual entry + history chart
+2. Per-bureau dispute data model with a server-enforced drafted -> mailed -> resolved state machine
+3. LetterStream draft/quote/confirm-and-mail flow with a hard confirmation gate before any real postage
+4. Mail status tracking for anything actually mailed
+
+Not yet wired into the live dashboard app or tested against a real LetterStream account/credentials -- see the integration checklist in DESIGN.md before go-live.

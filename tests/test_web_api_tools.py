@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from assistant.config import UserConfig
-from assistant.core import db
+from assistant.core import business_db, db
 from assistant.web.app import create_app
 
 
@@ -35,6 +35,7 @@ class FakeLLM:
 def db_path(tmp_path):
     path = str(tmp_path / "test.db")
     db.init_db(path)
+    business_db.init_business_db(path)
     return path
 
 

@@ -2,13 +2,14 @@
 mcp_client.call_tool except through an explicit user confirmation."""
 import pytest
 
-from assistant.core import db, engine
+from assistant.core import business_db, db, engine
 
 
 @pytest.fixture
 def db_path(tmp_path):
     path = str(tmp_path / "test.db")
     db.init_db(path)
+    business_db.init_business_db(path)
     return path
 
 
@@ -129,3 +130,50 @@ def test_era_tools_absent_when_no_era_context(db_path, owner_id):
     reply = engine.handle_message(db_path, llm, owner_id, "hi", era=None)
 
     assert reply == "Hi there"
+
+
+# --- unifying the decision surface: a sensitive call also lands on the Review page ---
+
+def test_sensitive_tool_call_also_creates_a_review_item(db_path, owner_id):
+    """So it's visible on the Review page too, not only resolvable from within the
+    conversation that happened to raise it."""
+    era, mcp = make_era()
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "billing__upgrade", "arguments": {"target_plan": "automate"}}}
+        ]},
+        {"role": "assistant", "content": "confirm?"},
+    ])
+
+    engine.handle_message(db_path, llm, owner_id, "upgrade my plan", era=era)
+
+    pending = db.get_pending_action(db_path, owner_id)
+    item = business_db.get_review_item_by_ref(db_path, owner_id, "pending_actions", pending["id"])
+    assert item is not None
+    assert item["status"] == "pending"
+
+
+def test_confirming_in_chat_also_marks_the_review_item_decided(db_path, owner_id):
+    """Otherwise a card resolved in conversation would linger on the Review page as
+    still-pending after the fact."""
+    pending_id = engine.create_pending_action_and_review(
+        db_path, owner_id, "billing__upgrade", {"target_plan": "automate"})
+    era, mcp = make_era()
+    llm = FakeLLM([])
+
+    engine.handle_message(db_path, llm, owner_id, "yes", era=era)
+
+    item = business_db.get_review_item_by_ref(db_path, owner_id, "pending_actions", pending_id)
+    assert item["status"] == "approved"
+
+
+def test_cancelling_in_chat_also_marks_the_review_item_rejected(db_path, owner_id):
+    pending_id = engine.create_pending_action_and_review(
+        db_path, owner_id, "billing__upgrade", {"target_plan": "automate"})
+    era, mcp = make_era()
+    llm = FakeLLM([])
+
+    engine.handle_message(db_path, llm, owner_id, "no", era=era)
+
+    item = business_db.get_review_item_by_ref(db_path, owner_id, "pending_actions", pending_id)
+    assert item["status"] == "rejected"

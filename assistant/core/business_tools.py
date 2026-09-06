@@ -843,6 +843,41 @@ def _describe_shift(emp) -> str:
     return f"{every}{window}{days}"
 
 
+def apply_review_decision(db_path: str, owner: int, item: dict, decision: str, ssh_ops=None) -> str | None:
+    """Writes the owner's decision through to whatever real pipeline row the review item
+    references. Shared by the chat-facing decide_review_item tool and the Review page's
+    REST endpoint (routes/review.py) so a decision is identical regardless of which one
+    made it -- the ops-plan runner staying wired to only one of the two was a real bug
+    this consolidation fixed: approving an ops plan from the actual Review page marked it
+    approved in the database without ever starting the run. Returns a description of what
+    was written through, or None if there was nothing to advance."""
+    ref_table, ref_id = item.get("ref_table"), item.get("ref_id")
+    if not ref_id:
+        return None
+    target = "approved" if decision == "approved" else "rejected"
+    try:
+        if ref_table == "product_concepts":
+            business_db.set_concept_status(db_path, owner, ref_id, target)
+        elif ref_table == "art_briefs":
+            business_db.set_art_brief_status(db_path, owner, ref_id, target)
+        elif ref_table == "store_listings":
+            business_db.update_store_listing(db_path, owner, ref_id, status=target)
+        elif ref_table == "social_posts":
+            business_db.update_social_post(db_path, owner, ref_id, status=target)
+        elif ref_table == "ops_plans":
+            # This is the actual trigger: approving the review item is the owner's one
+            # approval for the whole plan, and only here does the background runner
+            # actually start touching a real server.
+            ops_plans.set_plan_status(db_path, ref_id, target)
+            if target == "approved" and ssh_ops is not None:
+                ops_plans.run_plan_async(db_path, ref_id, ssh_ops)
+        else:
+            return None
+    except Exception:
+        return None
+    return f"{ref_table}#{ref_id} -> {target}"
+
+
 class BusinessClient:
     """Executes the business tools. Same call_tool shape as the other integrations."""
 
@@ -1028,6 +1063,17 @@ class BusinessClient:
             return {"items": business_db.list_review_items(
                 db_path, owner, status=arguments.get("status", "pending"))}
         if name == "decide_review_item":
+            existing = business_db.get_review_item(db_path, owner, arguments["item_id"])
+            if existing is not None and existing.get("ref_table") in ("pending_actions", "git_pull_requests"):
+                # Resolving these means executing a real Kroger/CCXT/mail/HA action or
+                # merging a real PR -- both need context (era/kroger/ccxt/git_ops/etc.)
+                # this business-tools client doesn't have. Saying so beats silently
+                # marking the card decided while nothing actually happens, which is
+                # exactly the bug that motivated unifying these onto one page.
+                return {"error": (
+                    "This one has to be decided from the Review page in the web dashboard, "
+                    "not from chat -- tell the owner it's waiting for him there."
+                )}
             item = business_db.decide_review_item(
                 db_path, owner, arguments["item_id"], arguments["decision"],
                 option_id=arguments.get("option_id"), note=arguments.get("note"))
@@ -1035,27 +1081,7 @@ class BusinessClient:
                 return {"error": "no pending review item with that id (it may already be decided)"}
             # Same write-through the web page does, so a decision relayed through chat
             # advances the pipeline identically to one clicked on the Review page.
-            ref_table, ref_id = item.get("ref_table"), item.get("ref_id")
-            target = "approved" if arguments["decision"] == "approved" else "rejected"
-            if ref_id:
-                try:
-                    if ref_table == "product_concepts":
-                        business_db.set_concept_status(db_path, owner, ref_id, target)
-                    elif ref_table == "art_briefs":
-                        business_db.set_art_brief_status(db_path, owner, ref_id, target)
-                    elif ref_table == "store_listings":
-                        business_db.update_store_listing(db_path, owner, ref_id, status=target)
-                    elif ref_table == "social_posts":
-                        business_db.update_social_post(db_path, owner, ref_id, status=target)
-                    elif ref_table == "ops_plans":
-                        # This is the actual trigger: approving the review item is the
-                        # owner's one approval for the whole plan, and only here does the
-                        # background runner actually start touching a real server.
-                        ops_plans.set_plan_status(db_path, ref_id, target)
-                        if target == "approved" and self.ssh_ops is not None:
-                            ops_plans.run_plan_async(db_path, ref_id, self.ssh_ops)
-                except Exception:
-                    pass
+            apply_review_decision(db_path, owner, item, arguments["decision"], ssh_ops=self.ssh_ops)
             return {"ok": True, "item": item}
 
         if name == "propose_ops_plan":

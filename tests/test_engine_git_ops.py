@@ -5,13 +5,14 @@ anything deployed. Mirrors test_engine_kroger.py/test_engine_letterstream.py's s
 """
 import pytest
 
-from assistant.core import db, engine
+from assistant.core import business_db, db, engine
 
 
 @pytest.fixture
 def db_path(tmp_path):
     path = str(tmp_path / "test.db")
     db.init_db(path)
+    business_db.init_business_db(path)
     return path
 
 
@@ -154,3 +155,44 @@ def test_build_system_prompt_includes_git_note_when_configured():
 def test_build_system_prompt_omits_git_note_when_not_configured():
     prompt = engine.build_system_prompt("America/New_York", git_ops=None)
     assert "git_merge_pr" not in prompt
+
+
+# --- unifying the decision surface: an opened PR lands on the Review page too ---
+
+def test_opening_a_pr_creates_a_review_item(db_path, owner_id):
+    """A PR sitting open with green CI used to be invisible as a decision until someone
+    happened to ask Jarvis to check and merge it -- opening one now puts it in front of
+    the owner the same way anything else the team produces does."""
+    git_ops, mcp = make_git_ops()
+    mcp.call_tool = lambda name, arguments: (
+        {"ok": True, "pr_number": 4, "url": "https://github.com/x/y/pull/4", "state": "open"}
+        if name == "git_open_pr" else {"ok": True}
+    )
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "git_open_pr", "arguments": {
+                "branch_name": "feature/x", "title": "Fix the thing", "body": "details"}}}
+        ]},
+        {"role": "assistant", "content": "Opened PR #4."},
+    ])
+
+    engine.handle_message(db_path, llm, owner_id, "open a PR", git_ops=git_ops)
+
+    items = business_db.list_review_items(db_path, owner_id)
+    assert len(items) == 1
+    assert items[0]["ref_table"] == "git_pull_requests" and items[0]["ref_id"] == 4
+    assert "Fix the thing" in items[0]["title"]
+
+
+def test_a_failed_pr_open_creates_no_review_item(db_path, owner_id):
+    git_ops, mcp = make_git_ops()  # default fake returns {"ok": True} with no pr_number
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "git_open_pr", "arguments": {"branch_name": "feature/x", "title": "t"}}}
+        ]},
+        {"role": "assistant", "content": "Done."},
+    ])
+
+    engine.handle_message(db_path, llm, owner_id, "open a PR", git_ops=git_ops)
+
+    assert business_db.list_review_items(db_path, owner_id) == []

@@ -1,20 +1,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { InboxList } from './components/InboxList';
-import { fetchInbox, searchInbox } from './api';
-import { EmailSummary } from './types';
+import { ThreadView } from './components/ThreadView';
+import { fetchInbox, searchInbox, fetchMessage } from './api';
+import { EmailSummary, EmailMessage } from './types';
 import './EmailPage.css';
 
 type ViewState = 'idle' | 'loading' | 'error';
 
-// NOTE: this is an intermediate version (list + search only). Thread view
-// and compose land in follow-up commits on this branch.
+// NOTE: compose lands in the next commit on this branch.
 export function EmailPage() {
   const [messages, setMessages] = useState<EmailSummary[]>([]);
   const [listState, setListState] = useState<ViewState>('idle');
   const [listError, setListError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchMode, setIsSearchMode] = useState(false);
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedMessage, setSelectedMessage] = useState<EmailMessage | null>(null);
+  const [threadState, setThreadState] = useState<ViewState>('idle');
+  const [threadError, setThreadError] = useState<string | null>(null);
 
   const loadInbox = useCallback(async () => {
     setListState('loading');
@@ -55,6 +59,21 @@ export function EmailPage() {
     [loadInbox]
   );
 
+  const openMessage = useCallback(async (id: string) => {
+    setSelectedId(id);
+    setThreadState('loading');
+    setThreadError(null);
+    setSelectedMessage(null);
+    try {
+      const msg = await fetchMessage(id);
+      setSelectedMessage(msg);
+      setThreadState('idle');
+    } catch (err) {
+      setThreadState('error');
+      setThreadError((err as Error).message);
+    }
+  }, []);
+
   return (
     <div className="email-page">
       <div className="email-page__toolbar">
@@ -89,8 +108,9 @@ export function EmailPage() {
           selectedId={selectedId}
           loading={listState === 'loading'}
           error={listError}
-          onSelect={setSelectedId}
+          onSelect={openMessage}
         />
+        <ThreadView message={selectedMessage} loading={threadState === 'loading'} error={threadError} />
       </div>
     </div>
   );

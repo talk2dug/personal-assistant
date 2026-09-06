@@ -1,8 +1,9 @@
 // The modularity convention for the whole UI: a future agent section is a new page
-// component plus one entry here — nothing else needs to change. App.jsx maps this
+// component plus one entry here â€” nothing else needs to change. App.jsx maps this
 // list into both the nav sidebar and the router.
 import Agents from './pages/Agents'
 import Chat from './pages/Chat'
+import Credit from './pages/Credit'
 import Crypto from './pages/Crypto'
 import Finance from './pages/Finance'
 import Media from './pages/Media'
@@ -20,5 +21,6 @@ export const sections = [
   { path: '/media', label: 'Media', element: Media },
   { path: '/finance', label: 'Finance', element: Finance },
   { path: '/crypto', label: 'Crypto', element: Crypto },
+  { path: '/credit', label: 'Credit', element: Credit },
   { path: '/agents', label: 'Office', element: Agents },
 ]

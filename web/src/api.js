@@ -39,7 +39,7 @@ export const api = {
   chatHistory: () => request('/api/chat/history'),
   sendMessage: (text, image) =>
     request('/api/chat/message', { method: 'POST', body: JSON.stringify(image ? { text, image } : { text }) }),
-  // FormData, not JSON — must NOT go through request()'s helper, which force-sets
+  // FormData, not JSON â€” must NOT go through request()'s helper, which force-sets
   // Content-Type: application/json; the browser needs to set the multipart boundary itself.
   transcribe: async (audioBlob) => {
     const form = new FormData()
@@ -150,6 +150,41 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ excluded }),
     }),
+
+  // --- credit score history + dispute tracker ---
+  creditScores: (bureau) => request(`/api/credit/scores${bureau ? `?bureau=${bureau}` : ''}`),
+  addCreditScore: (entry) =>
+    request('/api/credit/scores', { method: 'POST', body: JSON.stringify(entry) }),
+  deleteCreditScore: (id) => request(`/api/credit/scores/${id}`, { method: 'DELETE' }),
+
+  creditDisputes: ({ status, bureau } = {}) => {
+    const params = new URLSearchParams()
+    if (status) params.set('status', status)
+    if (bureau) params.set('bureau', bureau)
+    const qs = params.toString()
+    return request(`/api/credit/disputes${qs ? `?${qs}` : ''}`)
+  },
+  createDispute: (dispute) =>
+    request('/api/credit/disputes', { method: 'POST', body: JSON.stringify(dispute) }),
+  updateDispute: (id, patch) =>
+    request(`/api/credit/disputes/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+
+  disputeLetters: (disputeId) => request(`/api/credit/disputes/${disputeId}/letters`),
+  draftDisputeLetter: (disputeId, payload) =>
+    request(`/api/credit/disputes/${disputeId}/letters/draft`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  // THE hard-confirm step: the only frontend call that can reach
+  // letterstream_authorize_mail (via credit.py's mail_letter route). Only ever called
+  // from ConfirmMailModal, after the owner has explicitly reviewed the recipient, the
+  // full letter text, and the quoted cost. expectedCost is echoed back exactly as
+  // fetched so the backend can refuse a stale/changed quote (409) rather than mail it.
+  mailDisputeLetter: (letterId, expectedCost) =>
+    request(`/api/credit/letters/${letterId}/mail`, {
+      method: 'POST', body: JSON.stringify({ expected_cost: expectedCost }),
+    }),
+  trackDisputeLetter: (letterId) =>
+    request(`/api/credit/letters/${letterId}/track`, { method: 'POST' }),
 }
 
 export { ApiError }

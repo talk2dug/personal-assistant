@@ -624,6 +624,24 @@ BUSINESS_TOOLS = [
         }, "required": ["employee", "action"]},
     }},
     {"type": "function", "function": {
+        "name": "set_employee_capability",
+        "description": (
+            "Explicitly grant or revoke an employee's capability tier — in particular, "
+            "'execute', which gives real git tools (create a branch, push, open a pull "
+            "request) and, later, server access. This is deliberately separate from "
+            "hiring: a job description alone never grants 'execute', no matter how it's "
+            "worded, so this is the one and only way an employee gets real tool access. "
+            "Only call this when the owner explicitly asks to give a specific named "
+            "employee that access — never infer it from a title like 'systems "
+            "engineer' or 'devops' on its own. Pass tier=null to revoke back to whatever "
+            "their department would normally give them."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "employee": {"type": "string", "description": "The employee's key, from list_employees."},
+            "tier": {"type": ["string", "null"], "enum": ["execute", "research", "authoring", "media", None]},
+        }, "required": ["employee", "tier"]},
+    }},
+    {"type": "function", "function": {
         "name": "employee_work_history",
         "description": "Recent assignments and deliverables, optionally for one employee.",
         "parameters": {"type": "object", "properties": {
@@ -676,7 +694,13 @@ BUSINESS_SYSTEM_NOTE = (
     "shows the roster, assign_work gives someone a piece of work, manage_employee pauses, "
     "reactivates, releases or revises a description, and employee_work_history shows what "
     "they have delivered. Hired staff can search the web and produce text or code; they "
-    "cannot deploy, publish, send or buy anything, and neither should you claim they did."
+    "cannot deploy, publish, send or buy anything, and neither should you claim they did. "
+    "The one exception is set_employee_capability, which grants the 'execute' tier and "
+    "with it real git tools (branch, push, open a pull request — merging still needs the "
+    "owner's confirmation separately). This is never automatic and never inferred from a "
+    "title or job description, no matter how clearly it says 'systems engineer' or "
+    "'devops' — only call set_employee_capability when the owner explicitly names an "
+    "employee and says to give them that access."
     " There is a live crypto price feed: a poller keeps a local LiveCoinWatch cache of "
     "the top 250 coins, refreshed every minute, and market_prices, market_movers, "
     "market_change_since, market_new_listings and market_feed_status read it. Always use "
@@ -1188,6 +1212,16 @@ class BusinessClient:
             if not staff.set_status(db_path, key, status):
                 return {"ok": False, "error": f"no employee {key!r}"}
             return {"ok": True, "employee": key, "status": status}
+
+        if name == "set_employee_capability":
+            try:
+                emp = staff.set_capability_override(db_path, arguments["employee"], arguments.get("tier"))
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            if emp is None:
+                return {"ok": False, "error": f"no employee {arguments['employee']!r}"}
+            return {"ok": True, "employee": emp["key"], "capability_tier": emp["capability_tier"],
+                    "can": staff.TIER_DESCRIPTIONS.get(emp["capability_tier"], "")}
 
         if name == "employee_work_history":
             return {"work": staff.recent_work(

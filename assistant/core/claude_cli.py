@@ -152,6 +152,32 @@ class ClaudeCLIClient:
         lines.append(current.get("content", ""))
         return "\n".join(lines)
 
+    def _setup_tool_bridge(self, workdir: str, tools: list[dict], env: dict, command: list[str]) -> None:
+        """Writes the tool schema + MCP config the bridge (mcp_bridge.py) reads, and
+        points this turn's env at it. Shared by converse() (the owner's own full
+        catalog) and engineer() (an execute-tier employee's narrow, purpose-built set)
+        -- whichever list is written here is the entire universe of MCP tools the
+        subprocess can see, regardless of what --allowed-tools says, since the bridge
+        only ever serves what's in this file."""
+        schema_path = os.path.join(workdir, "tools.json")
+        with open(schema_path, "w", encoding="utf-8") as f:
+            json.dump(tools, f)
+        bridge = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp_bridge.py")
+        mcp_config = {"mcpServers": {"jarvis": {
+            "command": os.environ.get("JARVIS_PYTHON") or _python_executable(),
+            "args": [bridge],
+        }}}
+        config_path = os.path.join(workdir, "mcp.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(mcp_config, f)
+        command += ["--mcp-config", config_path]
+        env.update({
+            "JARVIS_TOOLS_SCHEMA": schema_path,
+            "JARVIS_TOOLS_URL": self.tools_url or "",
+            "JARVIS_TOOLS_TOKEN": self.tools_token or "",
+            "JARVIS_USER_ID": str(self.user_id if self.user_id is not None else ""),
+        })
+
     # ---- public API ------------------------------------------------------
 
     def converse(
@@ -172,24 +198,7 @@ class ClaudeCLIClient:
             command = self._base_command(system_prompt, prompt)
 
             if tools:
-                schema_path = os.path.join(workdir, "tools.json")
-                with open(schema_path, "w", encoding="utf-8") as f:
-                    json.dump(tools, f)
-                bridge = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp_bridge.py")
-                mcp_config = {"mcpServers": {"jarvis": {
-                    "command": os.environ.get("JARVIS_PYTHON") or _python_executable(),
-                    "args": [bridge],
-                }}}
-                config_path = os.path.join(workdir, "mcp.json")
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(mcp_config, f)
-                command += ["--mcp-config", config_path]
-                env.update({
-                    "JARVIS_TOOLS_SCHEMA": schema_path,
-                    "JARVIS_TOOLS_URL": self.tools_url or "",
-                    "JARVIS_TOOLS_TOKEN": self.tools_token or "",
-                    "JARVIS_USER_ID": str(self.user_id if self.user_id is not None else ""),
-                })
+                self._setup_tool_bridge(workdir, tools, env, command)
 
             if image_bytes is not None:
                 image_path = os.path.join(workdir, "snapshot.jpg")
@@ -229,6 +238,40 @@ class ClaudeCLIClient:
             return self._run(command)
         finally:
             self.timeout = previous_timeout
+
+    def engineer(
+        self, instructions: str, system_prompt: str, tools: list[dict], timeout: int | None = None,
+    ) -> str:
+        """One-shot dev-team task with real tool access, for 'execute'-tier employees
+        (staff.py) -- the one employee capability that can act rather than only report.
+
+        Distinct from research(): this can call tools, but strictly limited to whatever
+        purpose-built list the caller passes in (git branch/push/PR today; SSH/ops-plan
+        tools later) -- never the owner's full catalog, and never Bash/Write/Edit/Task/
+        Agent/SendMessage, which stay in DENIED_TOOLS exactly as for every other
+        invocation. Distinct from converse(): no conversation history, since this is a
+        one-shot assignment rather than a back-and-forth chat.
+
+        Tool calls authenticate to the bridge as whoever this client was built for
+        (self.user_id/tools_token, set once at startup) -- the same owner identity
+        converse() uses -- so a merge_pr call from here lands as a pending_action the
+        owner sees in his own chat, exactly as if he'd asked for it himself.
+        """
+        env = dict(os.environ)
+        denied = list(DENIED_TOOLS)
+
+        with tempfile.TemporaryDirectory(prefix="jarvis-engineer-") as workdir:
+            command = self._base_command(system_prompt, instructions)
+            self._setup_tool_bridge(workdir, tools, env, command)
+            command += ["--allowed-tools", "mcp__jarvis,WebSearch", "--disallowed-tools", ",".join(denied)]
+
+            previous_timeout = self.timeout
+            try:
+                if timeout:
+                    self.timeout = timeout
+                return self._run(command, env=env, cwd=workdir)
+            finally:
+                self.timeout = previous_timeout
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None, think: bool = False) -> dict:
         """LLMClient-compatible single-shot call, for engine's confirmation classifier.

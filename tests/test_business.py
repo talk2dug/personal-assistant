@@ -11,7 +11,7 @@ import json
 import pytest
 
 from assistant.config import BusinessProfile
-from assistant.core import agents, business_db
+from assistant.core import agents, business_db, staff
 from assistant.core.business_tools import BUSINESS_TOOLS, BusinessClient
 from assistant.core.engine import BusinessContext, _dispatch_tool_call, build_system_prompt, select_tools
 
@@ -336,6 +336,41 @@ def test_business_tools_reach_the_dispatcher(db_path):
     )
     assert json.loads(result)["ok"] is True
     assert business_db.list_tasks(db_path, 1)[0]["text"] == "Order blanks"
+
+
+# --- set_employee_capability ---------------------------------------------------
+
+def test_set_employee_capability_grants_execute_tier(db_path):
+    staff.init_staff_db(db_path)
+    staff.hire(db_path, "Systems Engineer", "Runs our infrastructure and deploy pipeline.")
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE)
+
+    result = client.call_tool("set_employee_capability", {"employee": "systems_engineer", "tier": "execute"})
+
+    assert result["ok"] is True
+    assert result["capability_tier"] == "execute"
+    assert staff.get_staff(db_path, "systems_engineer")["capability_tier"] == "execute"
+
+
+def test_set_employee_capability_rejects_an_unknown_tier(db_path):
+    staff.init_staff_db(db_path)
+    staff.hire(db_path, "Systems Engineer", "Runs our infrastructure.")
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE)
+
+    result = client.call_tool("set_employee_capability", {"employee": "systems_engineer", "tier": "root"})
+
+    assert result["ok"] is False
+    assert "unknown capability tier" in result["error"]
+
+
+def test_set_employee_capability_reports_a_missing_employee(db_path):
+    staff.init_staff_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE)
+
+    result = client.call_tool("set_employee_capability", {"employee": "nobody", "tier": "execute"})
+
+    assert result["ok"] is False
+    assert "nobody" in result["error"]
 
 
 def test_business_tools_are_offered_on_every_turn(db_path):

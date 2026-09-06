@@ -185,3 +185,60 @@ def test_error_payload_raises(client):
 def test_deny_list_covers_the_documented_escape_tools():
     for name in ("Task", "SendMessage", "ListAgents", "Bash", "WebFetch"):
         assert name in DENIED_TOOLS
+
+
+# --- engineer() -- execute-tier employees ------------------------------------
+
+def test_engineer_wires_the_bridge_with_only_the_tools_it_was_given(client):
+    """engineer() must be scoped to exactly the caller's tool list -- an execute-tier
+    employee only ever sees git tools, never the owner's full catalog, because the
+    bridge only ever serves whatever was written to the schema file for this call."""
+    git_tools = [{"type": "function", "function": {"name": "git_create_branch", "parameters": {}}}]
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        schema_path = kwargs["env"]["JARVIS_TOOLS_SCHEMA"]
+        captured["schema"] = json.loads(open(schema_path, encoding="utf-8").read())
+        captured["env"] = kwargs["env"]
+        return ok()
+
+    with patch("subprocess.run", side_effect=fake_run):
+        client.engineer("do the task", system_prompt="You are an engineer.", tools=git_tools)
+
+    assert captured["schema"] == git_tools
+    assert captured["env"]["JARVIS_TOOLS_TOKEN"] == "tok"
+    assert captured["env"]["JARVIS_USER_ID"] == "7"
+
+
+def test_engineer_still_denies_every_escape_path(client):
+    """The one tier that can act still never gets Bash/Write/Edit/Task/Agent/SendMessage
+    -- real tool access is exclusively through the purpose-built tools passed in."""
+    with patch("subprocess.run", return_value=ok()) as run:
+        client.engineer("do the task", system_prompt="s", tools=[])
+    command = run.call_args.args[0]
+    denied = command[command.index("--disallowed-tools") + 1].split(",")
+    for escape in ("Bash", "Task", "Agent", "SendMessage", "Write", "Edit"):
+        assert escape in denied
+
+
+def test_engineer_allows_mcp_jarvis_and_websearch_only(client):
+    with patch("subprocess.run", return_value=ok()) as run:
+        client.engineer("do the task", system_prompt="s", tools=[])
+    command = run.call_args.args[0]
+    allowed = command[command.index("--allowed-tools") + 1].split(",")
+    assert set(allowed) == {"mcp__jarvis", "WebSearch"}
+
+
+def test_engineer_has_no_conversation_history_rendering(client):
+    """A one-shot assignment, not a back-and-forth chat -- the instructions go straight
+    into the prompt, unlike converse()'s history-block rendering."""
+    with patch("subprocess.run", return_value=ok()) as run:
+        client.engineer("branch and push the fix", system_prompt="s", tools=[])
+    command = run.call_args.args[0]
+    assert command[2] == "branch and push the fix"
+
+
+def test_engineer_respects_a_custom_timeout_and_restores_the_default(client):
+    with patch("subprocess.run", return_value=ok()):
+        client.engineer("task", system_prompt="s", tools=[], timeout=1800)
+    assert client.timeout == 300  # the fixture's default, restored after the call

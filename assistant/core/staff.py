@@ -117,9 +117,16 @@ CREATE INDEX IF NOT EXISTS idx_staff_work_staff ON staff_work(staff_id, id DESC)
 #   research  - web search, reports findings
 #   authoring - produces text or code as a deliverable; writes nothing outside staff_work
 #   media     - may additionally request image/video generation on the GPU bridge
+#   execute   - real git/SSH tools (branch, push, PR, and later ops-plan/SSH); see below
 #
-# No tier grants mail, Home Assistant, money movement, shell, or the filesystem. Those
-# stay with the owner's own confirmed tool calls.
+# No tier grants mail, Home Assistant, or money movement -- those stay with the owner's
+# own confirmed tool calls. "execute" is the one tier that can touch a real repo or
+# server, and it is deliberately NOT reachable via department inference below (see
+# set_capability_override) -- the same lesson infer_data_feeds's "paper" comment
+# documents: inferring a real capability from job-description wording let an employee
+# pick it up from an unrelated line describing who it reports to. Granting "execute"
+# is an explicit, separate action the owner takes on a specific employee, never a side
+# effect of how its job description happens to be worded.
 CAPABILITY_TIERS = {
     "engineering": "authoring",
     "design": "media",
@@ -135,6 +142,7 @@ TIER_DESCRIPTIONS = {
     "research": "search the web and report findings",
     "authoring": "search the web and write text or code as a deliverable",
     "media": "search the web, write copy, and request image or video generation",
+    "execute": "propose and, once approved, carry out real changes to code repositories and servers",
 }
 
 # Sprite indices the office UI has art for.
@@ -162,6 +170,10 @@ def init_staff_db(db_path: str) -> None:
             ("last_alert_at", "TEXT"),
             ("data_feeds", "TEXT"),
             ("briefing_from", "TEXT"),
+            # Explicit, separate override for capability_tier -- see set_capability_override
+            # and the note above CAPABILITY_TIERS. NULL means "use whatever department
+            # inference gives it," same as every employee hired before this column existed.
+            ("capability_override", "TEXT"),
         ):
             if name not in cols:
                 conn.execute(f"ALTER TABLE staff ADD COLUMN {name} {ddl}")
@@ -434,7 +446,10 @@ def revise_job_description(db_path: str, key: str, job_description: str) -> dict
     if emp is None:
         return None
     department = infer_department(emp["title"], job_description)
-    tier = CAPABILITY_TIERS.get(department, "research")
+    # An explicitly granted capability_override survives a description rewrite -- without
+    # this, revising an execute-tier employee's duties would silently strip the grant back
+    # to whatever department inference gives it, since inference never produces "execute".
+    tier = emp["capability_override"] or CAPABILITY_TIERS.get(department, "research")
     seniority = infer_seniority(job_description)
     skills = extract_skills(job_description)
     prompt = compile_system_prompt(emp["title"], job_description, department, seniority,
@@ -446,6 +461,30 @@ def revise_job_description(db_path: str, key: str, job_description: str) -> dict
                WHERE key = ?""",
             (job_description.strip(), department, seniority, json.dumps(skills),
              prompt, tier, _now(), key))
+        conn.commit()
+    return get_staff(db_path, key)
+
+
+def set_capability_override(db_path: str, key: str, tier: str | None) -> dict | None:
+    """Explicitly grant (or revoke) a capability tier, independent of what department
+    inference would otherwise give this employee. This is the ONLY way an employee ever
+    reaches the "execute" tier -- see the note above CAPABILITY_TIERS for why that has to
+    be a separate, deliberate action rather than something a job description can trigger
+    by wording alone. Pass tier=None to revert to inferred behavior."""
+    if tier is not None and tier not in TIER_DESCRIPTIONS:
+        raise ValueError(f"unknown capability tier {tier!r}; valid: {', '.join(sorted(TIER_DESCRIPTIONS))}")
+    emp = get_staff(db_path, key)
+    if emp is None:
+        return None
+    effective_tier = tier or CAPABILITY_TIERS.get(emp["department"], "research")
+    skills = json.loads(emp["skills"] or "[]")
+    prompt = compile_system_prompt(
+        emp["title"], emp["job_description"], emp["department"], emp["seniority"], skills, effective_tier)
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """UPDATE staff SET capability_override = ?, capability_tier = ?,
+                   system_prompt = ?, updated_at = ? WHERE key = ?""",
+            (tier, effective_tier, prompt, _now(), key))
         conn.commit()
     return get_staff(db_path, key)
 
@@ -667,9 +706,12 @@ def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> str:
 def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> dict:
     """Give an employee a piece of work and record what came back.
 
-    Runs through llm.research(), which carries web search and no Jarvis tools — the same
-    path the background agents use, and for the same reason: an employee should be able
-    to look things up and nothing else.
+    Every tier but "execute" runs through llm.research(), which carries web search and no
+    Jarvis tools — the same path the background agents use, and for the same reason: an
+    employee should be able to look things up and nothing else. "execute" is the one
+    tier that can act (see the note above CAPABILITY_TIERS) — it runs through
+    llm.engineer() instead, with real but narrowly-scoped tools (git today; SSH/ops-plan
+    later), never the owner's full catalog.
     """
     emp = get_staff(db_path, key)
     if emp is None:
@@ -695,7 +737,15 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> 
                 fee_pct=paper_trading.DEFAULT_FEE_PCT,
                 max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY)
 
-        output = llm.research(prompt, system_prompt=emp["system_prompt"], timeout=timeout)
+        if emp["capability_tier"] == "execute":
+            if not hasattr(llm, "engineer"):
+                raise RuntimeError(
+                    "this LLM backend has no engineer() method, so execute-tier "
+                    "employees cannot be given real tool access on it")
+            from .git_tools import GIT_TOOLS
+            output = llm.engineer(prompt, system_prompt=emp["system_prompt"], tools=GIT_TOOLS, timeout=timeout)
+        else:
+            output = llm.research(prompt, system_prompt=emp["system_prompt"], timeout=timeout)
         status, error = "delivered", None
 
         if "paper" in feeds and output:

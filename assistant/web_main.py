@@ -1,16 +1,16 @@
-﻿"""Entrypoint for the web UI (jarvis-web.service) â€” separate process from main.py's
+ï»¿"""Entrypoint for the web UI (jarvis-web.service) â€” separate process from main.py's
 Telegram bot, sharing config/db but running independently."""
 import logging
 
 import uvicorn
 
 from .config import load_config
-from .core import business_db, db, media_scan
+from .core import db, media_scan
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
-    build_era_context, build_git_ops_context, build_gpu_bridge, build_home_assistant_context,
-    build_kroger_context, build_letterstream_context, build_llm, build_mail_context,
-    build_obsidian_context, build_personal_context, build_phone_context, build_ticketmaster_context,
+    build_era_context, build_gpu_bridge, build_home_assistant_context, build_kroger_context,
+    build_letterstream_context, build_llm, build_mail_context, build_obsidian_context,
+    build_personal_context, build_phone_context, build_ticketmaster_context,
 )
 from .core.stt import Transcriber
 from .core.tts import Speaker
@@ -26,13 +26,9 @@ def main() -> None:
     cfg = load_config()
     db.init_db(cfg.db_path)
     # The catalogue is written by scripts/scan_network_media.py, which may never have
-    # run on a fresh install — create the tables here so the Media page returns empty
+    # run on a fresh install â€” create the tables here so the Media page returns empty
     # results rather than a 500.
     media_scan.init_media_db(cfg.db_path)
-    # review_items is the Review page's single decision queue -- pending_actions (Kroger/
-    # CCXT/mail/HA/git confirmations) get a linked row there regardless of whether the
-    # business feature itself is configured, so this can't stay gated behind that flag.
-    business_db.init_business_db(cfg.db_path)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)
 
@@ -50,13 +46,15 @@ def main() -> None:
     # cross-process safe, so a synchronous job from here still can't collide with it.
     bridge = build_gpu_bridge(cfg)
     business = build_business_context(cfg, owner_row["id"] if owner_row else None, llm=llm, bridge=bridge)
-    personal = build_personal_context(cfg, owner_row["id"] if owner_row else None)
     airbnb = build_airbnb_context(cfg)
     ticketmaster = build_ticketmaster_context(cfg)
     kroger = build_kroger_context(cfg)
     ccxt = build_ccxt_context(cfg)
+    # Built before Personal so its LetterStreamTools client can be handed into
+    # PersonalClient for the credit dispute tracker's draft_dispute_letter/
+    # track_dispute_letter tools -- see build_personal_context's docstring.
     letterstream = build_letterstream_context(cfg)
-    git_ops = build_git_ops_context(cfg)
+    personal = build_personal_context(cfg, owner_row["id"] if owner_row else None, letterstream=letterstream)
     stt = Transcriber(model_size=cfg.stt_model_size)
     speaker = Speaker(voice_path=cfg.piper_voice_path)
 
@@ -64,7 +62,6 @@ def main() -> None:
         cfg, llm, era, calendar, phone, stt, mail=mail, obsidian=obsidian, home_assistant=home_assistant,
         business=business, personal=personal, bridge=bridge, speaker=speaker, static_dir="web/dist",
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops,
     )
 
     logger.info("Jarvis web UI starting on port %d", cfg.web_port)
@@ -73,4 +70,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

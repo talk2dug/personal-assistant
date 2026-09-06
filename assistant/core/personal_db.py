@@ -1,7 +1,8 @@
-"""Storage for the owner's personal (non-business) life — projects, to-dos, and errands
-delegated to Jarvis ("find me a doctor").
+"""Storage for the owner's personal (non-business) life â€” projects, to-dos, errands
+delegated to Jarvis ("find me a doctor"), pantry status, and now credit score history
+and credit-report dispute tracking.
 
-A sibling of business_db.py, which is itself a sibling of db.py — same reasoning applies
+A sibling of business_db.py, which is itself a sibling of db.py â€” same reasoning applies
 one level down: personal errands have nothing to do with the business's agent roster,
 office sprites, or market/trend pipeline, so they get their own bounded-context module
 rather than a scope column bolted onto business_projects/business_tasks. Same discipline
@@ -63,6 +64,65 @@ CREATE TABLE IF NOT EXISTS pantry_items (
     updated_at TEXT NOT NULL,
     UNIQUE(owner_user_id, item)
 );
+
+-- Manual credit score entries -- there is no live credit-bureau feed, so every row here
+-- is something the owner told Jarvis after checking a score himself (a bureau site, a
+-- lender's soft pull, Credit Karma, etc). One row per check, not a single current-value
+-- column, so the dashboard can show a real trend over time rather than just a snapshot.
+CREATE TABLE IF NOT EXISTS credit_score_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    bureau TEXT NOT NULL CHECK (bureau IN ('experian', 'equifax', 'transunion', 'other')),
+    score INTEGER NOT NULL CHECK (score BETWEEN 300 AND 850),
+    recorded_on TEXT NOT NULL,  -- local date the score was actually checked/pulled
+    source TEXT,                -- e.g. 'Credit Karma', 'Chase Credit Journey', 'hard pull'
+    notes TEXT,
+    created_at TEXT NOT NULL
+);
+
+-- One disputed credit-report item's whole lifecycle, tracked per bureau. The same
+-- inaccurate tradeline reported by two bureaus is two rows here, not one -- each bureau
+-- is disputed, mailed, and resolved independently, with its own letter.
+CREATE TABLE IF NOT EXISTS dispute_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    bureau TEXT NOT NULL CHECK (bureau IN ('experian', 'equifax', 'transunion', 'other')),
+    creditor_name TEXT NOT NULL,
+    account_reference TEXT,          -- account/reference number on the report, if any
+    item_description TEXT NOT NULL,  -- what's being disputed
+    reason TEXT NOT NULL,            -- why it's inaccurate -- goes into the dispute letter
+    status TEXT NOT NULL DEFAULT 'drafted' CHECK (status IN ('drafted', 'mailed', 'resolved')),
+    resolution TEXT,                 -- filled in once status -> resolved
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Each real LetterStream mailing attempt against a dispute item. Kept separate from
+-- dispute_items (rather than columns on it) because a follow-up letter -- no response
+-- in 30 days, say -- is a second real mailing against the same item, not a second item.
+-- status is 'quoted' the moment LetterStream's preauth prices it (no money spent, nothing
+-- mailed) and only becomes 'mailed' after letterstream_authorize_mail has actually been
+-- confirmed and run -- see personal_tools.py's record_dispute_letter_mailed.
+CREATE TABLE IF NOT EXISTS dispute_letters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dispute_item_id INTEGER NOT NULL REFERENCES dispute_items(id),
+    letter_text TEXT NOT NULL,
+    recipient_name TEXT NOT NULL,
+    recipient_address TEXT NOT NULL,
+    recipient_address_2 TEXT,
+    recipient_city TEXT NOT NULL,
+    recipient_state TEXT NOT NULL,
+    recipient_zip TEXT NOT NULL,
+    mail_type TEXT NOT NULL DEFAULT 'certified',
+    quoted_cost TEXT,       -- LetterStream's preauth quote, straight from its response
+    authcode TEXT,          -- preauth authcode; consumed once by letterstream_authorize_mail
+    job_name TEXT,
+    doc_id TEXT,            -- stable id used for later tracking lookups
+    tracking_number TEXT,   -- USPS cert/tracking number, once known
+    status TEXT NOT NULL DEFAULT 'quoted' CHECK (status IN ('quoted', 'mailed')),
+    quoted_at TEXT NOT NULL,
+    mailed_at TEXT
+);
 """
 
 
@@ -81,6 +141,10 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _rows(cursor):
@@ -257,3 +321,192 @@ def delete_pantry_item(db_path: str, owner_user_id: int, item_id: int) -> bool:
             "DELETE FROM pantry_items WHERE id = ? AND owner_user_id = ?", (item_id, owner_user_id))
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- credit score history --------------------------------------------------------
+
+def create_credit_score_entry(
+    db_path: str, owner_user_id: int, bureau: str, score: int, recorded_on: str | None = None,
+    source: str | None = None, notes: str | None = None,
+) -> int:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "INSERT INTO credit_score_entries"
+            " (owner_user_id, bureau, score, recorded_on, source, notes, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (owner_user_id, bureau, score, recorded_on or _today(), source, notes, _now()),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_credit_score_entries(db_path: str, owner_user_id: int, bureau: str | None = None):
+    query = "SELECT * FROM credit_score_entries WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if bureau:
+        query += " AND bureau = ?"
+        params.append(bureau)
+    query += " ORDER BY recorded_on ASC, id ASC"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
+def delete_credit_score_entry(db_path: str, owner_user_id: int, entry_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "DELETE FROM credit_score_entries WHERE id = ? AND owner_user_id = ?", (entry_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# --- dispute items -----------------------------------------------------------
+
+def create_dispute_item(
+    db_path: str, owner_user_id: int, bureau: str, creditor_name: str, item_description: str,
+    reason: str, account_reference: str | None = None,
+) -> int:
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "INSERT INTO dispute_items"
+            " (owner_user_id, bureau, creditor_name, account_reference, item_description, reason,"
+            "  created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (owner_user_id, bureau, creditor_name, account_reference, item_description, reason, now, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_dispute_items(db_path: str, owner_user_id: int, status: str | None = None, bureau: str | None = None):
+    query = "SELECT * FROM dispute_items WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    if bureau:
+        query += " AND bureau = ?"
+        params.append(bureau)
+    query += " ORDER BY CASE status WHEN 'drafted' THEN 0 WHEN 'mailed' THEN 1 ELSE 2 END, updated_at DESC"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
+def get_dispute_item(db_path: str, owner_user_id: int, dispute_item_id: int):
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM dispute_items WHERE id = ? AND owner_user_id = ?",
+            (dispute_item_id, owner_user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_dispute_item(db_path: str, owner_user_id: int, dispute_item_id: int, **fields) -> bool:
+    allowed = {
+        k: v for k, v in fields.items()
+        if k in ("status", "resolution", "creditor_name", "item_description", "reason", "account_reference")
+        and v is not None
+    }
+    if not allowed:
+        return False
+    sets = ", ".join(f"{k} = ?" for k in allowed)
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            f"UPDATE dispute_items SET {sets}, updated_at = ? WHERE id = ? AND owner_user_id = ?",
+            [*allowed.values(), _now(), dispute_item_id, owner_user_id],
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# --- dispute letters (LetterStream mailings against an item) -----------------
+
+def create_dispute_letter(
+    db_path: str, dispute_item_id: int, letter_text: str, recipient_name: str, recipient_address: str,
+    recipient_city: str, recipient_state: str, recipient_zip: str, recipient_address_2: str | None = None,
+    mail_type: str = "certified", quoted_cost: str | None = None, authcode: str | None = None,
+    job_name: str | None = None, doc_id: str | None = None,
+) -> int:
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "INSERT INTO dispute_letters"
+            " (dispute_item_id, letter_text, recipient_name, recipient_address, recipient_address_2,"
+            "  recipient_city, recipient_state, recipient_zip, mail_type, quoted_cost, authcode,"
+            "  job_name, doc_id, status, quoted_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?)",
+            (dispute_item_id, letter_text, recipient_name, recipient_address, recipient_address_2,
+             recipient_city, recipient_state, recipient_zip, mail_type, quoted_cost, authcode,
+             job_name, doc_id, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_dispute_letters(db_path: str, owner_user_id: int, dispute_item_id: int):
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(
+            "SELECT dl.* FROM dispute_letters dl"
+            " JOIN dispute_items di ON di.id = dl.dispute_item_id"
+            " WHERE dl.dispute_item_id = ? AND di.owner_user_id = ?"
+            " ORDER BY dl.quoted_at DESC",
+            (dispute_item_id, owner_user_id),
+        ))
+
+
+def get_dispute_letter(db_path: str, owner_user_id: int, dispute_letter_id: int):
+    """Owner-scoped through a join on the parent item -- dispute_letters has no
+    owner_user_id column of its own, so ownership is only ever provable this way."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT dl.*, di.bureau AS bureau FROM dispute_letters dl"
+            " JOIN dispute_items di ON di.id = dl.dispute_item_id"
+            " WHERE dl.id = ? AND di.owner_user_id = ?",
+            (dispute_letter_id, owner_user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def mark_dispute_letter_mailed(
+    db_path: str, owner_user_id: int, dispute_letter_id: int, tracking_number: str | None = None,
+) -> bool:
+    """Bookkeeping only -- never calls LetterStream itself. This must only ever be
+    called after letterstream_authorize_mail has actually run and succeeded (see
+    personal_tools.py's record_dispute_letter_mailed / the credit route's mail_letter),
+    since this is what flips a dispute item from 'drafted' to 'mailed' in the tracker.
+    """
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT dl.dispute_item_id FROM dispute_letters dl"
+            " JOIN dispute_items di ON di.id = dl.dispute_item_id"
+            " WHERE dl.id = ? AND di.owner_user_id = ?",
+            (dispute_letter_id, owner_user_id),
+        ).fetchone()
+        if row is None:
+            return False
+        now = _now()
+        conn.execute(
+            "UPDATE dispute_letters SET status = 'mailed', mailed_at = ?,"
+            " tracking_number = COALESCE(?, tracking_number) WHERE id = ?",
+            (now, tracking_number, dispute_letter_id),
+        )
+        conn.execute(
+            "UPDATE dispute_items SET status = 'mailed', updated_at = ? WHERE id = ?",
+            (now, row["dispute_item_id"]),
+        )
+        conn.commit()
+        return True
+
+
+def update_dispute_letter_tracking(db_path: str, owner_user_id: int, dispute_letter_id: int, tracking_number: str) -> bool:
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT dl.id FROM dispute_letters dl JOIN dispute_items di ON di.id = dl.dispute_item_id"
+            " WHERE dl.id = ? AND di.owner_user_id = ?",
+            (dispute_letter_id, owner_user_id),
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute("UPDATE dispute_letters SET tracking_number = ? WHERE id = ?", (tracking_number, dispute_letter_id))
+        conn.commit()
+        return True

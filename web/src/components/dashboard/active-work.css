@@ -1,0 +1,95 @@
+/* Scoped to ActiveWorkPanel rather than folded into the shared index.css: that file is
+   a single very large stylesheet, and appending to content that couldn't be reviewed in
+   full for this change was a risk not worth taking. Fold this in later if/when the team
+   wants every page's styles in one file again -- nothing here depends on staying
+   separate. */
+
+.active-work-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.active-work-panel h3 {
+  margin: 0;
+}
+
+.active-work-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.active-work-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.active-work-section-header h4 {
+  margin: 0;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.active-work-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4em;
+  padding: 0 0.4em;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  font-size: 0.75rem;
+}
+
+.active-work-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.active-work-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.active-work-item-text {
+  flex: 1;
+}
+
+.active-work-meta,
+.active-work-tag {
+  font-size: 0.75rem;
+  opacity: 0.65;
+  white-space: nowrap;
+}
+
+.active-work-tag {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.active-work-review-link {
+  align-self: flex-start;
+  font-size: 0.9rem;
+}
+
+.active-work-error {
+  color: #e08080;
+}

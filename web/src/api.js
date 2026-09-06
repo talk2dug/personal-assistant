@@ -82,7 +82,10 @@ export const api = {
     request('/api/personal/tasks', { method: 'POST', body: JSON.stringify(task) }),
   updatePersonalTask: (id, patch) =>
     request(`/api/personal/tasks/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
-  personalResearch: (limit = 10) => request(`/api/personal/research?limit=${limit}`),
+  // status is optional -- the dashboard's Active Work panel asks for 'requested' only
+  // (still in flight); Tasks.jsx asks for everything so it can show recent findings too.
+  personalResearch: (limit = 10, status) =>
+    request(`/api/personal/research?limit=${limit}${status ? `&status=${status}` : ''}`),
   requestPersonalResearch: (research) =>
     request('/api/personal/research', { method: 'POST', body: JSON.stringify(research) }),
 
@@ -150,41 +153,6 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ excluded }),
     }),
-
-  // --- credit score history + dispute tracker ---
-  creditScores: (bureau) => request(`/api/credit/scores${bureau ? `?bureau=${bureau}` : ''}`),
-  addCreditScore: (entry) =>
-    request('/api/credit/scores', { method: 'POST', body: JSON.stringify(entry) }),
-  deleteCreditScore: (id) => request(`/api/credit/scores/${id}`, { method: 'DELETE' }),
-
-  creditDisputes: ({ status, bureau } = {}) => {
-    const params = new URLSearchParams()
-    if (status) params.set('status', status)
-    if (bureau) params.set('bureau', bureau)
-    const qs = params.toString()
-    return request(`/api/credit/disputes${qs ? `?${qs}` : ''}`)
-  },
-  createDispute: (dispute) =>
-    request('/api/credit/disputes', { method: 'POST', body: JSON.stringify(dispute) }),
-  updateDispute: (id, patch) =>
-    request(`/api/credit/disputes/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
-
-  disputeLetters: (disputeId) => request(`/api/credit/disputes/${disputeId}/letters`),
-  draftDisputeLetter: (disputeId, payload) =>
-    request(`/api/credit/disputes/${disputeId}/letters/draft`, {
-      method: 'POST', body: JSON.stringify(payload),
-    }),
-  // THE hard-confirm step: the only frontend call that can reach
-  // letterstream_authorize_mail (via credit.py's mail_letter route). Only ever called
-  // from ConfirmMailModal, after the owner has explicitly reviewed the recipient, the
-  // full letter text, and the quoted cost. expectedCost is echoed back exactly as
-  // fetched so the backend can refuse a stale/changed quote (409) rather than mail it.
-  mailDisputeLetter: (letterId, expectedCost) =>
-    request(`/api/credit/letters/${letterId}/mail`, {
-      method: 'POST', body: JSON.stringify({ expected_cost: expectedCost }),
-    }),
-  trackDisputeLetter: (letterId) =>
-    request(`/api/credit/letters/${letterId}/track`, { method: 'POST' }),
 }
 
 export { ApiError }

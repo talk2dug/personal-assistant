@@ -47,6 +47,7 @@ async def call_tool(request: Request):
     name = body.get("name")
     arguments = body.get("arguments") or {}
     user_id = body.get("user_id")
+    employee_key = body.get("employee_key")
     if not name or user_id is None:
         raise HTTPException(400, "name and user_id are required")
 
@@ -65,6 +66,7 @@ async def call_tool(request: Request):
         airbnb=request.app.state.airbnb, ticketmaster=request.app.state.ticketmaster,
         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
         letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
+        employee_key=employee_key,
     )
     result = await loop.run_in_executor(None, call)
     # _dispatch_tool_call always returns a JSON string, including for its own error

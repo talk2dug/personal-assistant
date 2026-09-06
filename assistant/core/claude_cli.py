@@ -166,13 +166,18 @@ class ClaudeCLIClient:
         lines.append(current.get("content", ""))
         return "\n".join(lines)
 
-    def _setup_tool_bridge(self, workdir: str, tools: list[dict], env: dict, command: list[str]) -> None:
+    def _setup_tool_bridge(
+        self, workdir: str, tools: list[dict], env: dict, command: list[str],
+        employee_key: str | None = None,
+    ) -> None:
         """Writes the tool schema + MCP config the bridge (mcp_bridge.py) reads, and
         points this turn's env at it. Shared by converse() (the owner's own full
-        catalog) and engineer() (an execute-tier employee's narrow, purpose-built set)
-        -- whichever list is written here is the entire universe of MCP tools the
-        subprocess can see, regardless of what --allowed-tools says, since the bridge
-        only ever serves what's in this file."""
+        catalog), engineer() (an execute-tier employee's narrow, purpose-built set), and
+        research() (when an employee needs request_capability) -- whichever list is
+        written here is the entire universe of MCP tools the subprocess can see,
+        regardless of what --allowed-tools says, since the bridge only ever serves
+        what's in this file. employee_key identifies which employee is making a tool
+        call (e.g. request_capability) -- unset for the owner's own converse()."""
         schema_path = os.path.join(workdir, "tools.json")
         with open(schema_path, "w", encoding="utf-8") as f:
             json.dump(tools, f)
@@ -191,6 +196,8 @@ class ClaudeCLIClient:
             "JARVIS_TOOLS_TOKEN": self.tools_token or "",
             "JARVIS_USER_ID": str(self.user_id if self.user_id is not None else ""),
         })
+        if employee_key:
+            env["JARVIS_EMPLOYEE_KEY"] = employee_key
 
     # ---- public API ------------------------------------------------------
 
@@ -230,33 +237,48 @@ class ClaudeCLIClient:
             command += ["--allowed-tools", ",".join(allowed), "--disallowed-tools", ",".join(denied)]
             return self._run(command, prompt, env=env, cwd=workdir)
 
-    def research(self, instructions: str, system_prompt: str | None = None, timeout: int | None = None) -> str:
-        """One-shot research task with web search, for the background agents.
+    def research(
+        self, instructions: str, system_prompt: str | None = None, timeout: int | None = None,
+        tools: list[dict] | None = None, employee_key: str | None = None,
+    ) -> str:
+        """One-shot research task with web search, for the background agents and every
+        non-execute-tier employee.
 
-        Distinct from converse(): no conversation history, no Jarvis tools, and a longer
-        timeout, because a market or trend scan runs several searches and is nobody's
-        latency-sensitive path. Jarvis's own tools are deliberately absent — an agent
-        running unattended on a timer should gather and report, not quietly send email
-        or change the house. Anything actionable comes back as a row the owner reviews.
+        Distinct from converse(): no conversation history, and a longer timeout, because
+        a market or trend scan runs several searches and is nobody's latency-sensitive
+        path. Jarvis's own tools are deliberately absent by default — an agent running
+        unattended on a timer should gather and report, not quietly send email or change
+        the house. Anything actionable comes back as a row the owner reviews.
+
+        The one exception is `tools`, used solely to hand staff.py's employees
+        request_capability (business_tools.REQUEST_CAPABILITY_TOOLS) -- so a job that
+        needs a capability this employee doesn't have gets asked for explicitly rather
+        than guessed or stubbed around. That one tool creates a Review-page item; it
+        can't act on anything by itself, so this stays true to "produce, don't act."
         """
+        env = dict(os.environ)
         with tempfile.TemporaryDirectory(prefix="jarvis-research-") as workdir:
             command = self._base_command()
             command += ["--system-prompt-file", self._write_system_prompt(
                 workdir, system_prompt or "You are a research assistant. Be accurate and concise.")]
+            allowed = "mcp__jarvis,WebSearch" if tools else "WebSearch"
+            if tools:
+                self._setup_tool_bridge(workdir, tools, env, command, employee_key=employee_key)
             command += [
-                "--allowed-tools", "WebSearch",
+                "--allowed-tools", allowed,
                 "--disallowed-tools", ",".join(t for t in DENIED_TOOLS if t != "WebSearch"),
             ]
             previous_timeout = self.timeout
             try:
                 if timeout:
                     self.timeout = timeout
-                return self._run(command, instructions, cwd=workdir)
+                return self._run(command, instructions, env=env, cwd=workdir)
             finally:
                 self.timeout = previous_timeout
 
     def engineer(
         self, instructions: str, system_prompt: str, tools: list[dict], timeout: int | None = None,
+        employee_key: str | None = None,
     ) -> str:
         """One-shot dev-team task with real tool access, for 'execute'-tier employees
         (staff.py) -- the one employee capability that can act rather than only report.
@@ -279,7 +301,7 @@ class ClaudeCLIClient:
         with tempfile.TemporaryDirectory(prefix="jarvis-engineer-") as workdir:
             command = self._base_command()
             command += ["--system-prompt-file", self._write_system_prompt(workdir, system_prompt)]
-            self._setup_tool_bridge(workdir, tools, env, command)
+            self._setup_tool_bridge(workdir, tools, env, command, employee_key=employee_key)
             command += ["--allowed-tools", "mcp__jarvis,WebSearch", "--disallowed-tools", ",".join(denied)]
 
             previous_timeout = self.timeout

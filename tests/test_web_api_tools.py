@@ -149,7 +149,12 @@ def test_passes_the_same_contexts_as_every_other_surface(db_path, user_id, monke
     # added later would actually show up on.
     from assistant.core.engine import _dispatch_tool_call
 
-    non_contexts = {"db_path", "tz_name", "requesting_user_id", "name", "arguments", "era", "calendar", "phone"}
+    # employee_key is a per-call value from the request body (like name/arguments), not
+    # a long-lived integration wired onto app.state, so it's excluded the same way.
+    non_contexts = {
+        "db_path", "tz_name", "requesting_user_id", "name", "arguments", "era", "calendar",
+        "phone", "employee_key",
+    }
     contexts = [p for p in inspect.signature(_dispatch_tool_call).parameters if p not in non_contexts]
 
     cfg = FakeConfig(db_path=db_path)
@@ -171,3 +176,29 @@ def test_passes_the_same_contexts_as_every_other_surface(db_path, user_id, monke
     )
     wrong = [n for n in contexts if seen.get(n) is not sentinels[n]]
     assert not wrong, f"passed something other than app.state for {wrong}"
+
+
+def test_employee_key_from_the_request_body_reaches_dispatch(db_path, user_id, monkeypatch):
+    """employee_key comes from the request body (set by staff.assign()'s employees via
+    the MCP bridge), not app.state -- a request without one must still dispatch fine
+    (the owner's own converse() never sends it), and one that's present must arrive."""
+    from assistant.web.routes import tools as tools_route
+
+    seen = {}
+
+    def fake_dispatch(*args, employee_key=None, **kwargs):
+        seen["employee_key"] = employee_key
+        return "{}"
+
+    monkeypatch.setattr(tools_route, "_dispatch_tool_call", fake_dispatch)
+    client = make_client(FakeConfig(db_path=db_path))
+
+    client.post("/api/tools/call", json={
+        "name": "list_reminders", "user_id": user_id, "arguments": {}, "employee_key": "systems_engineer",
+    }, headers={"Authorization": "Bearer secret-token"})
+    assert seen["employee_key"] == "systems_engineer"
+
+    client.post("/api/tools/call", json={
+        "name": "list_reminders", "user_id": user_id, "arguments": {},
+    }, headers={"Authorization": "Bearer secret-token"})
+    assert seen["employee_key"] is None

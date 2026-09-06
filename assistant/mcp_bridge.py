@@ -23,6 +23,8 @@ Invoked by ClaudeCLIClient, not by hand. Configuration comes from the environmen
   JARVIS_TOOLS_TOKEN   -- bearer token for that endpoint
   JARVIS_TOOLS_SCHEMA  -- path to the JSON file of tool schemas to advertise
   JARVIS_USER_ID       -- the Jarvis user id tool calls execute as
+  JARVIS_EMPLOYEE_KEY  -- optional: which staff.py employee is calling, for tools like
+                          request_capability that need to know who's asking
 """
 import json
 import os
@@ -57,15 +59,16 @@ def _call_tool(name: str, arguments: dict) -> str:
     user_id = os.environ.get("JARVIS_USER_ID")
     if not url or not token or user_id is None:
         return json.dumps({"error": "tool bridge is not configured"})
+    payload = {"name": name, "arguments": arguments, "user_id": int(user_id)}
+    employee_key = os.environ.get("JARVIS_EMPLOYEE_KEY")
+    if employee_key:
+        payload["employee_key"] = employee_key
     try:
         # Generous timeout: some real tool calls behind this are genuinely slow (Era
         # does live bank lookups, IMAP search walks the mailbox). Better to wait than
         # to hand the model a spurious failure it might then report as fact.
         resp = httpx.post(
-            url,
-            json={"name": name, "arguments": arguments, "user_id": int(user_id)},
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=120.0,
+            url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=120.0,
         )
         resp.raise_for_status()
         return resp.json().get("result", "")

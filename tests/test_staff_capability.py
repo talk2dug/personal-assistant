@@ -89,11 +89,11 @@ class FakeLLMWithEngineer:
         self.engineer_calls = []
         self._engineer_output = engineer_output
 
-    def research(self, prompt, system_prompt=None, timeout=None):
+    def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
         self.research_calls.append((prompt, system_prompt, timeout))
         return "researched it"
 
-    def engineer(self, prompt, system_prompt=None, tools=None, timeout=None):
+    def engineer(self, prompt, system_prompt=None, tools=None, timeout=None, **kwargs):
         self.engineer_calls.append((prompt, system_prompt, tools, timeout))
         return self._engineer_output
 
@@ -102,7 +102,7 @@ class FakeLLMWithoutEngineer:
     """The Ollama backend has no engineer() (or research()) at all -- mirrors that
     real gap so assign() must fail cleanly rather than raising AttributeError."""
 
-    def research(self, prompt, system_prompt=None, timeout=None):
+    def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
         return "researched it"
 
 

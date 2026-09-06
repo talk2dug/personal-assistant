@@ -101,7 +101,7 @@ class TestRunDueIsolation:
         calls = []
 
         class ExplodingLLM:
-            def research(self, prompt, system_prompt=None, timeout=None):
+            def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
                 calls.append(prompt)
                 if len(calls) == 1:
                     raise RuntimeError("first employee blows up")
@@ -117,7 +117,7 @@ class TestRunDueIsolation:
                          interval_minutes=5, standing_assignment="do the thing")["key"]
 
         class DeadLLM:
-            def research(self, prompt, system_prompt=None, timeout=None):
+            def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
                 raise RuntimeError("backend down")
 
         staff.run_due(db, DeadLLM(), tz_name="UTC")

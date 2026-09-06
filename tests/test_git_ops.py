@@ -113,6 +113,45 @@ def test_commit_and_push_requires_an_existing_branch(client):
                                 commit_message="msg")
 
 
+def test_list_files_shows_the_real_main_branch_by_default(client):
+    result = client.list_files()
+    assert result["ok"] is True
+    assert "README.md" in result["entries"]
+
+
+def test_list_files_reads_a_branch_worktree_when_given_one(client):
+    client.create_branch("feature/six")
+    client.commit_and_push("feature/six", files=[{"path": "new.txt", "content": "hi"}],
+                            commit_message="add new.txt")
+    result = client.list_files(branch_name="feature/six")
+    assert "new.txt" in result["entries"]
+    # main itself is untouched -- the write only ever landed on the branch.
+    assert "new.txt" not in client.list_files()["entries"]
+
+
+def test_list_files_requires_an_existing_branch(client):
+    with pytest.raises(GitOpsError, match="create_branch first"):
+        client.list_files(branch_name="never-created")
+
+
+def test_read_file_returns_the_real_content(client):
+    result = client.read_file("README.md")
+    assert result["ok"] is True
+    assert result["content"] == "hello\n"
+
+
+def test_read_file_reports_a_missing_file_rather_than_crashing(client):
+    with pytest.raises(GitOpsError, match="no such file"):
+        client.read_file("does-not-exist.txt")
+
+
+def test_call_tool_dispatches_read_tools(client):
+    result = client.call_tool("git_list_files", {})
+    assert "README.md" in result["entries"]
+    result = client.call_tool("git_read_file", {"path": "README.md"})
+    assert result["content"] == "hello\n"
+
+
 def test_safe_join_refuses_path_traversal(tmp_path):
     root = tmp_path / "workspace"
     root.mkdir()

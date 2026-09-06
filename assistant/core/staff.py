@@ -706,12 +706,13 @@ def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> str:
 def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> dict:
     """Give an employee a piece of work and record what came back.
 
-    Every tier but "execute" runs through llm.research(), which carries web search and no
-    Jarvis tools — the same path the background agents use, and for the same reason: an
-    employee should be able to look things up and nothing else. "execute" is the one
-    tier that can act (see the note above CAPABILITY_TIERS) — it runs through
-    llm.engineer() instead, with real but narrowly-scoped tools (git today; SSH/ops-plan
-    later), never the owner's full catalog.
+    Every tier but "execute" runs through llm.research(), which carries web search and,
+    since a real incident showed the gap, exactly one more tool: request_capability —
+    the same path the background agents use, plus the one way an employee can ask for
+    more instead of guessing or stubbing around a missing capability. "execute" is the
+    one tier that can act (see the note above CAPABILITY_TIERS) — it runs through
+    llm.engineer() instead, with real but narrowly-scoped tools (git, including reading
+    the actual repo, and SSH/ops-plan), never the owner's full catalog.
     """
     emp = get_staff(db_path, key)
     if emp is None:
@@ -743,11 +744,16 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> 
                     "this LLM backend has no engineer() method, so execute-tier "
                     "employees cannot be given real tool access on it")
             from .git_tools import GIT_TOOLS
-            from .business_tools import OPS_PLAN_TOOLS
-            output = llm.engineer(prompt, system_prompt=emp["system_prompt"],
-                                  tools=GIT_TOOLS + OPS_PLAN_TOOLS, timeout=timeout)
+            from .business_tools import OPS_PLAN_TOOLS, REQUEST_CAPABILITY_TOOLS
+            output = llm.engineer(
+                prompt, system_prompt=emp["system_prompt"],
+                tools=GIT_TOOLS + OPS_PLAN_TOOLS + REQUEST_CAPABILITY_TOOLS, timeout=timeout,
+                employee_key=emp["key"])
         else:
-            output = llm.research(prompt, system_prompt=emp["system_prompt"], timeout=timeout)
+            from .business_tools import REQUEST_CAPABILITY_TOOLS
+            output = llm.research(
+                prompt, system_prompt=emp["system_prompt"], timeout=timeout,
+                tools=REQUEST_CAPABILITY_TOOLS, employee_key=emp["key"])
         status, error = "delivered", None
 
         if "paper" in feeds and output:

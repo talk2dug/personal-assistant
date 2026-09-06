@@ -18,6 +18,7 @@ from .business_tools import (
     GPU_BRIDGE_NOTE,
 )
 from .personal_tools import PERSONAL_SYSTEM_NOTE, PERSONAL_TOOLS
+from .git_tools import GIT_SYSTEM_NOTE
 
 
 @dataclass
@@ -169,6 +170,23 @@ class KrogerContext:
     @property
     def tool_names(self) -> set[str]:
         return {t["function"]["name"] for t in self.kroger_tools}
+
+
+@dataclass
+class GitOpsContext:
+    """Bundles what handle_message needs for the dev-team git tools: branch/write/push/
+    open-PR are all reversible and touch nothing deployed, so they execute immediately.
+    Merging to main is the one action here with real consequence — it's what actually
+    changes what's on main — so it's the sole sensitive_tools entry and goes through the
+    same pending-confirmation gate as Kroger cart-writes and CCXT trades."""
+
+    mcp_client: object
+    git_tools: list[dict]
+    sensitive_tools: set[str]
+
+    @property
+    def tool_names(self) -> set[str]:
+        return {t["function"]["name"] for t in self.git_tools}
 
 
 @dataclass
@@ -910,7 +928,7 @@ SYSTEM_PROMPT = (
     "capability — including one an earlier turn in this conversation claimed you lacked — without "
     "actually checking your current tool list first; a past turn can be wrong."
     "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{web_note}"
-    "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}"
+    "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}"
 )
 
 WEB_SEARCH_SYSTEM_NOTE = (
@@ -1048,7 +1066,7 @@ KROGER_SYSTEM_NOTE = (
 def build_system_prompt(
     tz_name: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     now: str | None = None, web_search: bool = False, business=None, personal=None,
-    airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
+    airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
 ) -> str:
     """Builds Jarvis's system prompt with whichever integration notes apply.
 
@@ -1087,13 +1105,14 @@ def build_system_prompt(
         kroger_note=KROGER_SYSTEM_NOTE if kroger is not None else "",
         ccxt_note=CCXT_SYSTEM_NOTE if ccxt is not None else "",
         letterstream_note=LETTERSTREAM_SYSTEM_NOTE if letterstream is not None else "",
+        git_note=GIT_SYSTEM_NOTE if git_ops is not None else "",
     )
 
 
 def select_tools(
     user_text: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     route: bool = True, business=None, personal=None, airbnb=None, ticketmaster=None, kroger=None,
-    ccxt=None, letterstream=None,
+    ccxt=None, letterstream=None, git_ops=None,
 ) -> list[dict]:
     """The tool set for one turn, in Ollama's function-schema format.
 
@@ -1128,6 +1147,7 @@ def select_tools(
             + (kroger.kroger_tools if kroger is not None else [])
             + (ccxt.ccxt_tools if ccxt is not None else [])
             + (LETTERSTREAM_TOOLS if letterstream is not None else [])
+            + (git_ops.git_tools if git_ops is not None else [])
         )
     return (
         TOOLS
@@ -1154,6 +1174,10 @@ def select_tools(
         + (_select_kroger_tools(kroger, user_text) if kroger is not None else [])
         + (_select_ccxt_tools(ccxt, user_text) if ccxt is not None else [])
         + (_select_letterstream_tools(letterstream, user_text) if letterstream is not None else [])
+        # Git tools aren't keyword-gated either — dev work is phrased too many ways to
+        # capture reliably with a keyword list, and these tools are safe to always offer
+        # (branch/write/push/PR-open are all reversible; only merge is gated).
+        + (git_ops.git_tools if git_ops is not None else [])
     )
 
 
@@ -1178,6 +1202,7 @@ def _dispatch_tool_call(
     airbnb: AirbnbContext | None = None, ticketmaster: TicketmasterContext | None = None,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None,
+    git_ops: "GitOpsContext | None" = None,
 ) -> str:
     if name == "add_reminder":
         due_at_utc = _local_to_utc_iso(arguments["due_at"], tz_name)
@@ -1303,6 +1328,23 @@ def _dispatch_tool_call(
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    if git_ops is not None and name in git_ops.tool_names:
+        if name in git_ops.sensitive_tools:
+            db.create_pending_action(db_path, requesting_user_id, name, arguments)
+            return json.dumps({
+                "status": "awaiting_confirmation",
+                "message": (
+                    f"Calling {name} does not execute it — this merges a real pull "
+                    f"request into main. Describe exactly which PR and what merging it "
+                    f"will do (tool: {name}, arguments: {arguments}) and ask the user to "
+                    "explicitly confirm yes or no before anything happens."
+                ),
+            })
+        try:
+            return json.dumps(git_ops.mcp_client.call_tool(name, arguments))
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
     if ccxt is not None and name in ccxt.tool_names:
         if name in ccxt.sensitive_tools:
             db.create_pending_action(db_path, requesting_user_id, name, arguments)
@@ -1416,7 +1458,7 @@ def _resolve_pending_action(
     db_path: str, llm, era: EraContext | None, phone: PhoneContext | None, mail: MailContext | None,
     home_assistant: HomeAssistantContext | None, pending: dict, user_text: str,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
-    letterstream: "LetterStreamContext | None" = None,
+    letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
 ) -> str:
     db.add_message(db_path, pending["user_id"], "user", user_text)
     decision = _classify_confirmation(llm, user_text)
@@ -1435,6 +1477,8 @@ def _resolve_pending_action(
             context = ccxt
         elif letterstream is not None and pending["tool_name"] in letterstream.tool_names:
             context = letterstream
+        elif git_ops is not None and pending["tool_name"] in git_ops.tool_names:
+            context = git_ops
         else:
             context = home_assistant
         try:
@@ -1464,7 +1508,7 @@ def handle_message(
     personal: "PersonalContext | None" = None,
     airbnb: AirbnbContext | None = None, ticketmaster: TicketmasterContext | None = None,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
-    letterstream: "LetterStreamContext | None" = None,
+    letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
 ) -> str:
     """Runs one user turn through the LLM (with tool-calling), persists the
@@ -1473,12 +1517,12 @@ def handle_message(
     message, never persisted — gemma4 is multimodal, so it's just another field on
     the user message ollama sends, not a separate code path."""
     if (era is not None or phone is not None or mail is not None or home_assistant is not None
-            or kroger is not None or ccxt is not None or letterstream is not None):
+            or kroger is not None or ccxt is not None or letterstream is not None or git_ops is not None):
         pending = db.get_pending_action(db_path, requesting_user_id)
         if pending is not None:
             return _resolve_pending_action(
                 db_path, llm, era, phone, mail, home_assistant, pending, user_text,
-                kroger=kroger, ccxt=ccxt, letterstream=letterstream)
+                kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops)
 
     db.add_message(db_path, requesting_user_id, "user", user_text)
 
@@ -1488,7 +1532,7 @@ def handle_message(
     tools = select_tools(
         user_text, era, phone, mail, obsidian, home_assistant, route=not agentic, business=business,
         personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-        letterstream=letterstream)
+        letterstream=letterstream, git_ops=git_ops)
 
     # Agentic backends (the Claude CLI) run their own tool-calling loop against Jarvis's
     # tools over MCP, so the hop loop below doesn't apply — they get the conversation and
@@ -1499,7 +1543,7 @@ def handle_message(
             tz_name, era, phone, mail, obsidian, home_assistant,
             web_search=getattr(llm, "web_search", False), business=business, personal=personal,
             airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-            letterstream=letterstream,
+            letterstream=letterstream, git_ops=git_ops,
         )
         try:
             reply = llm.converse(
@@ -1516,7 +1560,7 @@ def handle_message(
         {"role": "system", "content": build_system_prompt(
             tz_name, era, phone, mail, obsidian, home_assistant, now=now, business=business,
             personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-            letterstream=letterstream)}
+            letterstream=letterstream, git_ops=git_ops)}
     ] + history
     if image_bytes is not None and messages[-1]["role"] == "user":
         messages[-1] = {**messages[-1], "images": [image_bytes]}
@@ -1555,7 +1599,7 @@ def handle_message(
                 db_path, tz_name, requesting_user_id, fn["name"], fn.get("arguments", {}), era, calendar, phone,
                 mail=mail, obsidian=obsidian, home_assistant=home_assistant, business=business,
                 personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream,
+                letterstream=letterstream, git_ops=git_ops,
             )
             messages.append({"role": "tool", "content": result})
 

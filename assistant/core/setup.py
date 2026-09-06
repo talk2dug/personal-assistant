@@ -13,10 +13,12 @@ from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
 from .claude_cli import ClaudeCLIClient
 from .engine import (
-    AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, HomeAssistantContext,
-    KrogerContext, LetterStreamContext, MailContext, ObsidianContext, PersonalContext, PhoneContext,
-    TicketmasterContext,
+    AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, GitOpsContext,
+    HomeAssistantContext, KrogerContext, LetterStreamContext, MailContext, ObsidianContext,
+    PersonalContext, PhoneContext, TicketmasterContext,
 )
+from .git_ops import GitOpsClient
+from .git_tools import GIT_TOOLS
 from .personal_tools import PersonalClient
 from .home_assistant_client import HomeAssistantClient
 from .kroger_recipe import RECIPE_TOOL_SCHEMA, KrogerRecipeClient
@@ -160,6 +162,24 @@ def build_personal_context(cfg, owner_user_id: int | None) -> PersonalContext | 
         return None
     personal_db.init_personal_db(cfg.db_path)
     return PersonalContext(mcp_client=PersonalClient(cfg.db_path, owner_user_id))
+
+
+# Merging to main is the only git tool with real consequence -- see GitOpsContext's
+# docstring. Branch/write/push/PR-open are all reversible and execute immediately.
+GIT_SENSITIVE_TOOLS = {"git_merge_pr"}
+
+
+def build_git_ops_context(cfg) -> GitOpsContext | None:
+    """Dev-team git tools: off unless both a target repo and a PAT are configured."""
+    if not cfg.github_repo or not cfg.github_pat:
+        return None
+    client = GitOpsClient(
+        cfg.github_repo, cfg.github_pat, cfg.git_workspace_path,
+        author_name=cfg.git_author_name, author_email=cfg.git_author_email,
+    )
+    logger.info("Git ops: targeting %s, %d tools, %d gated as sensitive",
+               cfg.github_repo, len(GIT_TOOLS), len(GIT_SENSITIVE_TOOLS))
+    return GitOpsContext(mcp_client=client, git_tools=GIT_TOOLS, sensitive_tools=GIT_SENSITIVE_TOOLS)
 
 
 def build_era_context(cfg) -> EraContext | None:

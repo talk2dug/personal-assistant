@@ -136,6 +136,17 @@ class Config:
     letterstream_from_city: str | None = None
     letterstream_from_state: str | None = None
     letterstream_from_zip: str | None = None
+    # Dev-team agents: git branch/push/PR tools (Phase 1) and later the ops-plan/SSH
+    # workflow both need a repo to target and a token to act on the owner's behalf.
+    # Fine-grained PAT scoped to just this one repo, Contents + Pull requests read/write.
+    github_repo: str | None = None
+    github_pat: str | None = None
+    # Where the local working clone (and one git-worktree checkout per branch) lives.
+    # Kept outside the app's own repo tree so an employee's workspace is never itself
+    # a nested repo Jarvis's own git history would need to account for.
+    git_workspace_path: str = "../jarvis-git-workspace"
+    git_author_name: str = "Jarvis"
+    git_author_email: str = "jarvis@localhost"
     scan_ssh_password: str | None = None
     scan_ssh_users: list[str] = field(default_factory=lambda: ["pi", "jack"])
     scan_subnet: str = "192.168.0"
@@ -244,6 +255,11 @@ def load_config(path: str = "config.json") -> Config:
         letterstream_from_city=data.get("letterstream_from_city"),
         letterstream_from_state=data.get("letterstream_from_state"),
         letterstream_from_zip=data.get("letterstream_from_zip"),
+        github_repo=data.get("github_repo"),
+        github_pat=data.get("github_pat"),
+        git_workspace_path=data.get("git_workspace_path", "../jarvis-git-workspace"),
+        git_author_name=data.get("git_author_name", "Jarvis"),
+        git_author_email=data.get("git_author_email", "jarvis@localhost"),
         scan_ssh_password=data.get("scan_ssh_password"),
         scan_ssh_users=data.get("scan_ssh_users", ["pi", "jack"]),
         scan_subnet=data.get("scan_subnet", "192.168.0"),

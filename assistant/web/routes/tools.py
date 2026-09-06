@@ -64,7 +64,7 @@ async def call_tool(request: Request):
         personal=request.app.state.personal,
         airbnb=request.app.state.airbnb, ticketmaster=request.app.state.ticketmaster,
         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
-        letterstream=request.app.state.letterstream,
+        letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
     )
     result = await loop.run_in_executor(None, call)
     # _dispatch_tool_call always returns a JSON string, including for its own error

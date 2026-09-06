@@ -67,6 +67,12 @@
   "business_digest_hour": 8,
   "_comment_personal_research": "How often the background agent checks for personal errands ('find me a dentist') to research. Not gated behind business_agents_enabled — this runs regardless.",
   "personal_research_interval_minutes": 30,
+  "_comment_github": "Dev-team agents: git branch/push/PR tools and the ops-plan/SSH workflow. Use a fine-grained PAT scoped to just this one repo (Contents + Pull requests, read/write) — not a classic token with broader access.",
+  "github_repo": "REPLACE_WITH_YOUR_GITHUB_OWNER/REPLACE_WITH_YOUR_REPO_NAME",
+  "github_pat": "PUT_YOUR_GITHUB_FINE_GRAINED_PAT_HERE",
+  "git_workspace_path": "../jarvis-git-workspace",
+  "git_author_name": "Jarvis",
+  "git_author_email": "jarvis@localhost",
   "users": [
     {"telegram_chat_id": "REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID", "display_name": "Dug", "role": "owner", "web_password": "PICK_A_PASSWORD"},
     {"telegram_chat_id": "REPLACE_WITH_GF_TELEGRAM_CHAT_ID", "display_name": "GF", "role": "partner", "web_password": "PICK_A_PASSWORD"}

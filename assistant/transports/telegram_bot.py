@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def build_application(
     token: str, db_path: str, llm, tz_name: str = "America/New_York", era=None, calendar=None, phone=None, mail=None,
     obsidian=None, home_assistant=None, business=None, personal=None, airbnb=None, ticketmaster=None, kroger=None,
-    ccxt=None, letterstream=None,
+    ccxt=None, letterstream=None, git_ops=None,
 ) -> Application:
     """era, phone, mail, obsidian, and home_assistant (engine.EraContext / PhoneContext /
     MailContext / ObsidianContext / HomeAssistantContext) are exposed only to users with
@@ -49,6 +49,7 @@ def build_application(
         user_kroger = kroger if is_owner else None
         user_ccxt = ccxt if is_owner else None
         user_letterstream = letterstream if is_owner else None
+        user_git_ops = git_ops if is_owner else None
         # handle_message does a blocking HTTP call to simrig (and sometimes Era/Apple/the phone); run
         # it off the event loop thread so one user's request can't stall the other's.
         loop = asyncio.get_running_loop()
@@ -57,7 +58,7 @@ def build_application(
             tz_name=tz_name, era=user_era, calendar=calendar, phone=user_phone, mail=user_mail,
             obsidian=user_obsidian, home_assistant=user_home_assistant, business=user_business,
             personal=user_personal, airbnb=user_airbnb, ticketmaster=user_ticketmaster,
-            kroger=user_kroger, ccxt=user_ccxt, letterstream=user_letterstream,
+            kroger=user_kroger, ccxt=user_ccxt, letterstream=user_letterstream, git_ops=user_git_ops,
         )
         reply = await loop.run_in_executor(None, call)
         await update.message.reply_text(reply)

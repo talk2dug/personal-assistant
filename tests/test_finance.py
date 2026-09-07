@@ -1,6 +1,6 @@
 from datetime import date
 
-from assistant.core.finance import expand_occurrences, goal_progress, project_balance
+from assistant.core.finance import expand_occurrences, find_pay_periods, goal_progress, project_balance
 
 
 def test_no_charges_keeps_balance_flat():
@@ -145,3 +145,70 @@ def test_expand_occurrences_sorted_by_date():
     ]
     occs = expand_occurrences(charges, date(2026, 9, 1), date(2026, 9, 30))
     assert [o["description"] for o in occs] == ["A", "B"]
+
+
+def test_find_pay_periods_real_semimonthly_pattern_flags_the_current_period():
+    """The actual real-world case again (see test_semimonthly_pay_via_two_monthly_anchored_charges
+    above): paid on the 15th and the last day of the month. 'today' falls between them."""
+    charges = [
+        {"description": "Paycheck (15th)", "amount": 2000.0, "direction": "income",
+         "cadence": "monthly_on_day", "next_expected_date": "2026-09-15"},
+        {"description": "Paycheck (last day)", "amount": 2000.0, "direction": "income",
+         "cadence": "monthly_on_last_day", "next_expected_date": "2026-09-30"},
+    ]
+    periods = find_pay_periods(charges, today=date(2026, 9, 20), horizon_days=45)
+
+    current = next(p for p in periods if p["is_current"])
+    assert current["start_date"] == "2026-09-15"
+    assert current["end_date"] == "2026-09-30"
+    assert current["start_description"] == "Paycheck (15th)"
+    assert current["end_description"] == "Paycheck (last day)"
+
+    # The next period (30th -> the following 15th) is also present, just not current.
+    assert any(p["start_date"] == "2026-09-30" and not p["is_current"] for p in periods)
+
+
+def test_find_pay_periods_on_a_payday_itself_treats_that_day_as_the_new_periods_start():
+    charges = [
+        {"description": "Paycheck (15th)", "amount": 2000.0, "direction": "income",
+         "cadence": "monthly_on_day", "next_expected_date": "2026-09-15"},
+        {"description": "Paycheck (last day)", "amount": 2000.0, "direction": "income",
+         "cadence": "monthly_on_last_day", "next_expected_date": "2026-09-30"},
+    ]
+    periods = find_pay_periods(charges, today=date(2026, 9, 15), horizon_days=45)
+    current = next(p for p in periods if p["is_current"])
+    assert current["start_date"] == "2026-09-15"
+
+
+def test_find_pay_periods_needs_at_least_two_paydays_to_form_a_period():
+    charges = [{"description": "Once", "amount": 500.0, "direction": "income",
+                "cadence": None, "next_expected_date": "2026-09-15"}]
+    assert find_pay_periods(charges, today=date(2026, 9, 20)) == []
+
+
+def test_find_pay_periods_ignores_expense_charges():
+    charges = [
+        {"description": "Rent", "amount": 1500.0, "direction": "expense",
+         "cadence": "monthly_on_day", "next_expected_date": "2026-09-01"},
+        {"description": "Paycheck", "amount": 2000.0, "direction": "income",
+         "cadence": "monthly_on_day", "next_expected_date": "2026-09-15"},
+    ]
+    # Only one income date in range -- still not enough to form a period, even though
+    # the expense charge would otherwise supply a second date.
+    assert find_pay_periods(charges, today=date(2026, 9, 20), horizon_days=10) == []
+
+
+def test_find_pay_periods_collapses_same_day_charges_into_one_boundary():
+    """Two income charges landing on the same date (a paycheck and a same-day transfer,
+    the real shape era_recurring_charge_cache produces) must not create a zero-length
+    period between them."""
+    charges = [
+        {"description": "Payroll", "amount": 2000.0, "direction": "income",
+         "cadence": "monthly", "next_expected_date": "2026-09-15"},
+        {"description": "Transfer", "amount": 100.0, "direction": "income",
+         "cadence": "monthly", "next_expected_date": "2026-09-15"},
+    ]
+    periods = find_pay_periods(charges, today=date(2026, 9, 20), horizon_days=45)
+    assert all(p["start_date"] != p["end_date"] for p in periods)
+    boundary = next(p for p in periods if p["start_date"] == "2026-09-15")
+    assert boundary["start_description"] == "Payroll, Transfer"

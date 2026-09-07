@@ -7,7 +7,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import business_db, db, gpu_bridge, kitchen_db, market_data, ops_plans, paper_trading, personal_db, staff
+from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, paper_trading, personal_db, staff
 from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
@@ -203,6 +203,7 @@ def build_personal_context(
         return None
     personal_db.init_personal_db(cfg.db_path)
     kitchen_db.init_kitchen_db(cfg.db_path)
+    meal_plan_db.init_meal_plan_db(cfg.db_path)
     # One-time (idempotent) move off the old have/low/out pantry board onto real
     # quantities -- see kitchen_inventory's schema comment in kitchen_db.py. Cheap to
     # call every boot: it's a no-op once pantry_items is empty.

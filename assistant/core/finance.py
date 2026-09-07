@@ -143,6 +143,53 @@ def _occurrence(charge: dict, when: date) -> dict:
     }
 
 
+def find_pay_periods(income_charges: list[dict], today: date, horizon_days: int = 45) -> list[dict]:
+    """Pairs consecutive payday occurrences into periods for meal planning ("plan meals for
+    the days between paydays"). Reuses expand_occurrences rather than re-deriving occurrence
+    dates -- a period boundary is just two adjacent paydays. Filters to direction == "income"
+    itself rather than trusting the caller to pre-filter -- a mixed list (e.g. the raw output
+    of list_manual_recurring_charges, which includes bills alongside paychecks) must not let
+    an expense's date sneak in as a false payday boundary.
+
+    Looks both backward and forward from today (a horizon_days window each way) so the period
+    today actually falls inside has a real start date even when that payday was in the past,
+    not just the next upcoming one.
+
+    Needs at least 2 distinct payday dates in the window to produce even one period -- with
+    only one, there's no second boundary to pair it with. Multiple charges landing on the same
+    date (e.g. a paycheck and a same-day transfer) collapse into one boundary, not two periods
+    of length zero; their descriptions join with ", ".
+
+    Returns [{"start_date", "end_date", "start_description", "end_description", "is_current"}, ...]
+    sorted by start_date, all dates ISO strings. is_current is True for the one period today
+    falls inside (start_date <= today < end_date) -- callers decide what "today" means when
+    it's ambiguous (e.g. a planning conversation happening exactly on a payday), this function
+    just reports what it finds.
+    """
+    income_only = [c for c in income_charges if c.get("direction") == "income"]
+    start_range = today - timedelta(days=horizon_days)
+    end_range = today + timedelta(days=horizon_days)
+    occurrences = expand_occurrences(income_only, start_range, end_range)
+
+    by_date: dict[str, list[str]] = {}
+    for occ in occurrences:
+        by_date.setdefault(occ["date"], []).append(occ["description"])
+    paydays = sorted(by_date)
+
+    periods = []
+    for i in range(len(paydays) - 1):
+        start_str, end_str = paydays[i], paydays[i + 1]
+        start_d, end_d = _parse_date(start_str), _parse_date(end_str)
+        periods.append({
+            "start_date": start_str,
+            "end_date": end_str,
+            "start_description": ", ".join(by_date[start_str]),
+            "end_description": ", ".join(by_date[end_str]),
+            "is_current": start_d <= today < end_d,
+        })
+    return periods
+
+
 def goal_progress(projection_series: list[dict], target_amount: float) -> str | None:
     """The first date in the series the projected balance reaches target_amount, or
     None if it's not reached within the projected horizon."""

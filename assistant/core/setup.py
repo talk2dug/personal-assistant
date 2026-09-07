@@ -1,4 +1,4 @@
-"""Shared startup wiring for anything that needs Era/Calendar context — used by both
+﻿"""Shared startup wiring for anything that needs Era/Calendar context — used by both
 main.py (Telegram) and web_main.py (the web UI), so the two entrypoints don't duplicate
 this logic.
 """
@@ -7,16 +7,18 @@ import os
 import shutil
 from pathlib import Path
 
-from . import business_db, db, gpu_bridge, market_data, paper_trading, personal_db, staff
+from . import business_db, db, gpu_bridge, kitchen_db, market_data, ops_plans, paper_trading, personal_db, staff
 from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
 from .claude_cli import ClaudeCLIClient
 from .engine import (
-    AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, HomeAssistantContext,
-    KrogerContext, LetterStreamContext, MailContext, ObsidianContext, PersonalContext, PhoneContext,
-    TicketmasterContext,
+    AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, GitOpsContext,
+    HomeAssistantContext, KrogerContext, LetterStreamContext, MailContext, ObsidianContext,
+    PersonalContext, PhoneContext, RecipeContext, TicketmasterContext,
 )
+from .git_ops import GitOpsClient
+from .git_tools import GIT_TOOLS
 from .personal_tools import PersonalClient
 from .home_assistant_client import HomeAssistantClient
 from .kroger_recipe import RECIPE_TOOL_SCHEMA, KrogerRecipeClient
@@ -24,6 +26,7 @@ from .mail_client import MailClient
 from .mcp_client import MCPClient
 from .mcp_stdio_client import StdioMCPClient
 from .obsidian_client import ObsidianClient
+from .ssh_ops import SSHOpsClient
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +101,7 @@ def build_notifier(cfg, telegram_notify, home_assistant=None):
 
 
 def build_gpu_bridge(cfg):
-    """simrig as a shared inference resource for agent work that doesn't need Claude. An
+    """simrig is a real machine that gets gamed on, rebooted and unplugged. An
     unreachable bridge must only disable offloading, never take down the assistant —
     same defensive posture as the phone and Home Assistant contexts. It's still returned
     when unreachable, so the queue accepts work and drains when the box comes back."""
@@ -140,26 +143,63 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     staff.init_staff_db(cfg.db_path)
     market_data.init_market_db(cfg.db_path)
     paper_trading.init_paper_db(cfg.db_path)
-    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge)
+    ops_plans.init_ops_plans_db(cfg.db_path)
+    # ssh_hosts defaults to {} (no hosts registered) rather than gating on a whole
+    # separate enabled flag -- propose_ops_plan already refuses any step targeting an
+    # unregistered host, so an empty registry is already a safe, self-explaining no-op.
+    ssh_ops = SSHOpsClient(cfg.ssh_hosts) if cfg.ssh_hosts else None
+    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge, ssh_ops=ssh_ops)
     scheduled = cfg.business_agents_enabled and hasattr(llm, "research")
     logger.info(
         "Business: %s (%s), agents %s", cfg.business.name, cfg.business.location,
         "scheduled" if scheduled
         else ("on-demand only" if hasattr(llm, "research") else "unavailable on this LLM backend"),
     )
+    if ssh_ops is not None:
+        logger.info("Ops plans: %d SSH host(s) registered (%s)", len(cfg.ssh_hosts), ", ".join(sorted(cfg.ssh_hosts)))
     return BusinessContext(
         mcp_client=client, profile=cfg.business, agents_scheduled=scheduled,
         has_gpu_bridge=bridge is not None,
     )
 
 
-def build_personal_context(cfg, owner_user_id: int | None) -> PersonalContext | None:
-    """The owner's own projects/tasks/errands — core owner data, not an opt-in feature
-    like the business profile, so the only real gate is knowing who the owner is."""
+# Merging to main is the only git tool with real consequence -- see GitOpsContext's
+# docstring. Branch/write/push/PR-open (including reading the repo) are all reversible
+# and execute immediately.
+GIT_SENSITIVE_TOOLS = {"git_merge_pr"}
+
+
+def build_git_ops_context(cfg) -> GitOpsContext | None:
+    """Dev-team git tools: off unless both a target repo and a PAT are configured."""
+    if not cfg.github_repo or not cfg.github_pat:
+        return None
+    client = GitOpsClient(
+        cfg.github_repo, cfg.github_pat, cfg.git_workspace_path,
+        author_name=cfg.git_author_name, author_email=cfg.git_author_email,
+    )
+    logger.info("Git ops: targeting %s, %d tools, %d gated as sensitive",
+               cfg.github_repo, len(GIT_TOOLS), len(GIT_SENSITIVE_TOOLS))
+    return GitOpsContext(mcp_client=client, git_tools=GIT_TOOLS, sensitive_tools=GIT_SENSITIVE_TOOLS)
+
+
+def build_personal_context(cfg, owner_user_id: int | None, letterstream: LetterStreamContext | None = None) -> PersonalContext | None:
+    """The owner's own projects/tasks/errands/pantry/credit tracking — core owner data,
+    not an opt-in feature like the business profile, so the only real gate is knowing who
+    the owner is.
+
+    letterstream is optional and, when given, is unwrapped to its .mcp_client
+    (LetterStreamTools) before being handed to PersonalClient -- see personal_tools.py's
+    docstring for why draft_dispute_letter/track_dispute_letter reach out to it directly
+    rather than duplicating any of LetterStream's own auth/PDF/preauth logic. A
+    deployment with no LetterStream configured still gets every other personal tool;
+    those two just degrade to a clear "not configured" error.
+    """
     if owner_user_id is None:
         return None
     personal_db.init_personal_db(cfg.db_path)
-    return PersonalContext(mcp_client=PersonalClient(cfg.db_path, owner_user_id))
+    kitchen_db.init_kitchen_db(cfg.db_path)
+    letterstream_tools = letterstream.mcp_client if letterstream is not None else None
+    return PersonalContext(mcp_client=PersonalClient(cfg.db_path, owner_user_id, letterstream=letterstream_tools))
 
 
 def build_era_context(cfg) -> EraContext | None:
@@ -176,6 +216,22 @@ def build_era_context(cfg) -> EraContext | None:
     ]
     logger.info("Era: discovered %d tools, %d gated as sensitive", len(era_tools), len(cfg.era_sensitive_tools))
     return EraContext(mcp_client=mcp_client, era_tools=era_tools, sensitive_tools=set(cfg.era_sensitive_tools))
+
+
+def build_recipe_context(cfg) -> RecipeContext | None:
+    if not cfg.recipe_api_key:
+        return None
+    mcp_client = MCPClient(cfg.recipe_mcp_url, cfg.recipe_api_key)
+    discovered = mcp_client.list_tools()
+    recipe_tools = [
+        {
+            "type": "function",
+            "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]},
+        }
+        for t in discovered
+    ]
+    logger.info("Recipe API: discovered %d tools", len(recipe_tools))
+    return RecipeContext(mcp_client=mcp_client, recipe_tools=recipe_tools)
 
 
 def build_phone_context(cfg) -> PhoneContext | None:

@@ -18,6 +18,9 @@ from .business_tools import (
     GPU_BRIDGE_NOTE,
 )
 from .personal_tools import PERSONAL_SYSTEM_NOTE, PERSONAL_TOOLS
+from .kitchen_tools import (
+    KITCHEN_ALWAYS_TOOLS, KITCHEN_SYSTEM_NOTE, KITCHEN_TOOLS, _select_kitchen_gated_tools,
+)
 from .git_tools import GIT_SYSTEM_NOTE
 
 
@@ -272,7 +275,7 @@ class PersonalContext:
 
     @property
     def tool_names(self) -> set[str]:
-        return {t["function"]["name"] for t in PERSONAL_TOOLS}
+        return {t["function"]["name"] for t in PERSONAL_TOOLS} | {t["function"]["name"] for t in KITCHEN_TOOLS}
 
 
 @dataclass
@@ -1006,7 +1009,7 @@ SYSTEM_PROMPT = (
     "opens a video window in the user's Jarvis web session; you never see or describe the footage "
     "yourself, just confirm it's open or report that no camera is registered for that room. "
     "list_cameras shows what's registered, and add_camera registers a new one from a stream URL."
-    "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{web_note}"
+    "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{kitchen_note}{web_note}"
     "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}{recipe_note}"
 )
 
@@ -1190,6 +1193,7 @@ def build_system_prompt(
             gpu_note=GPU_BRIDGE_NOTE if getattr(business, "has_gpu_bridge", False) else "",
         ) if business is not None else "",
         personal_note=PERSONAL_SYSTEM_NOTE if personal is not None else "",
+        kitchen_note=KITCHEN_SYSTEM_NOTE if personal is not None else "",
         # Only the Claude CLI backend has web search; Ollama has no such capability, and
         # promising one it doesn't have is exactly how fabrication starts.
         web_note=WEB_SEARCH_SYSTEM_NOTE if web_search else "",
@@ -1237,6 +1241,7 @@ def select_tools(
             + (HOME_ASSISTANT_TOOLS + LOCATION_TOOLS if home_assistant is not None else [])
             + (BUSINESS_TOOLS if business is not None else [])
             + (PERSONAL_TOOLS if personal is not None else [])
+            + (KITCHEN_TOOLS if personal is not None else [])
             + (airbnb.airbnb_tools if airbnb is not None else [])
             + (ticketmaster.ticketmaster_tools if ticketmaster is not None else [])
             + (kroger.kroger_tools if kroger is not None else [])
@@ -1269,6 +1274,13 @@ def select_tools(
         # Personal tools aren't keyword-gated either — proactively capturing a personal
         # to-do or project only works if the tools are there on every turn.
         + (PERSONAL_TOOLS if personal is not None else [])
+        # Unlike PERSONAL_TOOLS, kitchen tools ARE split: save_recipe is capture-shaped
+        # (always-on, same reasoning as PERSONAL_TOOLS itself), but recipe lookup/editing
+        # is keyword-gated -- PERSONAL_TOOLS is already 21 schemas, and adding the kitchen
+        # feature's full catalog on top unconditionally would reintroduce the tool-count-
+        # overload problem this codebase has already hit and fixed twice (Era, Kroger).
+        + (KITCHEN_ALWAYS_TOOLS if personal is not None else [])
+        + (_select_kitchen_gated_tools(user_text) if personal is not None else [])
         + (_select_airbnb_tools(airbnb, user_text) if airbnb is not None else [])
         + (_select_ticketmaster_tools(ticketmaster, user_text) if ticketmaster is not None else [])
         + (_select_kroger_tools(kroger, user_text) if kroger is not None else [])

@@ -15,7 +15,7 @@ already is -- the sensitive_tools/pending_actions gate on LetterStreamContext, p
 test_engine_letterstream.py -- so a dispute letter can only ever actually be mailed after
 the owner explicitly confirms the recipient, the letter text, and the quoted cost.
 """
-from . import personal_db
+from . import kitchen_tools, personal_db
 
 # The three national bureaus' published dispute-processing addresses, so the model isn't
 # asked to know or guess them and the owner isn't asked to type them every time. These
@@ -44,6 +44,8 @@ BUREAU_ADDRESSES = {
 _RECIPIENT_FIELDS = (
     "recipient_name", "recipient_address", "recipient_city", "recipient_state", "recipient_zip",
 )
+
+_KITCHEN_TOOL_NAMES = {t["function"]["name"] for t in kitchen_tools.KITCHEN_TOOLS}
 
 PERSONAL_TOOLS = [
     {"type": "function", "function": {
@@ -418,6 +420,9 @@ class PersonalClient:
 
         if name == "track_dispute_letter":
             return self._track_dispute_letter(arguments)
+
+        if name in _KITCHEN_TOOL_NAMES:
+            return kitchen_tools.dispatch(db_path, owner, name, arguments)
 
         return {"error": f"unknown personal tool {name}"}
 

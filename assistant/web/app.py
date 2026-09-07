@@ -48,6 +48,7 @@ from .routes.devices import router as devices_router
 from .routes.notifications import router as notifications_router
 from .routes.finance import router as finance_router
 from .routes.grocery import router as grocery_router
+from .routes.kitchen import router as kitchen_router
 from .routes.media import router as media_router
 from .routes.openai_compat import router as openai_compat_router
 from .routes.personal_tasks import router as personal_tasks_router
@@ -103,6 +104,7 @@ def create_app(
     app.include_router(weather_router)
     app.include_router(personal_tasks_router)
     app.include_router(grocery_router)
+    app.include_router(kitchen_router)
     app.include_router(credit_router)
 
     if static_dir and Path(static_dir).is_dir():

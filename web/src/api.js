@@ -104,6 +104,12 @@ export const api = {
   confirmRecipe: (items) =>
     request('/api/grocery/recipe/confirm', { method: 'POST', body: JSON.stringify({ items }) }),
 
+  kitchenRecipes: (query) => request(`/api/kitchen/recipes${query ? `?query=${encodeURIComponent(query)}` : ''}`),
+  createRecipe: (recipe) => request('/api/kitchen/recipes', { method: 'POST', body: JSON.stringify(recipe) }),
+  getRecipe: (id) => request(`/api/kitchen/recipes/${id}`),
+  updateRecipe: (id, patch) => request(`/api/kitchen/recipes/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  deleteRecipe: (id) => request(`/api/kitchen/recipes/${id}`, { method: 'DELETE' }),
+
   reviewItems: (status = 'pending') => request(`/api/review/items?status=${status}`),
   decideReview: (id, decision) =>
     request(`/api/review/items/${id}/decide`, { method: 'POST', body: JSON.stringify(decision) }),

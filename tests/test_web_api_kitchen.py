@@ -250,6 +250,16 @@ def test_inventory_upsert_requires_item(client):
     assert client.post("/api/kitchen/inventory", json={"quantity": 1}).status_code == 400
 
 
+def test_adding_a_new_item_with_no_quantity_defaults_to_fully_stocked(client):
+    """The web form's own "leave quantity blank for a new item" affordance -- confirms
+    the whole route round-trips it correctly, not just the underlying kitchen_db call."""
+    resp = client.post("/api/kitchen/inventory", json={"item": "flour"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["quantity"] == kitchen_db.DEFAULT_NEW_ITEM_QUANTITY
+    assert body["status"] == "have"
+
+
 def test_inventory_filters_by_derived_status(client):
     client.post("/api/kitchen/inventory", json={"item": "pasta", "quantity": 10, "low_threshold": 2})
     client.post("/api/kitchen/inventory", json={"item": "butter", "quantity": 0, "low_threshold": 2})

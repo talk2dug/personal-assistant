@@ -255,6 +255,14 @@ def _flag_low_stock(db_path: str, owner_user_id: int, item: str, status: str) ->
         conn.commit()
 
 
+#  A brand-new item added with no amount at all defaults to "fully stocked" rather than
+# 0 -- 0 reads as "out" immediately (see _inventory_row), which is backwards for someone
+# who just started tracking something they in fact have plenty of. Same value
+# migrate_pantry_to_inventory already uses for a migrated "have" pantry item, so a fresh
+# item and a migrated one land at the same starting point.
+DEFAULT_NEW_ITEM_QUANTITY = 10.0
+
+
 def upsert_inventory_item(
     db_path: str, owner_user_id: int, item: str, *,
     quantity_delta: float | None = None, quantity_set: float | None = None,
@@ -285,6 +293,8 @@ def upsert_inventory_item(
             new_qty = quantity_set
         elif quantity_delta is not None:
             new_qty = current_qty + quantity_delta
+        elif existing is None:
+            new_qty = DEFAULT_NEW_ITEM_QUANTITY
         else:
             new_qty = current_qty
 
@@ -560,12 +570,12 @@ def migrate_pantry_to_inventory(db_path: str, owner_user_id: int) -> list[str]:
     """
     from . import personal_db  # local import: only this one-time migration needs it
 
-    placeholder_qty = {"have": 10.0, "low": 2.0, "out": 0.0}
+    placeholder_qty = {"have": DEFAULT_NEW_ITEM_QUANTITY, "low": 2.0, "out": 0.0}
     migrated = []
     for row in personal_db.list_pantry(db_path, owner_user_id):
         upsert_inventory_item(
             db_path, owner_user_id, row["item"],
-            quantity_set=placeholder_qty.get(row["status"], 10.0),
+            quantity_set=placeholder_qty.get(row["status"], DEFAULT_NEW_ITEM_QUANTITY),
             low_threshold=2.0, notes=row.get("notes"), reason="pantry_migration",
         )
         migrated.append(row["item"])

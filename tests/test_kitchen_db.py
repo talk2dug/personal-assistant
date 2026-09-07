@@ -34,6 +34,28 @@ def test_upsert_creates_a_new_item_with_a_delta_from_zero(db_path, owner_id):
     assert result["shortfall"] is None
 
 
+def test_a_brand_new_item_with_no_amount_given_defaults_to_fully_stocked(db_path, owner_id):
+    """Without this, a new item with neither quantity_set nor quantity_delta would start
+    at 0 -- which _inventory_row reads as "out" immediately, backwards for someone who
+    just started tracking something they in fact have plenty of."""
+    result = kitchen_db.upsert_inventory_item(db_path, owner_id, "flour")
+
+    assert result["quantity"] == kitchen_db.DEFAULT_NEW_ITEM_QUANTITY
+    assert result["status"] == "have"
+
+
+def test_an_existing_item_with_no_amount_given_is_a_no_op_on_quantity(db_path, owner_id):
+    """The fully-stocked default only applies to a brand-new item -- calling this on an
+    item that already exists (e.g. just to update its unit or notes) must not silently
+    reset a real tracked quantity back to the placeholder."""
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "flour", quantity_set=3, unit="cups")
+
+    result = kitchen_db.upsert_inventory_item(db_path, owner_id, "flour", notes="King Arthur brand")
+
+    assert result["quantity"] == 3
+    assert result["notes"] == "King Arthur brand"
+
+
 def test_delta_accumulates_on_the_same_normalized_item(db_path, owner_id):
     kitchen_db.upsert_inventory_item(db_path, owner_id, "Milk", quantity_delta=2, unit="gal", reason="purchase_manual")
     result = kitchen_db.upsert_inventory_item(db_path, owner_id, "milk!", quantity_delta=-1.5, reason="cook_deduction")

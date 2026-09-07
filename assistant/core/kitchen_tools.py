@@ -66,7 +66,11 @@ KITCHEN_ALWAYS_TOOLS = [
             "reports an amount, exact or estimated — 'we're down to about half a bag of "
             "rice', 'we're out of milk', 'we have 3 eggs left', 'used another cup of "
             "flour'. Give quantity for an absolute amount (a recount) or quantity_delta "
-            "for a relative change (used some, added some) — not both."
+            "for a relative change (used some, added some) — not both. If he's just "
+            "telling you to start tracking something new WITHOUT giving any amount, "
+            "call this with only item (and unit, if he gave one) — omit both quantity "
+            "fields entirely rather than guessing a number; a new item with nothing "
+            "specified is automatically marked fully stocked."
         ),
         "parameters": {"type": "object", "properties": {
             "item": {"type": "string"},

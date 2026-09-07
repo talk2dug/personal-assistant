@@ -264,9 +264,14 @@ function InventoryBoard() {
 
   async function addOrSet(e) {
     e.preventDefault()
-    if (!newItem.trim() || newQty === '') return
+    if (!newItem.trim()) return
+    // Quantity is optional -- leaving it blank on a brand-new item tells the backend
+    // to assume it's fully stocked (DEFAULT_NEW_ITEM_QUANTITY) rather than 0, which
+    // would otherwise read as "out" the instant it's added. Leaving it blank on an
+    // item that already exists is just a no-op on quantity (only unit could change).
     await api.upsertInventoryItem({
-      item: newItem.trim(), quantity: Number(newQty), unit: newUnit.trim() || undefined,
+      item: newItem.trim(), quantity: newQty === '' ? undefined : Number(newQty),
+      unit: newUnit.trim() || undefined,
     })
     setNewItem('')
     setNewQty('')
@@ -357,7 +362,7 @@ function InventoryBoard() {
       <form className="inventory-form" onSubmit={addOrSet}>
         <input placeholder="Item (e.g. milk)" value={newItem} onChange={(e) => setNewItem(e.target.value)} />
         <input
-          placeholder="Quantity"
+          placeholder="Quantity (blank = new & fully stocked)"
           type="number"
           step="any"
           value={newQty}
@@ -366,6 +371,10 @@ function InventoryBoard() {
         <input placeholder="Unit (optional)" value={newUnit} onChange={(e) => setNewUnit(e.target.value)} />
         <button type="submit">Set</button>
       </form>
+      <p className="empty-hint">
+        Adding something new? Leave quantity blank to mark it fully stocked — only fill it
+        in if you want to record a specific amount.
+      </p>
 
       {items.length === 0 && <p className="empty-hint">Nothing tracked yet — add what's in your kitchen.</p>}
       <div className="inventory-grid">

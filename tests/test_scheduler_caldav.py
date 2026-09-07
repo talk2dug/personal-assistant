@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -101,3 +101,39 @@ def test_shared_scope_events_create_shared_reminders(db_path, owner_id):
 
     reminders = db.list_reminders(db_path, owner_id)
     assert reminders[0]["scope"] == "shared"
+
+
+def test_all_day_event_creates_a_reminder_at_midnight_utc(db_path, owner_id):
+    """An all-day event's DTSTART (icalendar's dtstart.dt) comes back as a plain
+    date, not a datetime -- it has no .tzinfo attribute at all, unlike a timed
+    event's start. This crashed sync_calendar every cycle in production the moment
+    the owner's calendar had one within the sync window (a birthday, a holiday, a
+    multi-day trip) -- reproduces that real failure with a real `date` object."""
+    all_day = date.today() + timedelta(days=3)
+    client = FakeCalDAVClient([{"uid": "uid-1", "summary": "Anniversary", "start": all_day}])
+
+    sync_calendar(client, db_path, CAL_URL, "private", owner_id)
+
+    reminders = db.list_reminders(db_path, owner_id)
+    assert len(reminders) == 1
+    assert reminders[0]["text"] == "Anniversary"
+    expected = datetime(all_day.year, all_day.month, all_day.day, tzinfo=timezone.utc).isoformat()
+    assert reminders[0]["due_at"] == expected
+
+
+def test_all_day_event_alongside_a_timed_event_both_sync_cleanly(db_path, owner_id):
+    """The real production failure only ever showed up when an all-day event landed in
+    the same sync pass as ordinary timed events -- confirms the date-vs-datetime branch
+    doesn't disturb the already-working timed-event path."""
+    all_day = date.today() + timedelta(days=1)
+    timed = _dt()
+    client = FakeCalDAVClient([
+        {"uid": "uid-allday", "summary": "Holiday", "start": all_day},
+        {"uid": "uid-timed", "summary": "Dentist", "start": timed},
+    ])
+
+    sync_calendar(client, db_path, CAL_URL, "private", owner_id)
+
+    reminders = {r["caldav_uid"]: r for r in db.list_reminders(db_path, owner_id)}
+    assert reminders["uid-allday"]["text"] == "Holiday"
+    assert reminders["uid-timed"]["due_at"] == timed.astimezone(timezone.utc).isoformat()

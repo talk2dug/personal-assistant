@@ -402,8 +402,15 @@ def sync_calendar(
         remote_start = event["start"]
         if remote_start is None:
             continue
-        if remote_start.tzinfo is None:
-            remote_start = remote_start.replace(tzinfo=timezone.utc)
+        if isinstance(remote_start, datetime):
+            if remote_start.tzinfo is None:
+                remote_start = remote_start.replace(tzinfo=timezone.utc)
+        else:
+            # An all-day event's DTSTART (icalendar's dtstart.dt) is a plain date, not
+            # a datetime -- it has no time-of-day and, unlike datetime, no .tzinfo
+            # attribute at all. Treat it as midnight UTC on that date so it still gets
+            # a concrete due_at instead of crashing this job every cycle.
+            remote_start = datetime(remote_start.year, remote_start.month, remote_start.day, tzinfo=timezone.utc)
         remote_due_at = remote_start.astimezone(timezone.utc).isoformat()
 
         existing = db.find_reminder_by_caldav_uid(db_path, uid)

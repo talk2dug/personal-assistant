@@ -229,24 +229,10 @@ def list_research(db_path: str, owner_user_id: int, limit: int = 10, status: str
         return _rows(conn.execute(query, params))
 
 
-# --- pantry --------------------------------------------------------------------
-
-def upsert_pantry_item(db_path: str, owner_user_id: int, item: str, status: str = "have", notes: str | None = None) -> int:
-    with closing(_connect(db_path)) as conn:
-        conn.execute(
-            """INSERT INTO pantry_items (owner_user_id, item, status, notes, updated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(owner_user_id, item) DO UPDATE SET
-                 status = excluded.status,
-                 notes = COALESCE(excluded.notes, pantry_items.notes),
-                 updated_at = excluded.updated_at""",
-            (owner_user_id, item, status, notes, _now()),
-        )
-        conn.commit()
-        return conn.execute(
-            "SELECT id FROM pantry_items WHERE owner_user_id = ? AND item = ?", (owner_user_id, item)
-        ).fetchone()[0]
-
+# --- pantry ----------------------------------------------------------------------
+# Retired in favor of kitchen_db.py's quantity-tracked kitchen_inventory (see
+# kitchen_db.migrate_pantry_to_inventory) -- list_pantry survives only as that
+# migration's one-time read of whatever this table still holds.
 
 def list_pantry(db_path: str, owner_user_id: int, status: str | None = None):
     query = "SELECT * FROM pantry_items WHERE owner_user_id = ?"
@@ -257,11 +243,3 @@ def list_pantry(db_path: str, owner_user_id: int, status: str | None = None):
     query += " ORDER BY CASE status WHEN 'out' THEN 0 WHEN 'low' THEN 1 ELSE 2 END, item"
     with closing(_connect(db_path)) as conn:
         return _rows(conn.execute(query, params))
-
-
-def delete_pantry_item(db_path: str, owner_user_id: int, item_id: int) -> bool:
-    with closing(_connect(db_path)) as conn:
-        cur = conn.execute(
-            "DELETE FROM pantry_items WHERE id = ? AND owner_user_id = ?", (item_id, owner_user_id))
-        conn.commit()
-        return cur.rowcount > 0

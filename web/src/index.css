@@ -2473,7 +2473,7 @@ body::after {
   font-family: var(--font-mono); font-size: 12px; color: var(--text-dim); white-space: pre-wrap;
 }
 
-/* --- grocery: pantry / store / recipe / cart -------------------------------- */
+/* --- grocery: store / recipe / cart -------------------------------- */
 
 .grocery-page { display: flex; flex-direction: column; gap: 32px; }
 .grocery-page section h3 {
@@ -2481,45 +2481,61 @@ body::after {
   text-transform: uppercase; color: var(--text-dim); margin: 0 0 12px;
 }
 
-.pantry-form, .store-search-form {
+.inventory-form, .store-search-form {
   display: flex; gap: 8px; margin-bottom: 14px;
 }
-.pantry-form input, .store-search-form input, .recipe-form input, .recipe-form textarea {
+.inventory-form input, .store-search-form input, .recipe-form input, .recipe-form textarea {
   background: var(--bg-inset); border: 1px solid var(--border-dim);
   padding: 9px 10px; color: var(--text); font-family: var(--font-mono);
   font-size: 13px; outline: none; flex: 1;
 }
-.pantry-form input:focus, .store-search-form input:focus,
+.inventory-form input:focus, .store-search-form input:focus,
 .recipe-form input:focus, .recipe-form textarea:focus { border-color: var(--cyan); }
-.pantry-form button, .store-search-form button, .recipe-form button {
+.inventory-form button, .store-search-form button, .recipe-form button {
   background: var(--cyan-faint); border: 1px solid var(--cyan); padding: 9px 14px;
   color: var(--cyan-bright); font-family: var(--font-hud); font-weight: 700;
   letter-spacing: 0.08em; text-transform: uppercase; font-size: 12px; cursor: pointer;
   white-space: nowrap;
 }
-.pantry-form button:disabled, .store-search-form button:disabled, .recipe-form button:disabled {
+.inventory-form button:disabled, .store-search-form button:disabled, .recipe-form button:disabled {
   opacity: 0.5; cursor: default;
 }
 
-.pantry-grid { display: flex; flex-wrap: wrap; gap: 8px; }
-.pantry-chip {
+.inventory-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.inventory-chip {
   display: flex; align-items: center; gap: 8px; background: var(--bg-inset);
   border-left: 2px solid var(--cyan); padding: 6px 10px;
 }
-.pantry-chip.status-low { border-left-color: var(--amber); }
-.pantry-chip.status-out { border-left-color: var(--red); }
-.pantry-chip-status {
-  background: none; border: none; cursor: pointer; font-family: var(--font-mono);
+.inventory-chip.status-low { border-left-color: var(--amber); }
+.inventory-chip.status-out { border-left-color: var(--red); }
+.inventory-chip-status {
+  background: none; border: none; cursor: default; font-family: var(--font-mono);
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cyan);
   padding: 0;
 }
-.pantry-chip.status-low .pantry-chip-status { color: var(--amber); }
-.pantry-chip.status-out .pantry-chip-status { color: var(--red); }
-.pantry-chip-name { font-family: var(--font-hud); font-size: 13px; }
-.pantry-chip-remove {
+.inventory-chip.status-low .inventory-chip-status { color: var(--amber); }
+.inventory-chip.status-out .inventory-chip-status { color: var(--red); }
+.inventory-chip-name { font-family: var(--font-hud); font-size: 13px; }
+.inventory-chip-qty { font-family: var(--font-mono); font-size: 12px; color: var(--text-dim); }
+.inventory-chip-remove {
   background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 12px; padding: 0;
 }
-.pantry-chip-remove:hover { color: var(--red); }
+.inventory-chip-remove:hover { color: var(--red); }
+
+.kitchen-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+.kitchen-tab {
+  background: none; border: 1px solid var(--border-dim); padding: 8px 16px;
+  color: var(--text-dim); font-family: var(--font-hud); font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; font-size: 12px; cursor: pointer;
+}
+.kitchen-tab.active { border-color: var(--cyan); color: var(--cyan-bright); background: var(--cyan-faint); }
+
+.inventory-draft-review {
+  background: var(--bg-inset); border-left: 2px solid var(--cyan); padding: 12px;
+  margin-top: 10px; display: flex; flex-direction: column; gap: 8px;
+}
+.inventory-draft-row { display: flex; align-items: center; gap: 8px; }
+.inventory-draft-actions { display: flex; gap: 8px; }
 
 .store-current {
   background: var(--bg-inset); border-left: 2px solid var(--cyan); padding: 10px 12px;

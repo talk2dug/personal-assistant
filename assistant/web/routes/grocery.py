@@ -1,5 +1,7 @@
-"""Grocery: the Kroger-backed shadow cart, the pantry status board, and the
-recipe-to-cart propose/confirm flow, over the web UI.
+"""Grocery: the Kroger-backed shadow cart and the recipe-to-cart propose/confirm flow,
+over the web UI. (Kitchen inventory, formerly this module's pantry board, moved to
+kitchen.py/kitchen_db.py as its own quantity-tracked system -- see project memory
+project_recipe_manager.md, Phase 3.)
 
 Owner-only, same rule as chat's Kroger tools (see telegram_bot.py's docstring) --
 Kroger holds the owner's real account and cart. Cart-add here is a direct call, not
@@ -12,7 +14,7 @@ import json
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ...core import kroger_recipe, personal_db
+from ...core import kroger_recipe
 from ..auth import require_owner
 
 router = APIRouter(prefix="/api/grocery", tags=["grocery"])
@@ -67,38 +69,6 @@ async def clear_cart(request: Request):
     require_owner(request)
     kroger = _kroger(request)
     return _unwrap(await _call(kroger, "clear_current_cart"))
-
-
-@router.get("/pantry")
-async def list_pantry(request: Request, status: str | None = None):
-    user = require_owner(request)
-    cfg = request.app.state.cfg
-    return personal_db.list_pantry(cfg.db_path, user["id"], status)
-
-
-@router.post("/pantry")
-async def upsert_pantry(request: Request):
-    user = require_owner(request)
-    cfg = request.app.state.cfg
-    body = await request.json()
-    item = (body.get("item") or "").strip()
-    status = body.get("status", "have")
-    if not item:
-        raise HTTPException(400, "item is required")
-    if status not in ("have", "low", "out"):
-        raise HTTPException(400, "status must be 'have', 'low', or 'out'")
-    item_id = personal_db.upsert_pantry_item(cfg.db_path, user["id"], item, status, body.get("notes"))
-    return {"ok": True, "item_id": item_id}
-
-
-@router.delete("/pantry/{item_id}")
-async def delete_pantry(item_id: int, request: Request):
-    user = require_owner(request)
-    cfg = request.app.state.cfg
-    ok = personal_db.delete_pantry_item(cfg.db_path, user["id"], item_id)
-    if not ok:
-        raise HTTPException(404, "pantry item not found")
-    return {"ok": True}
 
 
 @router.get("/stores")

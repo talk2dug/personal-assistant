@@ -15,6 +15,8 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 
+from .business_db import normalize_lead_name
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS recipes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,6 +30,44 @@ CREATE TABLE IF NOT EXISTS recipes (
     notes TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+-- Real quantities, replacing the old personal_db.pantry_items have/low/out enum (see
+-- migrate_pantry_to_inventory) -- recipe deduction, Kroger-purchase quantities, and
+-- photo-based "how much is left" all need actual math, which an enum can't do. The
+-- have/low/out badge isn't gone, it's just derived from quantity vs low_threshold at
+-- read time (see _inventory_row) rather than stored directly.
+CREATE TABLE IF NOT EXISTS kitchen_inventory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    item TEXT NOT NULL,
+    normalized_item TEXT NOT NULL,   -- business_db.normalize_lead_name(item); matches
+                                      -- "Milk" / "milk!" / "  MILK " as one row.
+    quantity REAL NOT NULL DEFAULT 0,
+    unit TEXT,
+    low_threshold REAL,
+    photo_path TEXT,
+    notes TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner_user_id, normalized_item)
+);
+
+-- Audit trail for every inventory change, regardless of source -- lets a bad Kroger
+-- name-match or a surprising deduction be traced back after the fact rather than just
+-- overwritten silently.
+CREATE TABLE IF NOT EXISTS kitchen_inventory_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    item TEXT NOT NULL,
+    delta REAL,              -- NULL when this write was an absolute set (a photo recount)
+    quantity_after REAL NOT NULL,
+    unit TEXT,
+    reason TEXT NOT NULL CHECK (reason IN (
+        'purchase_manual', 'purchase_receipt', 'purchase_kroger',
+        'cook_deduction', 'photo_recount', 'manual_adjust', 'pantry_migration'
+    )),
+    recipe_id INTEGER REFERENCES recipes(id),
+    created_at TEXT NOT NULL
 );
 """
 
@@ -127,3 +167,156 @@ def delete_recipe(db_path: str, owner_user_id: int, recipe_id: int) -> bool:
             "DELETE FROM recipes WHERE id = ? AND owner_user_id = ?", (recipe_id, owner_user_id))
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- kitchen inventory ---------------------------------------------------------
+
+def _inventory_row(row: dict) -> dict:
+    """Adds the derived have/low/out badge -- see kitchen_inventory's schema comment for
+    why this is computed at read time rather than stored."""
+    row = dict(row)
+    if row["quantity"] <= 0:
+        row["status"] = "out"
+    elif row["low_threshold"] is not None and row["quantity"] <= row["low_threshold"]:
+        row["status"] = "low"
+    else:
+        row["status"] = "have"
+    return row
+
+
+def upsert_inventory_item(
+    db_path: str, owner_user_id: int, item: str, *,
+    quantity_delta: float | None = None, quantity_set: float | None = None,
+    unit: str | None = None, low_threshold: float | None = None, notes: str | None = None,
+    photo_path: str | None = None, reason: str = "manual_adjust", recipe_id: int | None = None,
+) -> dict:
+    """The one write primitive every inventory-changing path funnels through: manual
+    purchase, receipt scan, Kroger sync, cook-time deduction, photo recount, or a direct
+    adjustment. Matches by normalized name so "Milk" and "milk!" are the same row.
+
+    Give quantity_set for an absolute recount (a photo estimate of what's left) or
+    quantity_delta for anything additive/subtractive (a purchase, a deduction) -- not
+    both. Quantity is clamped at 0; a deduction that would have gone negative is
+    reported back via the returned dict's "shortfall" key (how much was missing) so a
+    caller like cook-time deduction can tell the owner "you were short on X" instead of
+    silently going negative or pretending nothing happened.
+    """
+    normalized = normalize_lead_name(item)
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        existing = conn.execute(
+            "SELECT * FROM kitchen_inventory WHERE owner_user_id = ? AND normalized_item = ?",
+            (owner_user_id, normalized),
+        ).fetchone()
+        current_qty = existing["quantity"] if existing else 0.0
+
+        if quantity_set is not None:
+            new_qty = quantity_set
+        elif quantity_delta is not None:
+            new_qty = current_qty + quantity_delta
+        else:
+            new_qty = current_qty
+
+        shortfall = -new_qty if new_qty < 0 else None
+        new_qty = max(new_qty, 0.0)
+
+        if existing is None:
+            conn.execute(
+                """INSERT INTO kitchen_inventory
+                       (owner_user_id, item, normalized_item, quantity, unit, low_threshold,
+                        photo_path, notes, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (owner_user_id, item, normalized, new_qty, unit, low_threshold, photo_path, notes, now),
+            )
+        else:
+            conn.execute(
+                """UPDATE kitchen_inventory SET
+                       quantity = ?, unit = COALESCE(?, unit), low_threshold = COALESCE(?, low_threshold),
+                       photo_path = COALESCE(?, photo_path), notes = COALESCE(?, notes), updated_at = ?
+                   WHERE id = ?""",
+                (new_qty, unit, low_threshold, photo_path, notes, now, existing["id"]),
+            )
+
+        conn.execute(
+            """INSERT INTO kitchen_inventory_log
+                   (owner_user_id, item, delta, quantity_after, unit, reason, recipe_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, item, quantity_delta, new_qty, unit, reason, recipe_id, now),
+        )
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT * FROM kitchen_inventory WHERE owner_user_id = ? AND normalized_item = ?",
+            (owner_user_id, normalized),
+        ).fetchone()
+        result = _inventory_row(row)
+        result["shortfall"] = shortfall
+        return result
+
+
+def list_inventory(db_path: str, owner_user_id: int, status: str | None = None) -> list[dict]:
+    with closing(_connect(db_path)) as conn:
+        rows = [_inventory_row(r) for r in _rows(
+            conn.execute("SELECT * FROM kitchen_inventory WHERE owner_user_id = ? ORDER BY item", (owner_user_id,))
+        )]
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+    return rows
+
+
+def get_inventory_item(db_path: str, owner_user_id: int, item: str) -> dict | None:
+    normalized = normalize_lead_name(item)
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM kitchen_inventory WHERE owner_user_id = ? AND normalized_item = ?",
+            (owner_user_id, normalized),
+        ).fetchone()
+        return _inventory_row(row) if row else None
+
+
+def delete_inventory_item(db_path: str, owner_user_id: int, item_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "DELETE FROM kitchen_inventory WHERE id = ? AND owner_user_id = ?", (item_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def inventory_log(db_path: str, owner_user_id: int, item: str | None = None, limit: int = 50) -> list[dict]:
+    sql = "SELECT * FROM kitchen_inventory_log WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if item:
+        sql += " AND item = ?"
+        params.append(item)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(sql, params))
+
+
+def migrate_pantry_to_inventory(db_path: str, owner_user_id: int) -> list[str]:
+    """One-time move off the old have/low/out pantry_items table (personal_db.py) into
+    real quantities here -- see kitchen_inventory's schema comment for why. Placeholder
+    quantities only (have->10, low->2, out->0, low_threshold=2); the owner will want a
+    real photo-assisted pass afterward for accurate numbers.
+
+    Idempotent by construction: migrated rows are deleted from pantry_items immediately
+    after, so a second call (e.g. the next boot) finds nothing left to re-copy, and can
+    never clobber real edits already made in kitchen_inventory since the first run.
+    """
+    from . import personal_db  # local import: only this one-time migration needs it
+
+    placeholder_qty = {"have": 10.0, "low": 2.0, "out": 0.0}
+    migrated = []
+    for row in personal_db.list_pantry(db_path, owner_user_id):
+        upsert_inventory_item(
+            db_path, owner_user_id, row["item"],
+            quantity_set=placeholder_qty.get(row["status"], 10.0),
+            low_threshold=2.0, notes=row.get("notes"), reason="pantry_migration",
+        )
+        migrated.append(row["item"])
+    if migrated:
+        with closing(_connect(db_path)) as conn:
+            conn.execute("DELETE FROM pantry_items WHERE owner_user_id = ?", (owner_user_id,))
+            conn.commit()
+    return migrated

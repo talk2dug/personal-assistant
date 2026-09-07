@@ -1,7 +1,8 @@
 """Chat-facing tools for the owner's own life — separate from business_tools.py the same way
 personal_db.py is separate from business_db.py: personal to-dos, personal projects, errands
-he's delegated ("find me a doctor"), pantry status, and now credit score tracking and
-credit-report dispute letters have nothing to do with the print business.
+he's delegated ("find me a doctor"), and credit score tracking and credit-report dispute
+letters have nothing to do with the print business. (Kitchen recipes/inventory are their
+own sibling module, kitchen_tools.py, dispatched through this same PersonalClient.)
 
 Everything except the two tools that reach LetterStream is ungated for the same reason as
 the rest of this module: writes only to Jarvis's own database, spends no money, touches
@@ -127,27 +128,6 @@ PERSONAL_TOOLS = [
         "description": "Recent personal errands and their findings, including anything still queued.",
         "parameters": {"type": "object", "properties": {
             "limit": {"type": "integer", "description": "Default 10."},
-        }, "required": []},
-    }},
-    {"type": "function", "function": {
-        "name": "update_pantry_status",
-        "description": (
-            "Set what's on hand for a pantry/grocery item — 'have', 'low', or 'out'. Use "
-            "this whenever he mentions running low on or out of something ('I'm about out "
-            "of milk', 'we're low on eggs'), or confirms he just bought something ('have'). "
-            "This is a simple status, not a quantity — never ask him for a count."
-        ),
-        "parameters": {"type": "object", "properties": {
-            "item": {"type": "string"},
-            "status": {"type": "string", "enum": ["have", "low", "out"]},
-            "notes": {"type": "string"},
-        }, "required": ["item", "status"]},
-    }},
-    {"type": "function", "function": {
-        "name": "list_pantry",
-        "description": "What's on hand, optionally filtered to what's low or out.",
-        "parameters": {"type": "object", "properties": {
-            "status": {"type": "string", "enum": ["have", "low", "out"]},
         }, "required": []},
     }},
     {"type": "function", "function": {
@@ -299,10 +279,6 @@ PERSONAL_SYSTEM_NOTE = (
     "say you'll look into it rather than pretending you already know. Never confuse this with "
     "the business tools (create_project/create_task/request_research) — those are for the "
     "print business, these are for him."
-    " You also track what's in his kitchen with update_pantry_status/list_pantry — a simple "
-    "have/low/out status per item, not a quantity. Whenever he says he's running low on or "
-    "out of something, or that he just bought something, update it yourself immediately "
-    "rather than just acknowledging it in conversation."
     " You also track his credit: add_credit_score whenever he tells you a score he just "
     "checked (never estimate one yourself), and the credit-report dispute tracker "
     "(create_dispute_item, update_dispute_item, draft_dispute_letter, list_dispute_letters, "
@@ -375,13 +351,6 @@ class PersonalClient:
             }
         if name == "list_personal_research":
             return {"research": personal_db.list_research(db_path, owner, arguments.get("limit", 10))}
-
-        if name == "update_pantry_status":
-            item_id = personal_db.upsert_pantry_item(
-                db_path, owner, arguments["item"], arguments["status"], arguments.get("notes"))
-            return {"ok": True, "item_id": item_id}
-        if name == "list_pantry":
-            return {"pantry": personal_db.list_pantry(db_path, owner, arguments.get("status"))}
 
         if name == "list_credit_scores":
             return {"scores": personal_db.list_credit_score_entries(db_path, owner, arguments.get("bureau"))}

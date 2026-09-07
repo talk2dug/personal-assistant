@@ -39,6 +39,44 @@ KITCHEN_ALWAYS_TOOLS = [
             "notes": {"type": "string"},
         }, "required": ["title", "ingredients", "steps"]},
     }},
+    {"type": "function", "function": {
+        "name": "record_purchase",
+        "description": (
+            "Record kitchen items just bought, from anywhere — the grocery store, a "
+            "farmers market, wherever. (Kroger purchases sync in automatically; this is "
+            "for everything else, or for confirming a Kroger trip in the moment.) Use "
+            "whenever he says what he bought, e.g. 'I picked up 2 lbs of ground beef and "
+            "a dozen eggs.'"
+        ),
+        "parameters": {"type": "object", "properties": {
+            "items": {
+                "type": "array",
+                "items": {"type": "object", "properties": {
+                    "name": {"type": "string"},
+                    "quantity": {"type": "number", "description": "How much/many was bought."},
+                    "unit": {"type": "string", "description": "e.g. 'lb', 'dozen', 'cans'."},
+                }, "required": ["name", "quantity"]},
+            },
+        }, "required": ["items"]},
+    }},
+    {"type": "function", "function": {
+        "name": "update_inventory_quantity",
+        "description": (
+            "Correct or set how much of one kitchen item is on hand. Use whenever he "
+            "reports an amount, exact or estimated — 'we're down to about half a bag of "
+            "rice', 'we're out of milk', 'we have 3 eggs left', 'used another cup of "
+            "flour'. Give quantity for an absolute amount (a recount) or quantity_delta "
+            "for a relative change (used some, added some) — not both."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "item": {"type": "string"},
+            "quantity": {"type": "number", "description": "Absolute amount now on hand."},
+            "quantity_delta": {"type": "number", "description": "Relative change instead of an absolute amount."},
+            "unit": {"type": "string"},
+            "low_threshold": {"type": "number", "description": "Amount at/below which this counts as 'low'."},
+            "notes": {"type": "string"},
+        }, "required": ["item"]},
+    }},
 ]
 
 KITCHEN_GATED_TOOLS = [
@@ -81,12 +119,27 @@ KITCHEN_GATED_TOOLS = [
             "recipe_id": {"type": "integer"},
         }, "required": ["recipe_id"]},
     }},
+    {"type": "function", "function": {
+        "name": "list_kitchen_inventory",
+        "description": "What's currently in the kitchen, optionally filtered to what's low or out.",
+        "parameters": {"type": "object", "properties": {
+            "status": {"type": "string", "enum": ["have", "low", "out"]},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "remove_inventory_item",
+        "description": "Stop tracking an item in kitchen inventory entirely (not just set it to zero).",
+        "parameters": {"type": "object", "properties": {
+            "item": {"type": "string"},
+        }, "required": ["item"]},
+    }},
 ]
 
 KITCHEN_TOOLS = KITCHEN_ALWAYS_TOOLS + KITCHEN_GATED_TOOLS
 
 KITCHEN_KEYWORDS = [
     "recipe", "recipes", "cook", "cooking", "kitchen", "ingredient", "ingredients",
+    "inventory", "pantry", "stock", "on hand",
 ]
 
 
@@ -103,6 +156,13 @@ KITCHEN_SYSTEM_NOTE = (
     "delete_recipe to browse, read, edit, or remove what's saved. Ingredients are "
     "structured (name/quantity/unit), and steps are an ordered list of plain strings — "
     "keep the wording of each step close to how he described it rather than rewriting it."
+    " You also track real kitchen inventory (quantities, not just have/low/out) with "
+    "record_purchase (whenever he says what he bought, anywhere — Kroger purchases sync "
+    "in automatically, so this covers everywhere else) and update_inventory_quantity "
+    "(whenever he reports or estimates an amount — 'we're low on milk', 'we have 3 eggs "
+    "left', 'used a cup of flour'). Update it yourself immediately rather than just "
+    "acknowledging it in conversation. list_kitchen_inventory shows what's on hand, and "
+    "remove_inventory_item stops tracking something entirely."
 )
 
 
@@ -129,4 +189,37 @@ def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict) -> di
     if name == "delete_recipe":
         ok = kitchen_db.delete_recipe(db_path, owner_user_id, arguments["recipe_id"])
         return {"ok": ok}
+
+    if name == "record_purchase":
+        updated = []
+        for entry in arguments.get("items", []):
+            if not entry.get("name"):
+                continue
+            r = kitchen_db.upsert_inventory_item(
+                db_path, owner_user_id, entry["name"],
+                quantity_delta=entry.get("quantity", 0), unit=entry.get("unit"),
+                reason="purchase_manual",
+            )
+            updated.append({"item": r["item"], "quantity": r["quantity"], "unit": r["unit"]})
+        return {"ok": True, "updated": updated}
+
+    if name == "update_inventory_quantity":
+        r = kitchen_db.upsert_inventory_item(
+            db_path, owner_user_id, arguments["item"],
+            quantity_set=arguments.get("quantity"), quantity_delta=arguments.get("quantity_delta"),
+            unit=arguments.get("unit"), low_threshold=arguments.get("low_threshold"),
+            notes=arguments.get("notes"), reason="manual_adjust",
+        )
+        return {"ok": True, "item": r["item"], "quantity": r["quantity"], "unit": r["unit"], "status": r["status"]}
+
+    if name == "list_kitchen_inventory":
+        return {"inventory": kitchen_db.list_inventory(db_path, owner_user_id, arguments.get("status"))}
+
+    if name == "remove_inventory_item":
+        existing = kitchen_db.get_inventory_item(db_path, owner_user_id, arguments["item"])
+        if existing is None:
+            return {"error": "item not found in inventory"}
+        ok = kitchen_db.delete_inventory_item(db_path, owner_user_id, existing["id"])
+        return {"ok": ok}
+
     return {"error": f"unknown kitchen tool {name}"}

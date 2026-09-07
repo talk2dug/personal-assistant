@@ -12,64 +12,6 @@ function formatWhen(iso) {
   }
 }
 
-const STATUS_CYCLE = { have: 'low', low: 'out', out: 'have' }
-
-function PantryBoard() {
-  const [items, setItems] = useState(null)
-  const [newItem, setNewItem] = useState('')
-
-  async function load() {
-    setItems(await api.groceryPantry())
-  }
-
-  useEffect(() => { load() }, [])
-
-  async function addItem(e) {
-    e.preventDefault()
-    if (!newItem.trim()) return
-    await api.upsertPantryItem({ item: newItem.trim(), status: 'have' })
-    setNewItem('')
-    load()
-  }
-
-  async function cycleStatus(pantryItem) {
-    await api.upsertPantryItem({ item: pantryItem.item, status: STATUS_CYCLE[pantryItem.status] })
-    load()
-  }
-
-  async function remove(id) {
-    await api.deletePantryItem(id)
-    load()
-  }
-
-  if (items === null) return <p className="empty-hint">Loading…</p>
-
-  return (
-    <div className="pantry-board">
-      <form className="pantry-form" onSubmit={addItem}>
-        <input
-          placeholder="Add a pantry item (e.g. milk)"
-          value={newItem}
-          onChange={(e) => setNewItem(e.target.value)}
-        />
-        <button type="submit">Add</button>
-      </form>
-      {items.length === 0 && <p className="empty-hint">Nothing tracked yet — add what's in your kitchen.</p>}
-      <div className="pantry-grid">
-        {items.map((p) => (
-          <div key={p.id} className={`pantry-chip status-${p.status}`}>
-            <button className="pantry-chip-status" onClick={() => cycleStatus(p)} title="Click to cycle status">
-              {p.status}
-            </button>
-            <span className="pantry-chip-name">{p.item}</span>
-            <button className="pantry-chip-remove" onClick={() => remove(p.id)}>✕</button>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 function CartPanel() {
   const [cart, setCart] = useState(null)
   const [error, setError] = useState(null)
@@ -285,10 +227,6 @@ export default function Grocery() {
 
   return (
     <div className="grocery-page">
-      <section>
-        <h3>Pantry</h3>
-        <PantryBoard />
-      </section>
       <section>
         <h3>Store</h3>
         <StorePicker />

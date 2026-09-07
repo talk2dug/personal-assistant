@@ -198,6 +198,13 @@ def build_personal_context(cfg, owner_user_id: int | None, letterstream: LetterS
         return None
     personal_db.init_personal_db(cfg.db_path)
     kitchen_db.init_kitchen_db(cfg.db_path)
+    # One-time (idempotent) move off the old have/low/out pantry board onto real
+    # quantities -- see kitchen_inventory's schema comment in kitchen_db.py. Cheap to
+    # call every boot: it's a no-op once pantry_items is empty.
+    migrated = kitchen_db.migrate_pantry_to_inventory(cfg.db_path, owner_user_id)
+    if migrated:
+        logger.info("Kitchen: migrated %d pantry item(s) to kitchen_inventory with placeholder quantities: %s",
+                    len(migrated), ", ".join(migrated))
     letterstream_tools = letterstream.mcp_client if letterstream is not None else None
     return PersonalContext(mcp_client=PersonalClient(cfg.db_path, owner_user_id, letterstream=letterstream_tools))
 

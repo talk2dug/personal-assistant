@@ -91,9 +91,6 @@ export const api = {
 
   groceryCart: () => request('/api/grocery/cart'),
   clearGroceryCart: () => request('/api/grocery/cart/clear', { method: 'POST' }),
-  groceryPantry: (status) => request(`/api/grocery/pantry${status ? `?status=${status}` : ''}`),
-  upsertPantryItem: (item) => request('/api/grocery/pantry', { method: 'POST', body: JSON.stringify(item) }),
-  deletePantryItem: (id) => request(`/api/grocery/pantry/${id}`, { method: 'DELETE' }),
   searchGroceryStores: (zipCode) =>
     request(`/api/grocery/stores${zipCode ? `?zip_code=${zipCode}` : ''}`),
   preferredGroceryStore: () => request('/api/grocery/stores/preferred'),
@@ -114,6 +111,35 @@ export const api = {
     const form = new FormData()
     form.append('photo', file, file.name)
     const res = await fetch('/api/kitchen/recipes/from-photo', { method: 'POST', credentials: 'include', body: form })
+    if (!res.ok) {
+      const body = await res.json().catch(() => null)
+      throw new ApiError(res.status, body)
+    }
+    return res.json()
+  },
+
+  kitchenInventory: (status) => request(`/api/kitchen/inventory${status ? `?status=${status}` : ''}`),
+  upsertInventoryItem: (item) => request('/api/kitchen/inventory', { method: 'POST', body: JSON.stringify(item) }),
+  deleteInventoryItem: (id) => request(`/api/kitchen/inventory/${id}`, { method: 'DELETE' }),
+  // FormData, not JSON — same reasoning as recipeFromPhoto above. `item` is optional: pass
+  // the already-known item name when this is a recount of an existing row.
+  inventoryFromPhoto: async (file, item) => {
+    const form = new FormData()
+    form.append('photo', file, file.name)
+    const qs = item ? `?item=${encodeURIComponent(item)}` : ''
+    const res = await fetch(`/api/kitchen/inventory/from-photo${qs}`, { method: 'POST', credentials: 'include', body: form })
+    if (!res.ok) {
+      const body = await res.json().catch(() => null)
+      throw new ApiError(res.status, body)
+    }
+    return res.json()
+  },
+  recordPurchases: (items, reason) =>
+    request('/api/kitchen/purchases', { method: 'POST', body: JSON.stringify({ items, reason }) }),
+  purchaseFromReceipt: async (file) => {
+    const form = new FormData()
+    form.append('photo', file, file.name)
+    const res = await fetch('/api/kitchen/purchases/from-receipt', { method: 'POST', credentials: 'include', body: form })
     if (!res.ok) {
       const body = await res.json().catch(() => null)
       throw new ApiError(res.status, body)

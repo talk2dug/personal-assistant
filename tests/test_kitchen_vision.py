@@ -76,3 +76,64 @@ def test_failed_job_reports_the_bridge_error():
 
     assert draft["parsed"] is False
     assert "done_reason=length" in draft["error"]
+
+
+def test_inventory_photo_parses_name_quantity_and_unit():
+    bridge = FakeBridge({"status": "done", "result": '{"name": "rice", "quantity": 2.5, "unit": "cups"}'})
+
+    draft = kitchen_vision.analyze_inventory_photo(bridge, b"fake-jpeg-bytes")
+
+    assert draft == {"parsed": True, "name": "rice", "quantity": 2.5, "unit": "cups"}
+
+
+def test_inventory_photo_with_item_hint_tells_the_model_the_name():
+    bridge = FakeBridge({"status": "done", "result": '{"name": "milk", "quantity": 0.5, "unit": "gal"}'})
+
+    kitchen_vision.analyze_inventory_photo(bridge, b"fake-jpeg-bytes", item_hint="milk")
+
+    assert 'already known to be "milk"' in bridge.calls[0]["prompt"]
+
+
+def test_inventory_photo_missing_quantity_reports_failure():
+    bridge = FakeBridge({"status": "done", "result": '{"name": "rice"}'})
+
+    draft = kitchen_vision.analyze_inventory_photo(bridge, b"fake-jpeg-bytes")
+
+    assert draft["parsed"] is False
+    assert "missing" in draft["error"]
+
+
+def test_receipt_parses_multiple_line_items():
+    bridge = FakeBridge({"status": "done", "result": (
+        '{"store": "Kroger", "items": ['
+        '{"name": "bananas", "quantity": 1.34, "unit": "lb"}, '
+        '{"name": "milk", "quantity": 1, "unit": "gal"}]}'
+    )})
+
+    draft = kitchen_vision.analyze_receipt_photo(bridge, b"fake-jpeg-bytes")
+
+    assert draft["parsed"] is True
+    assert draft["store"] == "Kroger"
+    assert draft["items"] == [
+        {"name": "bananas", "quantity": 1.34, "unit": "lb"},
+        {"name": "milk", "quantity": 1.0, "unit": "gal"},
+    ]
+
+
+def test_receipt_with_no_readable_items_returns_empty_list_not_failure():
+    bridge = FakeBridge({"status": "done", "result": '{"store": null, "items": []}'})
+
+    draft = kitchen_vision.analyze_receipt_photo(bridge, b"fake-jpeg-bytes")
+
+    assert draft["parsed"] is True
+    assert draft["store"] is None
+    assert draft["items"] == []
+
+
+def test_receipt_failed_job_reports_the_bridge_error():
+    bridge = FakeBridge({"status": "failed", "error": "model returned nothing (done_reason=length)"})
+
+    draft = kitchen_vision.analyze_receipt_photo(bridge, b"fake-jpeg-bytes")
+
+    assert draft["parsed"] is False
+    assert "done_reason=length" in draft["error"]

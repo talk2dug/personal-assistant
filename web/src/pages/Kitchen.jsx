@@ -186,7 +186,7 @@ function RecipeDetail({ recipe, onClose, onDelete }) {
   )
 }
 
-export default function Kitchen() {
+function RecipesPanel() {
   const [recipes, setRecipes] = useState(null)
   const [query, setQuery] = useState('')
   const [openId, setOpenId] = useState(null)
@@ -204,41 +204,267 @@ export default function Kitchen() {
     load()
   }
 
-  if (recipes === null) return <div className="kitchen-page"><p className="empty-hint">Loading…</p></div>
+  if (recipes === null) return <p className="empty-hint">Loading…</p>
 
   const openRecipe = recipes.find((r) => r.id === openId)
 
   return (
-    <div className="kitchen-page">
-      <section>
-        <div className="tasks-header">
-          <h3>Recipes</h3>
-          <input
-            className="recipe-search"
-            placeholder="Search titles…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </div>
-        {recipes.length === 0 && <p className="empty-hint">No recipes saved yet — tell Jarvis one, or add it here.</p>}
-        <ul className="task-list">
-          {recipes.map((r) => (
-            <li key={r.id} className="task-row recipe-row" onClick={() => setOpenId(r.id)}>
-              <div className="task-body">
-                <div className="task-text">{r.title}</div>
-                <div className="task-meta">
-                  {r.servings ? <span>{r.servings} servings</span> : null}
-                  <span>{r.ingredients.length} ingredients</span>
-                </div>
+    <section>
+      <div className="tasks-header">
+        <h3>Recipes</h3>
+        <input
+          className="recipe-search"
+          placeholder="Search titles…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
+      {recipes.length === 0 && <p className="empty-hint">No recipes saved yet — tell Jarvis one, or add it here.</p>}
+      <ul className="task-list">
+        {recipes.map((r) => (
+          <li key={r.id} className="task-row recipe-row" onClick={() => setOpenId(r.id)}>
+            <div className="task-body">
+              <div className="task-text">{r.title}</div>
+              <div className="task-meta">
+                {r.servings ? <span>{r.servings} servings</span> : null}
+                <span>{r.ingredients.length} ingredients</span>
               </div>
-            </li>
-          ))}
-        </ul>
-        <NewRecipeForm onChange={load} initialDraft={photoDraft} onDraftConsumed={() => setPhotoDraft(null)} />
-        <PhotoUploadButton onDraft={setPhotoDraft} />
-      </section>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <NewRecipeForm onChange={load} initialDraft={photoDraft} onDraftConsumed={() => setPhotoDraft(null)} />
+      <PhotoUploadButton onDraft={setPhotoDraft} />
 
       {openRecipe && <RecipeDetail recipe={openRecipe} onClose={() => setOpenId(null)} onDelete={deleteRecipe} />}
+    </section>
+  )
+}
+
+/** Add-or-set-quantity form, an item grid with derived have/low/out badges (same badge
+ *  language the old pantry board used, now driven by a real quantity+threshold rather
+ *  than a stored enum), and two photo-upload flows -- both land in an unsaved draft
+ *  reviewed here before anything is written, same contract as recipe photo capture. */
+function InventoryBoard() {
+  const [items, setItems] = useState(null)
+  const [newItem, setNewItem] = useState('')
+  const [newQty, setNewQty] = useState('')
+  const [newUnit, setNewUnit] = useState('')
+  const [recountDraft, setRecountDraft] = useState(null)
+  const [receiptDraft, setReceiptDraft] = useState(null)
+  const [receiptChecked, setReceiptChecked] = useState({})
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function load() {
+    setItems(await api.kitchenInventory())
+  }
+
+  useEffect(() => { load() }, [])
+
+  async function addOrSet(e) {
+    e.preventDefault()
+    if (!newItem.trim() || newQty === '') return
+    await api.upsertInventoryItem({
+      item: newItem.trim(), quantity: Number(newQty), unit: newUnit.trim() || undefined,
+    })
+    setNewItem('')
+    setNewQty('')
+    setNewUnit('')
+    load()
+  }
+
+  async function remove(id) {
+    await api.deleteInventoryItem(id)
+    load()
+  }
+
+  async function handleRecountFile(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setError('')
+    setBusy(true)
+    try {
+      setRecountDraft(await api.inventoryFromPhoto(file))
+    } catch (err) {
+      setError(err.message || 'Could not read that photo.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function confirmRecount() {
+    if (!recountDraft?.parsed) {
+      setRecountDraft(null)
+      return
+    }
+    setBusy(true)
+    try {
+      await api.upsertInventoryItem({
+        item: recountDraft.name, quantity: recountDraft.quantity, unit: recountDraft.unit || undefined,
+        reason: 'photo_recount',
+      })
+      setRecountDraft(null)
+      load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleReceiptFile(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setError('')
+    setBusy(true)
+    try {
+      const draft = await api.purchaseFromReceipt(file)
+      setReceiptDraft(draft)
+      setReceiptChecked(Object.fromEntries((draft.items || []).map((_, i) => [i, true])))
+    } catch (err) {
+      setError(err.message || 'Could not read that receipt.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function confirmReceipt() {
+    const items = (receiptDraft.items || []).filter((_, i) => receiptChecked[i])
+    if (items.length === 0) {
+      setReceiptDraft(null)
+      return
+    }
+    setBusy(true)
+    try {
+      await api.recordPurchases(items, 'purchase_receipt')
+      setReceiptDraft(null)
+      load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (items === null) return <p className="empty-hint">Loading…</p>
+
+  return (
+    <section>
+      <h3>Inventory</h3>
+      <form className="inventory-form" onSubmit={addOrSet}>
+        <input placeholder="Item (e.g. milk)" value={newItem} onChange={(e) => setNewItem(e.target.value)} />
+        <input
+          placeholder="Quantity"
+          type="number"
+          step="any"
+          value={newQty}
+          onChange={(e) => setNewQty(e.target.value)}
+        />
+        <input placeholder="Unit (optional)" value={newUnit} onChange={(e) => setNewUnit(e.target.value)} />
+        <button type="submit">Set</button>
+      </form>
+
+      {items.length === 0 && <p className="empty-hint">Nothing tracked yet — add what's in your kitchen.</p>}
+      <div className="inventory-grid">
+        {items.map((it) => (
+          <div key={it.id} className={`inventory-chip status-${it.status}`}>
+            <span className="inventory-chip-status">{it.status}</span>
+            <span className="inventory-chip-name">{it.item}</span>
+            <span className="inventory-chip-qty">{it.quantity}{it.unit ? ` ${it.unit}` : ''}</span>
+            <button className="inventory-chip-remove" onClick={() => remove(it.id)}>✕</button>
+          </div>
+        ))}
+      </div>
+
+      <div className="tasks-header">
+        <label className={`task-add-btn recipe-photo-btn ${busy ? 'is-busy' : ''}`}>
+          {busy ? 'Reading…' : '+ Recount from photo'}
+          <input type="file" accept="image/*" capture="environment" onChange={handleRecountFile} disabled={busy} hidden />
+        </label>
+        <label className={`task-add-btn recipe-photo-btn ${busy ? 'is-busy' : ''}`}>
+          {busy ? 'Reading…' : '+ Scan receipt'}
+          <input type="file" accept="image/*" capture="environment" onChange={handleReceiptFile} disabled={busy} hidden />
+        </label>
+      </div>
+      {error && <p className="empty-hint">{error}</p>}
+
+      {recountDraft && (
+        <div className="inventory-draft-review">
+          {recountDraft.parsed ? (
+            <>
+              <div className="inventory-draft-row">
+                <strong>{recountDraft.name}</strong> — {recountDraft.quantity} {recountDraft.unit}
+              </div>
+              <div className="inventory-draft-actions">
+                <button onClick={confirmRecount}>Save</button>
+                <button className="recipe-cancel" onClick={() => setRecountDraft(null)}>Cancel</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="empty-hint">Couldn't read that photo ({recountDraft.error}).</p>
+              <button className="recipe-cancel" onClick={() => setRecountDraft(null)}>Dismiss</button>
+            </>
+          )}
+        </div>
+      )}
+
+      {receiptDraft && (
+        <div className="inventory-draft-review">
+          {receiptDraft.items && receiptDraft.items.length > 0 ? (
+            <>
+              <p className="empty-hint">
+                {receiptDraft.store ? `From ${receiptDraft.store} — ` : ''}review before adding to inventory:
+              </p>
+              <ul className="recipe-matches">
+                {receiptDraft.items.map((it, i) => (
+                  <li key={i} className="recipe-match-row">
+                    <input
+                      type="checkbox"
+                      checked={!!receiptChecked[i]}
+                      onChange={(e) => setReceiptChecked({ ...receiptChecked, [i]: e.target.checked })}
+                    />
+                    <div className="recipe-match-body">
+                      <div className="recipe-match-ingredient">{it.name}</div>
+                      <div className="recipe-match-product">{it.quantity} {it.unit}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <div className="inventory-draft-actions">
+                <button onClick={confirmReceipt}>Add checked items</button>
+                <button className="recipe-cancel" onClick={() => setReceiptDraft(null)}>Cancel</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="empty-hint">No items could be read from that receipt{receiptDraft.error ? ` (${receiptDraft.error})` : ''}.</p>
+              <button className="recipe-cancel" onClick={() => setReceiptDraft(null)}>Dismiss</button>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+export default function Kitchen() {
+  const [tab, setTab] = useState('recipes')
+
+  return (
+    <div className="kitchen-page">
+      <div className="kitchen-tabs">
+        <button className={`kitchen-tab ${tab === 'recipes' ? 'active' : ''}`} onClick={() => setTab('recipes')}>
+          Recipes
+        </button>
+        <button className={`kitchen-tab ${tab === 'inventory' ? 'active' : ''}`} onClick={() => setTab('inventory')}>
+          Inventory
+        </button>
+      </div>
+      {tab === 'recipes' ? <RecipesPanel /> : <InventoryBoard />}
     </div>
   )
 }

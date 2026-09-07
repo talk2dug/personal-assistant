@@ -96,6 +96,64 @@ def test_get_update_delete_recipe_round_trip(db_path, owner_id):
     assert kitchen_db.get_recipe(db_path, owner_id, recipe_id) is None
 
 
+def test_record_purchase_adds_to_inventory(db_path, owner_id):
+    personal = make_personal(db_path, owner_id)
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "record_purchase", "arguments": {"items": [
+                {"name": "ground beef", "quantity": 2, "unit": "lb"},
+                {"name": "eggs", "quantity": 12, "unit": "count"},
+            ]}}}
+        ]},
+        {"role": "assistant", "content": "Logged the ground beef and eggs, sir."},
+    ])
+
+    reply = engine.handle_message(db_path, llm, owner_id, "I picked up 2 lbs of ground beef and a dozen eggs", personal=personal)
+
+    assert reply == "Logged the ground beef and eggs, sir."
+    beef = kitchen_db.get_inventory_item(db_path, owner_id, "ground beef")
+    eggs = kitchen_db.get_inventory_item(db_path, owner_id, "eggs")
+    assert beef["quantity"] == 2 and beef["unit"] == "lb"
+    assert eggs["quantity"] == 12
+
+
+def test_update_inventory_quantity_sets_an_absolute_amount(db_path, owner_id):
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "rice", quantity_delta=10, unit="cups")
+    personal = make_personal(db_path, owner_id)
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "update_inventory_quantity", "arguments": {"item": "rice", "quantity": 2}}}
+        ]},
+        {"role": "assistant", "content": "Updated rice to 2 cups."},
+    ])
+
+    engine.handle_message(db_path, llm, owner_id, "we're down to about 2 cups of rice", personal=personal)
+
+    assert kitchen_db.get_inventory_item(db_path, owner_id, "rice")["quantity"] == 2
+
+
+def test_list_and_remove_inventory_item(db_path, owner_id):
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "kale", quantity_delta=1, unit="bunch")
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "list_kitchen_inventory", "arguments": {}}}
+        ]},
+        {"role": "assistant", "content": "You have kale on hand."},
+    ])
+    assert engine.handle_message(db_path, llm, owner_id, "what's in the kitchen", personal=personal) == "You have kale on hand."
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "remove_inventory_item", "arguments": {"item": "kale"}}}
+        ]},
+        {"role": "assistant", "content": "Stopped tracking kale."},
+    ])
+    engine.handle_message(db_path, llm, owner_id, "stop tracking kale", personal=personal)
+    assert kitchen_db.get_inventory_item(db_path, owner_id, "kale") is None
+
+
 def test_kitchen_tools_absent_when_no_personal_context(db_path, owner_id):
     llm = FakeLLM([{"role": "assistant", "content": "Hi there"}])
     reply = engine.handle_message(db_path, llm, owner_id, "save this recipe: ...", personal=None)

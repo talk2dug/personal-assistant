@@ -224,3 +224,107 @@ def test_recipe_photo_refuses_a_path_outside_generated_media(client, cfg, tmp_pa
 
     resp = client.get(f"/api/kitchen/recipes/{recipe_id}/photo")
     assert resp.status_code == 403
+
+
+# --- inventory / purchases -----------------------------------------------------
+
+def test_inventory_requires_login(cfg):
+    app = create_app(cfg, FakeLLM(), era=None, calendar=None, static_dir=None)
+    assert TestClient(app).get("/api/kitchen/inventory").status_code == 401
+
+
+def test_upsert_list_and_delete_inventory_item(client):
+    resp = client.post("/api/kitchen/inventory", json={"item": "milk", "quantity": 2, "unit": "gal"})
+    assert resp.status_code == 200
+    item_id = resp.json()["id"]
+
+    listed = client.get("/api/kitchen/inventory").json()
+    assert len(listed) == 1
+    assert listed[0]["item"] == "milk" and listed[0]["quantity"] == 2
+
+    assert client.delete(f"/api/kitchen/inventory/{item_id}").status_code == 200
+    assert client.get("/api/kitchen/inventory").json() == []
+
+
+def test_inventory_upsert_requires_item(client):
+    assert client.post("/api/kitchen/inventory", json={"quantity": 1}).status_code == 400
+
+
+def test_inventory_filters_by_derived_status(client):
+    client.post("/api/kitchen/inventory", json={"item": "pasta", "quantity": 10, "low_threshold": 2})
+    client.post("/api/kitchen/inventory", json={"item": "butter", "quantity": 0, "low_threshold": 2})
+
+    out_only = client.get("/api/kitchen/inventory?status=out").json()
+    assert len(out_only) == 1 and out_only[0]["item"] == "butter"
+
+
+def test_delete_unknown_inventory_item_is_404(client):
+    assert client.delete("/api/kitchen/inventory/999").status_code == 404
+
+
+def test_record_purchases_commits_immediately(client):
+    resp = client.post("/api/kitchen/purchases", json={"items": [
+        {"name": "ground beef", "quantity": 2, "unit": "lb"},
+        {"name": "eggs", "quantity": 12, "unit": "count"},
+    ]})
+    assert resp.status_code == 200
+    listed = {r["item"]: r for r in client.get("/api/kitchen/inventory").json()}
+    assert listed["ground beef"]["quantity"] == 2
+    assert listed["eggs"]["quantity"] == 12
+
+
+def test_inventory_from_photo_requires_a_configured_bridge(cfg):
+    client = _client_with_bridge(cfg, bridge=None)
+    resp = client.post("/api/kitchen/inventory/from-photo", files={"photo": ("item.jpg", b"fake-bytes", "image/jpeg")})
+    assert resp.status_code == 503
+
+
+def test_inventory_from_photo_returns_an_unsaved_draft(cfg):
+    bridge = FakeBridge({"status": "done", "result": '{"name": "rice", "quantity": 2.5, "unit": "cups"}'})
+    client = _client_with_bridge(cfg, bridge)
+
+    resp = client.post("/api/kitchen/inventory/from-photo", files={"photo": ("item.jpg", b"fake-bytes", "image/jpeg")})
+    assert resp.status_code == 200
+    draft = resp.json()
+    assert draft["parsed"] is True
+    assert draft["name"] == "rice"
+    assert draft["photo_path"]
+
+    # Nothing was committed -- from-photo only ever returns a draft.
+    assert client.get("/api/kitchen/inventory").json() == []
+
+
+def test_inventory_from_photo_passes_the_item_hint_through(cfg):
+    bridge = FakeBridge({"status": "done", "result": '{"name": "milk", "quantity": 0.5, "unit": "gal"}'})
+    client = _client_with_bridge(cfg, bridge)
+
+    resp = client.post(
+        "/api/kitchen/inventory/from-photo?item=milk",
+        files={"photo": ("item.jpg", b"fake-bytes", "image/jpeg")},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "milk"
+
+
+def test_purchases_from_receipt_requires_a_configured_bridge(cfg):
+    client = _client_with_bridge(cfg, bridge=None)
+    resp = client.post("/api/kitchen/purchases/from-receipt", files={"photo": ("r.jpg", b"fake-bytes", "image/jpeg")})
+    assert resp.status_code == 503
+
+
+def test_purchases_from_receipt_returns_an_unsaved_draft(cfg):
+    bridge = FakeBridge({"status": "done", "result": (
+        '{"store": "Kroger", "items": [{"name": "bananas", "quantity": 1.34, "unit": "lb"}]}'
+    )})
+    client = _client_with_bridge(cfg, bridge)
+
+    resp = client.post("/api/kitchen/purchases/from-receipt", files={"photo": ("r.jpg", b"fake-bytes", "image/jpeg")})
+    assert resp.status_code == 200
+    draft = resp.json()
+    assert draft["parsed"] is True
+    assert draft["store"] == "Kroger"
+    assert draft["items"] == [{"name": "bananas", "quantity": 1.34, "unit": "lb"}]
+    assert draft["photo_path"]
+
+    # Nothing was committed -- POST /purchases (already covered above) is the commit step.
+    assert client.get("/api/kitchen/inventory").json() == []

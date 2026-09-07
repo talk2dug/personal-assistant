@@ -110,3 +110,131 @@ def analyze_recipe_photo(bridge, image_bytes: bytes) -> dict:
         ],
         "steps": [str(s).strip() for s in steps if str(s).strip()],
     }
+
+
+# Worked example resolves the same class of ambiguity Phase 2 hit: a half-full bag with no
+# visible label text should still get a best-effort name from packaging shape/color rather
+# than the model deliberating over uncertainty, and a fractional estimate ("about half") is
+# a valid quantity, not a reason to hedge or refuse.
+INVENTORY_PROMPT = """You are looking at a photo of a single kitchen item -- a bag, box, \
+jar, bottle, carton, or produce -- to estimate how much of it is left.
+
+Respond with ONLY a single JSON object and nothing else: no preamble, no explanation, no \
+markdown code fence. Do not second-guess or revise your answer -- pick a reasonable \
+reading on the first pass and output it. Start your reply with the opening brace.
+
+Shape:
+{"name": "...", "quantity": <number>, "unit": "..."}
+
+Rules:
+- name: the item itself, e.g. "rice", "milk", "ground beef" -- brand names are fine if \
+visible but not required.
+- quantity: your best numeric estimate of what's left, fractions allowed (e.g. 0.5). A \
+mostly-empty container is a low number, not zero, unless it is visibly empty.
+- unit: whatever's natural for the item -- "cups", "lbs", "oz", "carton", "bag", "count" \
+for discrete items like eggs or apples.
+- No visible label or illegible text: identify the item by its container/contents instead \
+of refusing. Example: an unlabeled clear bag half full of white grains -> \
+{"name": "rice", "quantity": 2, "unit": "cups"} rather than leaving it blank.
+- Never leave the JSON unfinished because you're unsure -- give your best single guess.
+"""
+
+RECEIPT_PROMPT = """You are looking at a photo of a store receipt.
+
+Respond with ONLY a single JSON object and nothing else: no preamble, no explanation, no \
+markdown code fence. Do not second-guess or revise your answer -- pick a reasonable \
+reading on the first pass and output it. Start your reply with the opening brace.
+
+Shape:
+{"store": "..." or null, "items": [{"name": "...", "quantity": <number>, "unit": "..."}]}
+
+Rules:
+- items: one entry per line item that is food/kitchen-relevant. Skip subtotal, tax, total, \
+coupons, and loyalty-card lines -- those are not items.
+- quantity: the number of units bought. If the receipt doesn't show a quantity, use 1.
+- unit: "count" for discrete items (e.g. a single product), or the receipt's own unit \
+(lb, oz, gal) when shown. Example: a line reading "BANANAS 1.34 lb $1.20" -> \
+{"name": "bananas", "quantity": 1.34, "unit": "lb"}. A line reading "MILK 2% GAL" with no \
+weight shown -> {"name": "milk", "quantity": 1, "unit": "gal"}.
+- Faded, cut-off, or ambiguous line items: make a reasonable guess at the product name and \
+include it anyway rather than skipping it or leaving the JSON unfinished.
+- No items at all can be read: return {"store": null, "items": []} rather than refusing.
+"""
+
+
+def analyze_inventory_photo(bridge, image_bytes: bytes, item_hint: str | None = None) -> dict:
+    """Returns {"parsed": True, "name", "quantity", "unit"} on success, or
+    {"parsed": False, "raw_text", "error"} on failure -- same honest-failure contract as
+    analyze_recipe_photo. item_hint is the already-known item name for a recount of an
+    existing inventory row (the common case -- he's re-photographing something already
+    tracked to update its quantity); when given, it's fed to the model directly so it
+    spends its whole budget on the actual open question, the quantity estimate, rather
+    than also re-deriving a name it doesn't need to guess."""
+    b64 = base64.b64encode(image_bytes).decode()
+    prompt = INVENTORY_PROMPT
+    if item_hint:
+        prompt += (
+            f'\nThe item is already known to be "{item_hint}" -- use that exact name in '
+            f'your "name" field rather than re-identifying it from the photo. Focus only '
+            f"on estimating the quantity remaining."
+        )
+    job = bridge.run_sync(
+        "kitchen", "vision", prompt, images=[b64],
+        options={"num_predict": 4096, "num_ctx": 16384},
+    )
+
+    if job.get("status") != "done":
+        return {"parsed": False, "raw_text": "", "error": job.get("error") or f"job status: {job.get('status')}"}
+
+    raw_text = job.get("result") or ""
+    parsed = _extract_json_object(raw_text)
+    if parsed is None:
+        return {"parsed": False, "raw_text": raw_text, "error": "could not find a valid JSON object in the response"}
+
+    name = str(parsed.get("name", "")).strip()
+    quantity = parsed.get("quantity")
+    if not name or not isinstance(quantity, (int, float)):
+        return {"parsed": False, "raw_text": raw_text, "error": "response was missing a name or numeric quantity"}
+
+    return {
+        "parsed": True,
+        "name": name,
+        "quantity": float(quantity),
+        "unit": str(parsed.get("unit", "")).strip(),
+    }
+
+
+def analyze_receipt_photo(bridge, image_bytes: bytes) -> dict:
+    """Returns {"parsed": True, "store", "items": [...]} on success (items may legitimately
+    be an empty list), or {"parsed": False, "raw_text", "error"} on failure."""
+    b64 = base64.b64encode(image_bytes).decode()
+    # A receipt can list many line items -- same headroom reasoning as the recipe prompt.
+    job = bridge.run_sync(
+        "kitchen", "vision", RECEIPT_PROMPT, images=[b64],
+        options={"num_predict": 8192, "num_ctx": 24576},
+    )
+
+    if job.get("status") != "done":
+        return {"parsed": False, "raw_text": "", "error": job.get("error") or f"job status: {job.get('status')}"}
+
+    raw_text = job.get("result") or ""
+    parsed = _extract_json_object(raw_text)
+    if parsed is None:
+        return {"parsed": False, "raw_text": raw_text, "error": "could not find a valid JSON object in the response"}
+
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        return {"parsed": False, "raw_text": raw_text, "error": "response was missing an items list"}
+
+    return {
+        "parsed": True,
+        "store": (str(parsed["store"]).strip() if parsed.get("store") else None),
+        "items": [
+            {
+                "name": str(i.get("name", "")).strip(),
+                "quantity": float(i["quantity"]) if isinstance(i.get("quantity"), (int, float)) else 1.0,
+                "unit": str(i.get("unit", "")).strip(),
+            }
+            for i in items if isinstance(i, dict) and i.get("name")
+        ],
+    }

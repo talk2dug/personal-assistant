@@ -1,5 +1,5 @@
-"""Kitchen: the owner's own recipe catalog (and, in later phases, kitchen inventory,
-purchase intake, and the shopping list) over the web UI.
+"""Kitchen: the owner's own recipe catalog and kitchen inventory/purchase intake over the
+web UI (the shopping list arrives in a later phase).
 
 Owner-only, same rule as every other personal-data route (grocery.py, schedule.py).
 """
@@ -134,3 +134,120 @@ async def recipe_photo(recipe_id: int, request: Request):
 
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+@router.get("/inventory")
+async def list_inventory(request: Request, status: str | None = None):
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    return kitchen_db.list_inventory(cfg.db_path, user["id"], status)
+
+
+@router.post("/inventory")
+async def upsert_inventory(request: Request):
+    """Manual add-or-adjust for one item -- the same primitive record_purchase/
+    update_inventory_quantity use from chat, exposed for the Kitchen page's own form."""
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    body = await request.json()
+    item = (body.get("item") or "").strip()
+    if not item:
+        raise HTTPException(400, "item is required")
+    result = kitchen_db.upsert_inventory_item(
+        cfg.db_path, user["id"], item,
+        quantity_delta=body.get("quantity_delta"), quantity_set=body.get("quantity"),
+        unit=body.get("unit"), low_threshold=body.get("low_threshold"), notes=body.get("notes"),
+        reason=body.get("reason", "manual_adjust"),
+    )
+    return result
+
+
+@router.delete("/inventory/{item_id}")
+async def remove_inventory(item_id: int, request: Request):
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    ok = kitchen_db.delete_inventory_item(cfg.db_path, user["id"], item_id)
+    if not ok:
+        raise HTTPException(404, "inventory item not found")
+    return {"ok": True}
+
+
+@router.post("/inventory/from-photo")
+async def inventory_from_photo(request: Request, photo: UploadFile, item: str | None = None):
+    """Reads a photographed item (a recount, most often) via vision and hands back an
+    UNSAVED draft -- same review-before-commit contract as recipes/from-photo. `item`,
+    when the owner is re-photographing something already tracked, tells the model the
+    name up front so it only has to estimate quantity."""
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    bridge = request.app.state.bridge
+    if bridge is None:
+        raise HTTPException(503, "the GPU bridge is not configured")
+
+    image_bytes = await photo.read()
+    if not image_bytes:
+        raise HTTPException(400, "empty photo")
+
+    out_dir = pathlib.Path(cfg.generated_media_path) / "kitchen_photos"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = pathlib.Path(photo.filename or "").suffix or ".jpg"
+    saved_path = out_dir / f"inventory_{user['id']}_{int(time.time() * 1000)}{ext}"
+    saved_path.write_bytes(image_bytes)
+
+    loop = asyncio.get_running_loop()
+    call = functools.partial(kitchen_vision.analyze_inventory_photo, bridge, image_bytes, item)
+    draft = await loop.run_in_executor(None, call)
+    draft["photo_path"] = str(saved_path)
+    return draft
+
+
+@router.post("/purchases")
+async def record_purchases(request: Request):
+    """Commits a confirmed batch of purchased items -- shared by manual web entry and a
+    confirmed (edited) list of receipt-scan draft items. Unlike inventory/from-photo and
+    purchases/from-receipt, this one writes immediately: by the time it's called, the
+    owner has already reviewed the list."""
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    body = await request.json()
+    items = body.get("items") or []
+    reason = body.get("reason", "purchase_manual")
+    updated = []
+    for entry in items:
+        name = (entry.get("name") or "").strip()
+        if not name:
+            continue
+        result = kitchen_db.upsert_inventory_item(
+            cfg.db_path, user["id"], name,
+            quantity_delta=entry.get("quantity", 0), unit=entry.get("unit"), reason=reason,
+        )
+        updated.append(result)
+    return {"ok": True, "updated": updated}
+
+
+@router.post("/purchases/from-receipt")
+async def purchases_from_receipt(request: Request, photo: UploadFile):
+    """Reads a photographed receipt via vision and hands back an UNSAVED draft list of line
+    items for the owner to check off/edit -- POST /purchases (above) is what actually
+    commits them, same review-before-commit contract as every other AI-derived draft here."""
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    bridge = request.app.state.bridge
+    if bridge is None:
+        raise HTTPException(503, "the GPU bridge is not configured")
+
+    image_bytes = await photo.read()
+    if not image_bytes:
+        raise HTTPException(400, "empty photo")
+
+    out_dir = pathlib.Path(cfg.generated_media_path) / "kitchen_photos"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = pathlib.Path(photo.filename or "").suffix or ".jpg"
+    saved_path = out_dir / f"receipt_{user['id']}_{int(time.time() * 1000)}{ext}"
+    saved_path.write_bytes(image_bytes)
+
+    loop = asyncio.get_running_loop()
+    call = functools.partial(kitchen_vision.analyze_receipt_photo, bridge, image_bytes)
+    draft = await loop.run_in_executor(None, call)
+    draft["photo_path"] = str(saved_path)
+    return draft

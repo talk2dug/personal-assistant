@@ -99,6 +99,18 @@ CREATE TABLE IF NOT EXISTS unknown_faces (
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL
 );
+
+-- A one-shot signal that show_camera leaves for the web UI to pick up. This has to be a
+-- DB row rather than an in-process variable: the agentic (Claude CLI) backend dispatches
+-- tool calls from a subprocess via routes/tools.py, not from inside the request handler
+-- that will build the chat response, so the only thing both sides share is the database.
+-- routes/chat.py pops this right after handle_message returns, so it never outlives the
+-- turn that created it.
+CREATE TABLE IF NOT EXISTS pending_camera_views (
+    user_id INTEGER PRIMARY KEY,
+    camera TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -148,6 +160,55 @@ def list_cameras(db_path: str, enabled_only: bool = False) -> list[dict]:
         sql += " WHERE enabled = 1"
     with closing(_connect(db_path)) as conn:
         return [dict(r) for r in conn.execute(sql + " ORDER BY key")]
+
+
+def get_camera(db_path: str, key: str) -> dict | None:
+    """Return one enabled camera by its stable key."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM cameras WHERE key = ? AND enabled = 1", (key,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def find_camera(db_path: str, location: str) -> dict | None:
+    """Resolve a spoken room name without exposing disabled cameras to chat."""
+    normalized = " ".join(location.lower().split())
+    with closing(_connect(db_path)) as conn:
+        rows = conn.execute(
+            """SELECT * FROM cameras
+               WHERE enabled = 1 AND (lower(key) = ? OR lower(name) = ? OR lower(location) = ?)
+               ORDER BY key""",
+            (normalized, normalized, normalized),
+        ).fetchall()
+        return dict(rows[0]) if rows else None
+
+
+def set_pending_camera_view(db_path: str, user_id: int, camera: dict) -> None:
+    """Leaves show_camera's result for routes/chat.py to deliver in its response --
+    see the pending_camera_views docstring in SCHEMA for why this can't just be a
+    Python variable."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO pending_camera_views (user_id, camera, created_at) VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET camera = excluded.camera, created_at = excluded.created_at""",
+            (user_id, json.dumps(camera), _now()),
+        )
+        conn.commit()
+
+
+def pop_pending_camera_view(db_path: str, user_id: int) -> dict | None:
+    """Reads and clears in one call -- a camera view should only ever open once per
+    show_camera call, not resurface on the user's next unrelated message."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT camera FROM pending_camera_views WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM pending_camera_views WHERE user_id = ?", (user_id,))
+        conn.commit()
+        return json.loads(row["camera"])
 
 
 # --- frame sources ------------------------------------------------------------

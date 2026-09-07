@@ -749,6 +749,42 @@ body::after {
   flex: 1;
 }
 
+.camera-modal {
+  width: min(880px, 92vw);
+  height: min(560px, 82vh);
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border);
+  clip-path: polygon(0 18px, 18px 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 22px;
+  box-shadow: 0 0 40px rgba(34, 232, 255, 0.15);
+}
+
+.camera-modal-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #06090b;
+  border: 1px solid var(--cyan-faint);
+}
+
+.camera-modal-feed {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.camera-modal-error {
+  color: var(--amber);
+  font-family: var(--font-hud);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 /* --- finance --------------------------------------------------------------- */
 
 .finance-page section {

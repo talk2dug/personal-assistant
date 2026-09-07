@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import business_db, db, staff
+from . import business_db, db, staff, vision
 from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
 from . import location_tools
@@ -831,6 +831,50 @@ def _select_home_assistant_tools(home_assistant: "HomeAssistantContext", user_te
 NOTIFY_POLICY_KEY = "notify_policy"
 DEFAULT_NOTIFY_POLICY = "auto"
 
+CAMERA_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "show_camera",
+            "description": "Open the live camera feed for a room in the Jarvis web window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "Room or camera location, such as kitchen."},
+                },
+                "required": ["location"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_cameras",
+            "description": "List the house cameras Jarvis knows about and where each one is.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_camera",
+            "description": (
+                "Register a new house camera so it can be opened later by room name. "
+                "'mjpeg' is the only kind that streams live in the web UI today."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "Room name, e.g. kitchen. Also used as the lookup key."},
+                    "url": {"type": "string", "description": "The camera's MJPEG stream URL, e.g. http://192.168.0.135:8081/"},
+                    "kind": {"type": "string", "enum": ["mjpeg", "rtsp"], "description": "Defaults to mjpeg."},
+                },
+                "required": ["location", "url"],
+            },
+        },
+    },
+]
+
 _CONFIRM_PREFIXES = ("yes", "yep", "yeah", "y", "confirm", "go ahead", "do it", "sure", "ok", "okay")
 _CANCEL_PREFIXES = ("no", "nope", "n", "cancel", "stop", "don't", "dont", "nevermind", "never mind")
 
@@ -926,7 +970,11 @@ SYSTEM_PROMPT = (
     "you have, say so plainly rather than fabricating a success message; a wrong 'done' is far "
     "worse than an honest 'I can't do that from here.' Likewise, never assume you lack a "
     "capability — including one an earlier turn in this conversation claimed you lacked — without "
-    "actually checking your current tool list first; a past turn can be wrong."
+    "actually checking your current tool list first; a past turn can be wrong. You can also open a "
+    "live view of a house camera by room name with show_camera (e.g. 'show me the kitchen') — it "
+    "opens a video window in the user's Jarvis web session; you never see or describe the footage "
+    "yourself, just confirm it's open or report that no camera is registered for that room. "
+    "list_cameras shows what's registered, and add_camera registers a new one from a stream URL."
     "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{web_note}"
     "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}"
 )
@@ -1135,6 +1183,7 @@ def select_tools(
     if not route:
         return (
             TOOLS
+            + CAMERA_TOOLS
             + (era.era_tools if era is not None else [])
             + (phone.phone_tools if phone is not None else [])
             + (MAIL_TOOLS if mail is not None else [])
@@ -1151,6 +1200,10 @@ def select_tools(
         )
     return (
         TOOLS
+        # Not keyword-gated, same reasoning as location/business/personal tools below --
+        # it's a fixed 3-tool addition, so there's no overload risk to trade against the
+        # capability-gap risk of an incomplete keyword list.
+        + CAMERA_TOOLS
         + (_select_era_tools(era, user_text) if era is not None else [])
         + (_select_phone_tools(phone, user_text) if phone is not None else [])
         + (_select_mail_tools(mail, user_text) if mail is not None else [])
@@ -1205,6 +1258,35 @@ def _dispatch_tool_call(
     git_ops: "GitOpsContext | None" = None,
     employee_key: str | None = None,
 ) -> str:
+    if name == "show_camera":
+        camera = vision.find_camera(db_path, arguments.get("location", ""))
+        if camera is None:
+            return json.dumps({"error": "No enabled camera was found for that location."})
+        vision.set_pending_camera_view(db_path, requesting_user_id, {
+            "key": camera["key"],
+            "name": camera["name"],
+            "location": camera["location"] or camera["name"],
+        })
+        return json.dumps({"ok": True, "camera": camera["name"], "location": camera["location"]})
+    if name == "list_cameras":
+        cameras = vision.list_cameras(db_path, enabled_only=True)
+        return json.dumps({"cameras": [
+            {"name": c["name"], "location": c["location"] or c["name"], "kind": c["kind"]} for c in cameras
+        ]})
+    if name == "add_camera":
+        location = (arguments.get("location") or "").strip()
+        url = (arguments.get("url") or "").strip()
+        if not location or not url:
+            return json.dumps({"error": "Both a location and a stream URL are required."})
+        key = "_".join(location.lower().split())
+        try:
+            camera = vision.add_camera(
+                db_path, key=key, name=location.title(), url=url,
+                kind=arguments.get("kind") or "mjpeg", location=location,
+            )
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+        return json.dumps({"ok": True, "camera": camera["name"], "location": camera["location"]})
     if name == "request_capability":
         # The one tool every employee has regardless of tier -- see
         # business_tools.REQUEST_CAPABILITY_TOOLS. Approving the review item this

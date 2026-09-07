@@ -7,7 +7,7 @@ import functools
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 
-from ...core import db
+from ...core import db, vision
 from ...core.engine import handle_message
 from ..auth import require_user
 
@@ -68,7 +68,12 @@ async def send_message(request: Request):
         git_ops=git_ops,
     )
     reply = await loop.run_in_executor(None, call)
-    return {"reply": reply}
+    # show_camera (if the model called it this turn) leaves its result here rather than
+    # returning it directly -- see pending_camera_views in vision.py for why: the agentic
+    # backend dispatches tool calls from a subprocess via routes/tools.py, not from this
+    # handler, so a plain Python variable couldn't carry it back to this response.
+    camera = vision.pop_pending_camera_view(cfg.db_path, user["id"])
+    return {"reply": reply, **({"camera": camera} if camera else {})}
 
 
 @router.post("/transcribe")

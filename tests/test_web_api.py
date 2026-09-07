@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from assistant.config import UserConfig
-from assistant.core import db
+from assistant.core import db, vision
 from assistant.web.app import create_app
 
 
@@ -25,6 +25,8 @@ class FakeLLM:
 def db_path(tmp_path):
     path = str(tmp_path / "test.db")
     db.init_db(path)
+    # /api/chat/message unconditionally checks for a pending show_camera result.
+    vision.init_vision_db(path)
     return path
 
 

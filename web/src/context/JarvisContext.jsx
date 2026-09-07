@@ -77,6 +77,9 @@ export function JarvisProvider({ children }) {
   const [mediaError, setMediaError] = useState('')
   const [voiceName, setVoiceName] = useState('')
   const [caption, setCaption] = useState(CAPTIONS.idle)
+  // The room camera Jarvis opened via show_camera ("show me the kitchen"), distinct from
+  // cameraOn above (the user's own outgoing webcam, used for vision-in on a sent message).
+  const [activeCamera, setActiveCamera] = useState(null)
 
   const videoRef = useRef(null)
   const snapshotCanvasRef = useRef(null)
@@ -194,9 +197,10 @@ export function JarvisProvider({ children }) {
     setSending(true)
     sendingRef.current = true
     try {
-      const { reply } = await api.sendMessage(text, image)
+      const { reply, camera } = await api.sendMessage(text, image)
       if (addToLog) setMessages((prev) => [...prev, { role: 'assistant', content: stripMarkdown(reply) }])
       if (reply) setCaption(stripMarkdown(reply))
+      if (camera) setActiveCamera(camera)
       speak(reply)
     } catch (err) {
       const errText = `(error reaching Jarvis: ${err.message})`
@@ -278,6 +282,8 @@ export function JarvisProvider({ children }) {
     else startRecording()
   }, [startRecording, stopRecording])
 
+  const closeCamera = useCallback(() => setActiveCamera(null), [])
+
   // ---- keyboard: space opens the mic, anywhere in the app --------------------
   useEffect(() => {
     let pressedAt = 0
@@ -330,6 +336,7 @@ export function JarvisProvider({ children }) {
     sending, recording, transcribing, speaking, cameraOn, voiceOn, mediaError, caption, voiceName, mode,
     speak, toggleVoice, toggleCamera, toggleRecording, startRecording, stopRecording, sendToJarvis,
     analyserRef, freqRef, modeRef, videoRef, snapshotCanvasRef,
+    activeCamera, closeCamera,
   }
 
   return <JarvisContext.Provider value={value}>{children}</JarvisContext.Provider>

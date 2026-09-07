@@ -3,7 +3,7 @@ import asyncio
 import logging
 
 from .config import load_config
-from .core import business_db, db
+from .core import business_db, db, vision
 from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
@@ -27,6 +27,9 @@ def main() -> None:
     # CCXT/mail/HA/git confirmations) get a linked row there regardless of whether the
     # business feature itself is configured, so this can't stay gated behind that flag.
     business_db.init_business_db(cfg.db_path)
+    # show_camera/list_cameras/add_camera are always-on tools (see engine.py's CAMERA_TOOLS),
+    # not behind a build_*_context flag, so the cameras table must exist unconditionally too.
+    vision.init_vision_db(cfg.db_path)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)
 

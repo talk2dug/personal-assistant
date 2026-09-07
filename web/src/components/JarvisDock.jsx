@@ -1,6 +1,46 @@
 import { useEffect, useRef, useState } from 'react'
 import { useJarvis } from '../context/JarvisContext'
 
+function CameraWindow({ camera, onClose }) {
+  const [broken, setBroken] = useState(false)
+
+  // A re-request of the same room while already open (e.g. asked twice) should retry
+  // the feed rather than stay stuck showing the earlier error.
+  useEffect(() => setBroken(false), [camera.key])
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  return (
+    <div className="chat-modal-backdrop" onClick={onClose}>
+      <div className="camera-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="chat-modal-header">
+          <span className="hud-label">CAMERA — {(camera.location || camera.name || '').toUpperCase()}</span>
+          <button type="button" className="chat-modal-close" onClick={onClose}>close</button>
+        </div>
+        <div className="camera-modal-body">
+          {broken ? (
+            <div className="camera-modal-error">Feed unavailable — the camera may be offline.</div>
+          ) : (
+            <img
+              key={camera.key}
+              src={`/api/cameras/${encodeURIComponent(camera.key)}/stream`}
+              alt={`${camera.name} camera feed`}
+              className="camera-modal-feed"
+              onError={() => setBroken(true)}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /**
  * The always-present Jarvis surface: a status dock, the text modal, and the off-screen
  * media elements.
@@ -22,7 +62,7 @@ export default function JarvisDock({ compact }) {
   const {
     mode, caption, messages, sending, mediaError, recording, transcribing,
     modalOpen, setModalOpen, sendToJarvis, toggleRecording,
-    videoRef, snapshotCanvasRef,
+    videoRef, snapshotCanvasRef, activeCamera, closeCamera,
   } = useJarvis()
 
   const [input, setInput] = useState('')
@@ -99,6 +139,8 @@ export default function JarvisDock({ compact }) {
           </div>
         </div>
       )}
+
+      {activeCamera && <CameraWindow camera={activeCamera} onClose={closeCamera} />}
     </>
   )
 }

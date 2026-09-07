@@ -78,10 +78,10 @@ async def update_task(task_id: int, request: Request):
 
 
 @router.get("/research")
-async def list_research(request: Request, limit: int = 10):
+async def list_research(request: Request, limit: int = 10, status: str | None = None):
     user = require_owner(request)
     cfg = request.app.state.cfg
-    return personal_db.list_research(cfg.db_path, user["id"], limit)
+    return personal_db.list_research(cfg.db_path, user["id"], limit, status)
 
 
 @router.post("/research")

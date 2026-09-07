@@ -305,10 +305,13 @@ class PersonalClient:
     (from_addr, PDF rendering, the HMAC auth, preauth vs. doauth) is duplicated here.
     """
 
-    def __init__(self, db_path: str, owner_user_id: int, letterstream=None):
+    def __init__(self, db_path: str, owner_user_id: int, letterstream=None, kroger=None):
         self.db_path = db_path
         self.owner_user_id = owner_user_id
         self.letterstream = letterstream
+        # Raw kroger.mcp_client, same loose-coupling convention as letterstream above --
+        # only kitchen_tools.sync_kroger_purchases actually calls it (see dispatch below).
+        self.kroger = kroger
 
     def call_tool(self, name: str, arguments: dict) -> dict:
         db_path, owner = self.db_path, self.owner_user_id
@@ -391,7 +394,7 @@ class PersonalClient:
             return self._track_dispute_letter(arguments)
 
         if name in _KITCHEN_TOOL_NAMES:
-            return kitchen_tools.dispatch(db_path, owner, name, arguments)
+            return kitchen_tools.dispatch(db_path, owner, name, arguments, kroger_mcp_client=self.kroger)
 
         return {"error": f"unknown personal tool {name}"}
 

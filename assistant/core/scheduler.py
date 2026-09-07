@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import agents, business_db, db, location, market_data, personal_agents, staff
+from . import agents, business_db, db, kitchen_db, location, market_data, personal_agents, staff
 from .engine import handle_message
 from .finance import CADENCE_DAYS
 
@@ -28,6 +28,7 @@ def start(
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
     personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
     mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
+    kroger_sync_interval_seconds: int = 3600,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -38,7 +39,11 @@ def start(
     mail is an engine.MailContext; when present it also schedules the autonomous
     junk-flagging pass (mail_junk_scan) regardless of business_agents_enabled -- triaging
     the owner's own inbox isn't a print-business agent, it's core mail hygiene, the same
-    reasoning personal_research_interval_minutes uses below."""
+    reasoning personal_research_interval_minutes uses below.
+    kroger, when given alongside personal, schedules kroger_sync -- see
+    kitchen_db.sync_kroger_orders's own docstring for the real (narrow) limits of what
+    this can actually find: only orders Jarvis's own cart tools built and that were
+    later marked placed, never a trip made independently on Kroger's own app or site."""
     business_intervals = business_intervals or {
         "market_hours": 72, "trend_hours": 24, "research_minutes": 120,
         "pipeline_hours": 12, "digest_hour": 8,
@@ -329,6 +334,24 @@ def start(
                 # Starts a minute after boot, same reasoning as the business research
                 # queue: an interval trigger's first fire is a full interval away, and a
                 # queued "find me a doctor" waiting through several restarts is a bad look.
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+            )
+
+    if kroger is not None and personal is not None:
+        owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+
+        def _kroger_sync_tick():
+            result = kitchen_db.sync_kroger_orders(kroger.mcp_client, db_path, owner["id"])
+            if result.get("ok") and result.get("synced_orders"):
+                logger.info("kroger sync: folded %d newly-placed order(s) into inventory (%d item write(s))",
+                            result["synced_orders"], len(result.get("items_updated") or []))
+            elif not result.get("ok"):
+                logger.warning("kroger sync failed: %s", result.get("error"))
+
+        if owner is not None:
+            scheduler.add_job(
+                _guarded_simple("kroger_sync", _kroger_sync_tick), "interval",
+                seconds=kroger_sync_interval_seconds, id="kroger_sync",
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
 

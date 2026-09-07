@@ -70,6 +70,10 @@ class Config:
     # real-world false-positive/negative rates only show up once real mail is flowing.
     mail_junk_scan_interval_seconds: int = 900
     mail_junk_score_threshold: float = 4.0
+    # How often kitchen_db.sync_kroger_orders runs (see scheduler.py's kroger_sync job).
+    # No documented Kroger rate limit exists anywhere in kroger-mcp or its API docs, so
+    # this mirrors Era's real-world default rather than inventing a number.
+    kroger_sync_interval_seconds: int = 3600
     obsidian_vault_path: str | None = None
     ha_base_url: str | None = None
     ha_token: str | None = None
@@ -228,6 +232,7 @@ def load_config(path: str = "config.json") -> Config:
         # is that it doesn't wait on a chat confirmation for every scan.
         mail_junk_scan_interval_seconds=data.get("mail_junk_scan_interval_seconds", 900),
         mail_junk_score_threshold=data.get("mail_junk_score_threshold", 4.0),
+        kroger_sync_interval_seconds=data.get("kroger_sync_interval_seconds", 3600),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
         ha_token=data.get("ha_token"),

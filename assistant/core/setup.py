@@ -182,17 +182,22 @@ def build_git_ops_context(cfg) -> GitOpsContext | None:
     return GitOpsContext(mcp_client=client, git_tools=GIT_TOOLS, sensitive_tools=GIT_SENSITIVE_TOOLS)
 
 
-def build_personal_context(cfg, owner_user_id: int | None, letterstream: LetterStreamContext | None = None) -> PersonalContext | None:
-    """The owner's own projects/tasks/errands/pantry/credit tracking — core owner data,
+def build_personal_context(
+    cfg, owner_user_id: int | None,
+    letterstream: LetterStreamContext | None = None, kroger: KrogerContext | None = None,
+) -> PersonalContext | None:
+    """The owner's own projects/tasks/errands/kitchen/credit tracking — core owner data,
     not an opt-in feature like the business profile, so the only real gate is knowing who
     the owner is.
 
-    letterstream is optional and, when given, is unwrapped to its .mcp_client
-    (LetterStreamTools) before being handed to PersonalClient -- see personal_tools.py's
-    docstring for why draft_dispute_letter/track_dispute_letter reach out to it directly
-    rather than duplicating any of LetterStream's own auth/PDF/preauth logic. A
-    deployment with no LetterStream configured still gets every other personal tool;
-    those two just degrade to a clear "not configured" error.
+    letterstream and kroger are both optional and, when given, are unwrapped to their raw
+    .mcp_client before being handed to PersonalClient -- see personal_tools.py's docstring
+    for why draft_dispute_letter/track_dispute_letter reach LetterStream directly rather
+    than duplicating any of its own auth/PDF/preauth logic; kroger is used the same way,
+    only by kitchen_tools.sync_kroger_purchases (see kitchen_db.sync_kroger_orders for the
+    real limits of what that can actually see). A deployment missing either integration
+    still gets every other personal/kitchen tool; those specific ones just degrade to a
+    clear "not configured" error.
     """
     if owner_user_id is None:
         return None
@@ -206,7 +211,9 @@ def build_personal_context(cfg, owner_user_id: int | None, letterstream: LetterS
         logger.info("Kitchen: migrated %d pantry item(s) to kitchen_inventory with placeholder quantities: %s",
                     len(migrated), ", ".join(migrated))
     letterstream_tools = letterstream.mcp_client if letterstream is not None else None
-    return PersonalContext(mcp_client=PersonalClient(cfg.db_path, owner_user_id, letterstream=letterstream_tools))
+    kroger_tools = kroger.mcp_client if kroger is not None else None
+    return PersonalContext(mcp_client=PersonalClient(
+        cfg.db_path, owner_user_id, letterstream=letterstream_tools, kroger=kroger_tools))
 
 
 def build_era_context(cfg) -> EraContext | None:

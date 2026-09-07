@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS kitchen_inventory_log (
     recipe_id INTEGER REFERENCES recipes(id),
     created_at TEXT NOT NULL
 );
+
+-- Dedup for sync_kroger_orders: view_order_history has no since/cursor param, always
+-- returning the full history, so a repeat sync (the hourly job, or a manual re-trigger)
+-- needs this to avoid double-counting an order already folded into kitchen_inventory.
+-- One row per Kroger account, not per owner_user_id -- see sync_kroger_orders' docstring
+-- for why order_id is actually the order's placed_at timestamp, not a real Kroger id.
+CREATE TABLE IF NOT EXISTS kroger_synced_orders (
+    order_id TEXT PRIMARY KEY,
+    owner_user_id INTEGER NOT NULL,
+    synced_at TEXT NOT NULL
+);
 """
 
 
@@ -320,3 +331,100 @@ def migrate_pantry_to_inventory(db_path: str, owner_user_id: int) -> list[str]:
             conn.execute("DELETE FROM pantry_items WHERE owner_user_id = ?", (owner_user_id,))
             conn.commit()
     return migrated
+
+
+# --- Kroger order sync -----------------------------------------------------------
+
+def _unwrap_mcp_content(result: dict) -> dict:
+    """Every raw kroger-mcp tool result comes back as {"is_error", "content": [json_text]}
+    -- same shape kroger_recipe.py's _parse_content unwraps, duplicated here (rather than
+    imported) so this storage module doesn't reach into a tool-schema module for a
+    two-line helper."""
+    if result.get("is_error"):
+        raise RuntimeError("; ".join(result.get("content") or ["kroger tool call failed"]))
+    content = result.get("content") or []
+    return json.loads(content[0]) if content else {}
+
+
+def sync_kroger_orders(kroger_mcp_client, db_path: str, owner_user_id: int) -> dict:
+    """Pulls newly-placed Kroger orders into kitchen_inventory.
+
+    IMPORTANT ASYMMETRY, confirmed via a live call before this was written (an empty
+    real order history, plus kroger-mcp's own tool docstring): view_order_history does
+    NOT reach Kroger's real purchase-history API -- Kroger's public API grants no such
+    permission to third parties. It only replays orders that were placed by calling this
+    same MCP server's own mark_order_placed, which only ever fires after Jarvis's own
+    add_items_to_cart/bulk_add_to_cart built that cart in the first place. A Kroger trip
+    made independently on Kroger's own app/site is invisible here by a hard limit of
+    Kroger's API, not a bug in this function -- the owner's manual/receipt purchase entry
+    (kitchen_tools.record_purchase, POST /purchases(/from-receipt)) is the real path for
+    those, Kroger receipts included.
+
+    A second real limitation, also only discoverable by reading kroger-mcp's own source:
+    add_items_to_cart/bulk_add_to_cart never store a human-readable product name locally,
+    only the raw product_id (a UPC-like code) -- so each line item's name has to be
+    resolved with its own get_product_details call (a plain catalog read, no OAuth/
+    confirmation gate) before it means anything in inventory. A lookup that fails (no
+    preferred store set, product no longer available, transient error) falls back to a
+    "Kroger item <product_id>" placeholder rather than dropping the item silently --
+    the raw product_id stays in the log/notes either way so a bad name is correctable.
+
+    Dedup via kroger_synced_orders: view_order_history has no since/cursor param and
+    always returns the full history, so a repeat call (the hourly scheduler job, or a
+    manual re-trigger) must not double-count an order already folded in. Orders carry no
+    stable id of their own in view_order_history's response (mark_order_placed's own
+    "order_id" -- history length at write time -- isn't recoverable later from the list),
+    so each order's placed_at timestamp is used instead; it's set once by
+    datetime.now().isoformat() at mark_order_placed time and never changes.
+    """
+    try:
+        raw = kroger_mcp_client.call_tool("view_order_history", {"limit": 50})
+        payload = _unwrap_mcp_content(raw)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    orders = payload.get("orders") or []
+    with closing(_connect(db_path)) as conn:
+        already_synced = {
+            r["order_id"] for r in conn.execute(
+                "SELECT order_id FROM kroger_synced_orders WHERE owner_user_id = ?", (owner_user_id,)
+            ).fetchall()
+        }
+
+    synced_orders = 0
+    items_updated = []
+    for order in orders:
+        order_id = order.get("placed_at")
+        if not order_id or order_id in already_synced:
+            continue
+
+        for item in order.get("items") or []:
+            product_id = item.get("product_id")
+            if not product_id:
+                continue
+            quantity = item.get("quantity") or 1
+
+            name = f"Kroger item {product_id}"
+            try:
+                details = _unwrap_mcp_content(
+                    kroger_mcp_client.call_tool("get_product_details", {"product_id": product_id}))
+                if details.get("success") and details.get("description"):
+                    name = details["description"]
+            except Exception:
+                pass  # honest fallback name above, not a dropped item
+
+            result = upsert_inventory_item(
+                db_path, owner_user_id, name, quantity_delta=quantity,
+                reason="purchase_kroger", notes=f"Kroger product_id {product_id}",
+            )
+            items_updated.append({"item": result["item"], "quantity": result["quantity"], "unit": result["unit"]})
+
+        with closing(_connect(db_path)) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO kroger_synced_orders (order_id, owner_user_id, synced_at) VALUES (?, ?, ?)",
+                (order_id, owner_user_id, _now()),
+            )
+            conn.commit()
+        synced_orders += 1
+
+    return {"ok": True, "synced_orders": synced_orders, "items_updated": items_updated}

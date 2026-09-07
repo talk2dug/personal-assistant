@@ -58,11 +58,13 @@ def main() -> None:
     ticketmaster = build_ticketmaster_context(cfg)
     kroger = build_kroger_context(cfg)
     ccxt = build_ccxt_context(cfg)
-    # Built before Personal so its LetterStreamTools client can be handed into
-    # PersonalClient for the credit dispute tracker's draft_dispute_letter/
-    # track_dispute_letter tools -- see build_personal_context's docstring.
+    # Built before Personal so its LetterStreamTools/Kroger clients can be handed into
+    # PersonalClient -- LetterStream for the credit dispute tracker's draft_dispute_letter/
+    # track_dispute_letter, Kroger for sync_kroger_purchases -- see build_personal_context's
+    # docstring.
     letterstream = build_letterstream_context(cfg)
-    personal = build_personal_context(cfg, owner_row["id"] if owner_row else None, letterstream=letterstream)
+    personal = build_personal_context(
+        cfg, owner_row["id"] if owner_row else None, letterstream=letterstream, kroger=kroger)
     git_ops = build_git_ops_context(cfg)
     recipe = build_recipe_context(cfg)
     stt = Transcriber(model_size=cfg.stt_model_size)

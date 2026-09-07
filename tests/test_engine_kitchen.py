@@ -5,6 +5,8 @@ PersonalClient exactly like personal_tools.py's own tools -- same no-gate reason
 PersonalClient.call_tool into kitchen_tools.dispatch is actually exercised, not just the
 routing gate.
 """
+import json
+
 import pytest
 
 from assistant.core import db, engine, kitchen_db
@@ -154,6 +156,51 @@ def test_list_and_remove_inventory_item(db_path, owner_id):
     assert kitchen_db.get_inventory_item(db_path, owner_id, "kale") is None
 
 
+class FakeKrogerMCPClient:
+    """Mirrors test_kitchen_db.py's fake -- this file only needs to prove
+    sync_kroger_purchases dispatches through to kitchen_db.sync_kroger_orders with the
+    right kroger client, not re-exercise that function's own logic."""
+
+    def __init__(self):
+        self.calls = []
+
+    def call_tool(self, name, arguments):
+        self.calls.append((name, dict(arguments)))
+        if name == "view_order_history":
+            payload = {"success": True, "orders": [], "showing": 0, "summary": {"total_orders": 0}}
+            return {"is_error": False, "content": [json.dumps(payload)]}
+        raise ValueError(f"unexpected tool: {name}")
+
+
+def test_sync_kroger_purchases_dispatches_through_to_kroger_client(db_path, owner_id):
+    kroger_client = FakeKrogerMCPClient()
+    personal = engine.PersonalContext(mcp_client=PersonalClient(db_path, owner_id, kroger=kroger_client))
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "sync_kroger_purchases", "arguments": {}}}
+        ]},
+        {"role": "assistant", "content": "Checked -- nothing new from Kroger."},
+    ])
+
+    reply = engine.handle_message(db_path, llm, owner_id, "did my kroger order sync yet", personal=personal)
+
+    assert reply == "Checked -- nothing new from Kroger."
+    assert kroger_client.calls == [("view_order_history", {"limit": 50})]
+
+
+def test_sync_kroger_purchases_without_kroger_configured_reports_that_clearly(db_path, owner_id):
+    personal = make_personal(db_path, owner_id)  # no kroger= passed
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "sync_kroger_purchases", "arguments": {}}}
+        ]},
+        {"role": "assistant", "content": "Kroger isn't set up, sir."},
+    ])
+
+    reply = engine.handle_message(db_path, llm, owner_id, "sync my kroger order", personal=personal)
+    assert reply == "Kroger isn't set up, sir."
+
+
 def test_kitchen_tools_absent_when_no_personal_context(db_path, owner_id):
     llm = FakeLLM([{"role": "assistant", "content": "Hi there"}])
     reply = engine.handle_message(db_path, llm, owner_id, "save this recipe: ...", personal=None)
@@ -171,6 +218,12 @@ def test_gated_tools_present_with_a_kitchen_keyword(db_path, owner_id):
     personal = make_personal(db_path, owner_id)
     names = {t["function"]["name"] for t in engine.select_tools("what recipes do I have", personal=personal)}
     assert {t["function"]["name"] for t in KITCHEN_GATED_TOOLS} <= names
+
+
+def test_kroger_keyword_alone_gates_in_sync_kroger_purchases(db_path, owner_id):
+    personal = make_personal(db_path, owner_id)
+    names = {t["function"]["name"] for t in engine.select_tools("did my kroger order go through", personal=personal)}
+    assert "sync_kroger_purchases" in names
 
 
 def test_unrouted_tools_include_full_kitchen_catalog(db_path, owner_id):

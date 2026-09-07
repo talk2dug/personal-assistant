@@ -133,13 +133,27 @@ KITCHEN_GATED_TOOLS = [
             "item": {"type": "string"},
         }, "required": ["item"]},
     }},
+    {"type": "function", "function": {
+        "name": "sync_kroger_purchases",
+        "description": (
+            "Pull any newly-placed Kroger order into kitchen inventory right now, instead "
+            "of waiting for the hourly background sync. Only ever finds something if a "
+            "cart was built through Jarvis (added via chat or add_recipe_to_cart) and then "
+            "actually checked out AND marked placed — Kroger's API gives no way to see a "
+            "trip made independently on Kroger's own app or site, so this will usually "
+            "come back empty for a normal shopping trip. Use it right after he confirms "
+            "he checked out on Kroger's site following a Jarvis-built cart, or if he asks "
+            "whether a Kroger order has synced yet."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
 ]
 
 KITCHEN_TOOLS = KITCHEN_ALWAYS_TOOLS + KITCHEN_GATED_TOOLS
 
 KITCHEN_KEYWORDS = [
     "recipe", "recipes", "cook", "cooking", "kitchen", "ingredient", "ingredients",
-    "inventory", "pantry", "stock", "on hand",
+    "inventory", "pantry", "stock", "on hand", "kroger",
 ]
 
 
@@ -157,16 +171,20 @@ KITCHEN_SYSTEM_NOTE = (
     "structured (name/quantity/unit), and steps are an ordered list of plain strings — "
     "keep the wording of each step close to how he described it rather than rewriting it."
     " You also track real kitchen inventory (quantities, not just have/low/out) with "
-    "record_purchase (whenever he says what he bought, anywhere — Kroger purchases sync "
-    "in automatically, so this covers everywhere else) and update_inventory_quantity "
-    "(whenever he reports or estimates an amount — 'we're low on milk', 'we have 3 eggs "
-    "left', 'used a cup of flour'). Update it yourself immediately rather than just "
-    "acknowledging it in conversation. list_kitchen_inventory shows what's on hand, and "
-    "remove_inventory_item stops tracking something entirely."
+    "record_purchase (whenever he says what he bought, at Kroger or anywhere else — "
+    "Kroger's API cannot see a trip made on Kroger's own app/site, only orders Jarvis "
+    "itself built and checked out, so treat a Kroger trip he mentions the same as any "
+    "other store and log it with record_purchase) and update_inventory_quantity (whenever "
+    "he reports or estimates an amount — 'we're low on milk', 'we have 3 eggs left', "
+    "'used a cup of flour'). Update it yourself immediately rather than just "
+    "acknowledging it in conversation. list_kitchen_inventory shows what's on hand, "
+    "remove_inventory_item stops tracking something entirely, and sync_kroger_purchases "
+    "checks right now for a Kroger order Jarvis itself built and that has since been "
+    "checked out and marked placed — a background job also does this hourly."
 )
 
 
-def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict) -> dict:
+def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict, kroger_mcp_client=None) -> dict:
     if name == "save_recipe":
         recipe_id = kitchen_db.create_recipe(
             db_path, owner_user_id, arguments["title"], arguments["ingredients"], arguments["steps"],
@@ -221,5 +239,10 @@ def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict) -> di
             return {"error": "item not found in inventory"}
         ok = kitchen_db.delete_inventory_item(db_path, owner_user_id, existing["id"])
         return {"ok": ok}
+
+    if name == "sync_kroger_purchases":
+        if kroger_mcp_client is None:
+            return {"error": "Kroger is not configured"}
+        return kitchen_db.sync_kroger_orders(kroger_mcp_client, db_path, owner_user_id)
 
     return {"error": f"unknown kitchen tool {name}"}

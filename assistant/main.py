@@ -48,11 +48,13 @@ def main() -> None:
     ticketmaster = build_ticketmaster_context(cfg)
     kroger = build_kroger_context(cfg)
     ccxt = build_ccxt_context(cfg)
-    # Built before Personal so its LetterStreamTools client can be handed into
-    # PersonalClient for the credit dispute tracker's draft_dispute_letter/
-    # track_dispute_letter tools -- see build_personal_context's docstring.
+    # Built before Personal so its LetterStreamTools/Kroger clients can be handed into
+    # PersonalClient -- LetterStream for the credit dispute tracker's draft_dispute_letter/
+    # track_dispute_letter, Kroger for sync_kroger_purchases -- see build_personal_context's
+    # docstring.
     letterstream = build_letterstream_context(cfg)
-    personal = build_personal_context(cfg, owner_row["id"] if owner_row else None, letterstream=letterstream)
+    personal = build_personal_context(
+        cfg, owner_row["id"] if owner_row else None, letterstream=letterstream, kroger=kroger)
     git_ops = build_git_ops_context(cfg)
     recipe = build_recipe_context(cfg)
     # The bridge worker lives in this process alongside the scheduler — one place owns
@@ -105,6 +107,7 @@ def main() -> None:
         # interval, independent of business_agents_enabled (see scheduler.py's
         # docstring for why this isn't gated behind that switch).
         mail_junk_scan_interval_seconds=cfg.mail_junk_scan_interval_seconds,
+        kroger_sync_interval_seconds=cfg.kroger_sync_interval_seconds,
     )
 
     logger.info("Jarvis core starting, polling Telegram...")

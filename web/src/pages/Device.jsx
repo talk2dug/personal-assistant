@@ -16,6 +16,10 @@ import { useEffect, useRef, useState } from 'react'
 const ACCENT = '#22e8ff'
 const BAR_COUNT = 72
 const POLL_MS = 700
+// A kiosk has no "close" button worth reading from across a room -- it returns to the
+// orb on its own. Tapping the screen (touchscreens on every terminal so far) dismisses
+// it early.
+const CAMERA_VIEW_MS = 20000
 
 const CAPTION = {
   idle: 'Say “hey Jarvis”.',
@@ -36,11 +40,20 @@ export default function Device() {
   const key = params.get('key') || ''
 
   const [device, setDevice] = useState({ state: 'offline', caption: '' })
+  const [cameraView, setCameraView] = useState(null)
+  const [cameraFeedBroken, setCameraFeedBroken] = useState(false)
   const stateRef = useRef('offline')
   const canvasRef = useRef(null)
   const ampRef = useRef(new Float32Array(BAR_COUNT))
   const envRef = useRef(0)
   const t0Ref = useRef(performance.now())
+  const lastCameraSeqRef = useRef(0)
+  const cameraTimerRef = useRef(null)
+
+  const closeCameraView = () => {
+    clearTimeout(cameraTimerRef.current)
+    setCameraView(null)
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -52,6 +65,16 @@ export default function Device() {
           const d = await res.json()
           setDevice(d)
           stateRef.current = d.state
+          // camera_seq (not just camera's presence) is what marks this as new -- the
+          // polled object otherwise keeps carrying the last camera shown forever, and
+          // comparing the dict by value across polls would be its own kind of bug.
+          if (d.camera_seq && d.camera_seq !== lastCameraSeqRef.current) {
+            lastCameraSeqRef.current = d.camera_seq
+            setCameraFeedBroken(false)
+            setCameraView(d.camera)
+            clearTimeout(cameraTimerRef.current)
+            cameraTimerRef.current = setTimeout(() => setCameraView(null), CAMERA_VIEW_MS)
+          }
         }
       } catch {
         // A terminal must not show an error page because one poll missed; the next one
@@ -60,7 +83,7 @@ export default function Device() {
       if (!cancelled) timer = setTimeout(poll, POLL_MS)
     }
     poll()
-    return () => { cancelled = true; clearTimeout(timer) }
+    return () => { cancelled = true; clearTimeout(timer); clearTimeout(cameraTimerRef.current) }
   }, [deviceId, key])
 
   // Frames per second by state. The Pi has no working GPU acceleration for this canvas,
@@ -164,6 +187,23 @@ export default function Device() {
         <canvas ref={canvasRef} />
       </div>
       <div className="device-caption">{caption}</div>
+
+      {cameraView && (
+        <div className="device-camera-view" onClick={closeCameraView}>
+          {cameraFeedBroken ? (
+            <div className="device-camera-error">Feed unavailable</div>
+          ) : (
+            <img
+              key={cameraView.key}
+              src={`/api/cameras/${encodeURIComponent(cameraView.key)}/stream?key=${encodeURIComponent(key)}`}
+              alt={`${cameraView.name} camera feed`}
+              className="device-camera-feed"
+              onError={() => setCameraFeedBroken(true)}
+            />
+          )}
+          <div className="device-camera-label">{(cameraView.location || cameraView.name || '').toUpperCase()}</div>
+        </div>
+      )}
     </div>
   )
 }

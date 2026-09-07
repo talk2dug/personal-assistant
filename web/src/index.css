@@ -1878,6 +1878,22 @@ body::after {
 }
 .state-idle .device-caption, .state-offline .device-caption { color: var(--text-faint); }
 
+.device-camera-view {
+  position: fixed; inset: 0; z-index: 10; background: #000;
+  display: flex; align-items: center; justify-content: center;
+  animation: hud-materialize 0.2s ease-out both;
+}
+.device-camera-feed { width: 100%; height: 100%; object-fit: contain; }
+.device-camera-label {
+  position: absolute; bottom: 18px; left: 0; right: 0; text-align: center;
+  font-size: 13px; letter-spacing: 3px; text-transform: uppercase; color: var(--cyan-bright);
+  text-shadow: 0 0 12px var(--cyan-glow);
+}
+.device-camera-error {
+  color: var(--amber); font-size: clamp(14px, 3vw, 20px);
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+
 /* ── Media catalogue ─────────────────────────────────────────────────────────
    A dense table by necessity: the whole point is comparing hundreds of folders
    at a glance, so rows are tight and the visual weight goes to size and content

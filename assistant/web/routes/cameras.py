@@ -1,4 +1,5 @@
-"""Authenticated live camera access for the web UI."""
+"""Authenticated live camera access for the web UI and voice-terminal kiosks."""
+import secrets
 import urllib.request
 
 from fastapi import APIRouter, HTTPException, Request
@@ -10,9 +11,25 @@ from ..auth import require_user
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
 
+def _authorized(request: Request) -> None:
+    """Session cookie (the main web UI) or the shared device key (a kiosk terminal --
+    same two-path pattern routes/devices.py uses, since a screen on a shelf has nobody
+    to log it in)."""
+    try:
+        require_user(request)
+        return
+    except HTTPException:
+        pass
+    device_key = getattr(request.app.state.cfg, "device_api_key", None)
+    supplied = request.query_params.get("key", "")
+    if device_key and supplied and secrets.compare_digest(supplied, device_key):
+        return
+    raise HTTPException(401, "not logged in")
+
+
 @router.get("/{camera_key}/stream")
 def stream_camera(camera_key: str, request: Request):
-    require_user(request)
+    _authorized(request)
     camera = vision.get_camera(request.app.state.cfg.db_path, camera_key)
     if camera is None:
         raise HTTPException(404, "camera not found")

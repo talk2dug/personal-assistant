@@ -21,6 +21,7 @@ class FakeConfig:
     users: list = field(default_factory=list)
     timezone: str = "America/New_York"
     web_session_secret: str = "test-secret"
+    device_api_key: str = ""
 
 
 class FakeLLM:
@@ -137,3 +138,29 @@ def test_unreachable_camera_is_a_bad_gateway_not_a_silent_200(client, cfg, monke
 
     resp = client.get("/api/cameras/kitchen/stream")
     assert resp.status_code == 502
+
+
+def test_device_key_also_authorizes_the_stream(cfg, monkeypatch):
+    # Kiosk terminals (routes/devices.py) have nobody to log in -- they carry the same
+    # shared device key the rest of their API calls use, as a query param since <img>
+    # can't set an Authorization header.
+    cfg.device_api_key = "secret-device-key"
+    db.upsert_user(cfg.db_path, "111", "Dug", "owner")
+    vision.add_camera(cfg.db_path, key="kitchen", name="Kitchen", url="http://192.168.0.135:8081/", location="kitchen")
+    monkeypatch.setattr(cameras.urllib.request, "urlopen", lambda url, timeout=10: FakeUpstream())
+
+    app = create_app(cfg, FakeLLM(), era=None, calendar=None, static_dir=None)
+    # No login call at all -- a fresh, cookie-less client, like a kiosk browser.
+    resp = TestClient(app).get("/api/cameras/kitchen/stream?key=secret-device-key")
+    assert resp.status_code == 200
+
+
+def test_wrong_device_key_is_still_unauthorized(cfg, monkeypatch):
+    cfg.device_api_key = "secret-device-key"
+    db.upsert_user(cfg.db_path, "111", "Dug", "owner")
+    vision.add_camera(cfg.db_path, key="kitchen", name="Kitchen", url="http://192.168.0.135:8081/", location="kitchen")
+    monkeypatch.setattr(cameras.urllib.request, "urlopen", lambda url, timeout=10: FakeUpstream())
+
+    app = create_app(cfg, FakeLLM(), era=None, calendar=None, static_dir=None)
+    resp = TestClient(app).get("/api/cameras/kitchen/stream?key=wrong")
+    assert resp.status_code == 401

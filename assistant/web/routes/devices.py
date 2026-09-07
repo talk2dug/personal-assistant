@@ -23,7 +23,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
-from ...core import db
+from ...core import db, vision
 from ...core.engine import handle_message
 
 logger = logging.getLogger(__name__)
@@ -135,8 +135,9 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
 
     _set_state(device_id, state="thinking", caption=transcript)
 
+    owner_id = _owner_user_id(request)
     call = functools.partial(
-        handle_message, cfg.db_path, request.app.state.llm, _owner_user_id(request), transcript,
+        handle_message, cfg.db_path, request.app.state.llm, owner_id, transcript,
         tz_name=cfg.timezone, era=request.app.state.era, calendar=request.app.state.calendar,
         phone=request.app.state.phone, mail=request.app.state.mail,
         obsidian=request.app.state.obsidian, home_assistant=request.app.state.home_assistant,
@@ -160,8 +161,19 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
             # A voice failure must still deliver the answer on screen.
             logger.exception("tts failed for device %s", device_id)
 
-    _set_state(device_id, state="speaking", caption=reply)
-    return {"transcript": transcript, "reply": reply, "audio": spoken_audio}
+    # show_camera (if this turn called it) leaves its result here rather than
+    # returning it directly through handle_message -- see pending_camera_views in
+    # vision.py. The kiosk screen only ever polls /{device_id} for its state, so the
+    # camera has to ride along on that same polled object, not just this response;
+    # camera_seq lets Device.jsx notice a *new* one without the server needing to
+    # "clear" it afterward (a GET poll shouldn't have side effects).
+    camera = vision.pop_pending_camera_view(cfg.db_path, owner_id)
+    state_fields = {"state": "speaking", "caption": reply}
+    if camera is not None:
+        state_fields["camera"] = camera
+        state_fields["camera_seq"] = DEVICE_STATE.get(device_id, {}).get("camera_seq", 0) + 1
+    _set_state(device_id, **state_fields)
+    return {"transcript": transcript, "reply": reply, "audio": spoken_audio, "camera": camera}
 
 
 @router.post("/say")

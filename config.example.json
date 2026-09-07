@@ -15,8 +15,6 @@
     "accounts__manage_account",
     "knowledge__reset_pack_questions"
   ],
-  "recipe_api_key": "PUT_YOUR_RECIPE_API_KEY_HERE",
-  "recipe_mcp_url": "https://recipe-api.com/api/mcp",
   "apple_id": "PUT_YOUR_APPLE_ID_EMAIL_HERE",
   "apple_app_password": "PUT_YOUR_APP_SPECIFIC_PASSWORD_HERE",
   "caldav_url": "https://caldav.icloud.com",
@@ -30,6 +28,10 @@
   "phone_sensitive_tools": ["send_sms", "make_call", "shell"],
   "stt_model_size": "small.en",
   "mail_sensitive_tools": ["send_email"],
+  "_comment_mail_triage": "Autonomous email triage (junk-flagging/draft-reply/auto-filing) layered on the same iCloud Mail account. mail_category_folders overrides where each category files to -- e.g. {\"order_inquiry\": \"Print Orders\"} -- and only needs entries for categories whose folder isn't already right; the folders it names must already exist in the account, since this never creates one. Omit mail_category_folders entirely to use the built-in defaults (see mail_triage.DEFAULT_CATEGORY_FOLDERS).",
+  "mail_triage_sensitive_tools": ["flag_junk_email", "file_email", "save_draft_email"],
+  "mail_junk_score_threshold": 0.5,
+  "mail_category_folders": null,
   "obsidian_vault_path": "C:\\PUT_YOUR_VAULT_PATH_HERE",
   "ha_base_url": "http://PUT_YOUR_HOME_ASSISTANT_IP_HERE",
   "ha_token": "PUT_YOUR_HA_LONG_LIVED_ACCESS_TOKEN_HERE",
@@ -69,16 +71,6 @@
   "business_digest_hour": 8,
   "_comment_personal_research": "How often the background agent checks for personal errands ('find me a dentist') to research. Not gated behind business_agents_enabled — this runs regardless.",
   "personal_research_interval_minutes": 30,
-  "_comment_github": "Dev-team agents: git branch/push/PR tools and the ops-plan/SSH workflow. Use a fine-grained PAT scoped to just this one repo (Contents + Pull requests, read/write) — not a classic token with broader access.",
-  "github_repo": "REPLACE_WITH_YOUR_GITHUB_OWNER/REPLACE_WITH_YOUR_REPO_NAME",
-  "github_pat": "PUT_YOUR_GITHUB_FINE_GRAINED_PAT_HERE",
-  "git_workspace_path": "../jarvis-git-workspace",
-  "git_author_name": "Jarvis",
-  "git_author_email": "jarvis@localhost",
-  "_comment_ssh_hosts": "Named hosts the ops-plan workflow may target — short name to {host, user, key_path or password}. The model only ever refers to a host by its short name; real address/credential stay server-side.",
-  "ssh_hosts": {
-    "example-host": {"host": "192.168.1.50", "user": "pi", "key_path": "~/.ssh/id_ed25519"}
-  },
   "users": [
     {"telegram_chat_id": "REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID", "display_name": "Dug", "role": "owner", "web_password": "PICK_A_PASSWORD"},
     {"telegram_chat_id": "REPLACE_WITH_GF_TELEGRAM_CHAT_ID", "display_name": "GF", "role": "partner", "web_password": "PICK_A_PASSWORD"}

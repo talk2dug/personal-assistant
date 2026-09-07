@@ -1,4 +1,4 @@
-﻿"""Loads runtime configuration (bot token, user allowlist, Ollama endpoint) from a JSON
+"""Loads runtime configuration (bot token, user allowlist, Ollama endpoint) from a JSON
 file kept out of source control, so the Telegram token and the two chat_ids never end up
 committed.
 """
@@ -17,7 +17,7 @@ class UserConfig:
 
 @dataclass
 class BusinessProfile:
-    """Who the business is and where — everything the background agents need that would
+    """Who the business is and where â€” everything the background agents need that would
     otherwise be hardcoded. The predecessor project (Blue Ridge Custom Co) baked Asheville
     into its market-finder, which made the whole module worthless the moment the business
     moved cities. None of that belongs in code."""
@@ -46,11 +46,6 @@ class Config:
     era_api_key: str | None = None
     era_mcp_url: str = "https://context.era.app/mcp"
     era_sensitive_tools: list[str] = None
-    # Recipe API: remote Streamable HTTP MCP server, same shape as Era, bearer-key auth.
-    # Read-only/generative (search, filter, lookups, plus generate_recipe) -- nothing here
-    # needs sensitive_tools, see RecipeContext's docstring in engine.py.
-    recipe_api_key: str | None = None
-    recipe_mcp_url: str = "https://recipe-api.com/api/mcp"
     apple_id: str | None = None
     apple_app_password: str | None = None
     caldav_url: str = "https://caldav.icloud.com"
@@ -64,6 +59,19 @@ class Config:
     phone_sensitive_tools: list[str] = None
     stt_model_size: str = "small.en"
     mail_sensitive_tools: list[str] = None
+    # Autonomous email triage (junk-flagging/draft-reply/auto-filing -- mail_tools.py's
+    # MailTriageClient). A separate sensitive_tools set from mail_sensitive_tools above
+    # because it's logically a distinct set of tools layered on the same mail account;
+    # kept to the mutating ones (moving/flagging a real message, saving a real draft),
+    # same reasoning as mail_sensitive_tools only gating send_email.
+    mail_triage_sensitive_tools: list[str] = None
+    # Junk-likelihood score (0-1) at or above which a message is treated as spam_junk.
+    # See mail_triage.score_junk's docstring for what feeds the score.
+    mail_junk_score_threshold: float = 0.5
+    # Overrides mail_triage.DEFAULT_CATEGORY_FOLDERS per-category, e.g. to point
+    # "order_inquiry" at a folder actually named "Print Orders" in the real account.
+    # Categories omitted here keep the built-in default.
+    mail_category_folders: dict | None = None
     obsidian_vault_path: str | None = None
     ha_base_url: str | None = None
     ha_token: str | None = None
@@ -95,7 +103,7 @@ class Config:
     gpu_max_concurrent: int = 2
     # ComfyUI on simrig, for image and video generation. A separate server from Ollama
     # on the same box, speaking a completely different protocol (queue a graph, poll,
-    # fetch files) — hence its own host setting.
+    # fetch files) â€” hence its own host setting.
     comfy_host: str | None = None
     # Voice devices (the Pi terminals). piper_voice_path enables server-side speech;
     # device_api_key authenticates the headless clients, which have no session cookie.
@@ -141,32 +149,15 @@ class Config:
     letterstream_from_city: str | None = None
     letterstream_from_state: str | None = None
     letterstream_from_zip: str | None = None
-    # Dev-team agents: git branch/push/PR tools (Phase 1) and later the ops-plan/SSH
-    # workflow both need a repo to target and a token to act on the owner's behalf.
-    # Fine-grained PAT scoped to just this one repo, Contents + Pull requests read/write.
-    github_repo: str | None = None
-    github_pat: str | None = None
-    # Where the local working clone (and one git-worktree checkout per branch) lives.
-    # Kept outside the app's own repo tree so an employee's workspace is never itself
-    # a nested repo Jarvis's own git history would need to account for.
-    git_workspace_path: str = "../jarvis-git-workspace"
-    git_author_name: str = "Jarvis"
-    git_author_email: str = "jarvis@localhost"
     scan_ssh_password: str | None = None
     scan_ssh_users: list[str] = field(default_factory=lambda: ["pi", "jack"])
     scan_subnet: str = "192.168.0"
-    # Named registry of hosts the ops-plan workflow (assistant/core/ssh_ops.py) may
-    # target: {name: {"host", "user", "key_path"?, "password"?}}. The employee/model only
-    # ever refers to a host by its short name here -- the real address and credential are
-    # injected server-side, same principle as every other credential-injecting wrapper in
-    # this codebase (CCXT, git_ops), never a tool argument the model could leak or forge.
-    ssh_hosts: dict = field(default_factory=dict)
     piper_voice_path: str | None = None
     generated_media_path: str = "generated"
     # Master switch for unattended agent runs. Off by default and currently off in the
     # real config: the owner's call is that nothing should fire on a timer until he and
     # Jarvis have worked out sensible cadence and working hours together. Every agent
-    # still runs on demand from chat via run_business_agent — this only governs the
+    # still runs on demand from chat via run_business_agent â€” this only governs the
     # scheduler. The intervals below are what takes effect when it's switched back on.
     business_agents_enabled: bool = False
     # Deliberately unhurried when enabled. These scans each make many web searches billed
@@ -196,8 +187,6 @@ def load_config(path: str = "config.json") -> Config:
         era_api_key=data.get("era_api_key"),
         era_mcp_url=data.get("era_mcp_url", "https://context.era.app/mcp"),
         era_sensitive_tools=data.get("era_sensitive_tools", []),
-        recipe_api_key=data.get("recipe_api_key"),
-        recipe_mcp_url=data.get("recipe_mcp_url", "https://recipe-api.com/api/mcp"),
         apple_id=data.get("apple_id"),
         apple_app_password=data.get("apple_app_password"),
         caldav_url=data.get("caldav_url", "https://caldav.icloud.com"),
@@ -215,8 +204,16 @@ def load_config(path: str = "config.json") -> Config:
         phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
         stt_model_size=data.get("stt_model_size", "small.en"),
         # Matches the phone/Era gating policy: only send_email has real-world consequences
-        # (an email actually leaving the account) — read tools (list/search/read) run directly.
+        # (an email actually leaving the account) â€” read tools (list/search/read) run directly.
         mail_sensitive_tools=data.get("mail_sensitive_tools", ["send_email"]),
+        # The triage feature's mutating tools (moving/flagging real mail, saving a real
+        # draft) get the same conservative treatment; triage_inbox/draft_reply_email/
+        # list_mail_triage_log are read-only or advisory and are deliberately not here.
+        mail_triage_sensitive_tools=data.get(
+            "mail_triage_sensitive_tools", ["flag_junk_email", "file_email", "save_draft_email"],
+        ),
+        mail_junk_score_threshold=data.get("mail_junk_score_threshold", 0.5),
+        mail_category_folders=data.get("mail_category_folders"),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
         ha_token=data.get("ha_token"),
@@ -236,11 +233,11 @@ def load_config(path: str = "config.json") -> Config:
         claude_model=data.get("claude_model", "sonnet"),
         claude_timeout_seconds=data.get("claude_timeout_seconds", 300),
         # Authenticates the MCP bridge subprocess to /api/tools/call. Equivalent to full
-        # owner access — anything holding it can invoke every tool Jarvis has.
+        # owner access â€” anything holding it can invoke every tool Jarvis has.
         claude_tools_api_key=data.get("claude_tools_api_key"),
         claude_tools_url=data.get("claude_tools_url", "http://127.0.0.1:8080/api/tools/call"),
         # Omit the "business" block entirely and the whole second-in-command side stays
-        # off — no tools offered, no agents scheduled, no digest.
+        # off â€” no tools offered, no agents scheduled, no digest.
         business=BusinessProfile(**data["business"]) if data.get("business") else None,
         gpu_bridge_enabled=data.get("gpu_bridge_enabled", True),
         gpu_bridge_host=data.get("gpu_bridge_host") or data.get("ollama_host"),
@@ -268,15 +265,9 @@ def load_config(path: str = "config.json") -> Config:
         letterstream_from_city=data.get("letterstream_from_city"),
         letterstream_from_state=data.get("letterstream_from_state"),
         letterstream_from_zip=data.get("letterstream_from_zip"),
-        github_repo=data.get("github_repo"),
-        github_pat=data.get("github_pat"),
-        git_workspace_path=data.get("git_workspace_path", "../jarvis-git-workspace"),
-        git_author_name=data.get("git_author_name", "Jarvis"),
-        git_author_email=data.get("git_author_email", "jarvis@localhost"),
         scan_ssh_password=data.get("scan_ssh_password"),
         scan_ssh_users=data.get("scan_ssh_users", ["pi", "jack"]),
         scan_subnet=data.get("scan_subnet", "192.168.0"),
-        ssh_hosts=data.get("ssh_hosts", {}),
         piper_voice_path=data.get("piper_voice_path"),
         generated_media_path=data.get("generated_media_path", "generated"),
         business_agents_enabled=data.get("business_agents_enabled", False),
@@ -287,8 +278,3 @@ def load_config(path: str = "config.json") -> Config:
         business_digest_hour=data.get("business_digest_hour", 8),
         personal_research_interval_minutes=data.get("personal_research_interval_minutes", 30),
     )
-
-
-
-
-

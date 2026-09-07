@@ -120,7 +120,14 @@ def score_message(sender: str, subject: str, body: str = "") -> dict:
 
     for brand in _IMPERSONATED_BRANDS:
         brand_compact = brand.replace(" ", "")
-        if brand in display_name and domain and brand_compact not in domain.replace("-", ""):
+        # The registrable-ish label (second-from-right, e.g. 'paypal' in mail.paypal.com)
+        # must actually equal the brand -- a plain substring check (an earlier version of
+        # this) misses the classic trick of burying the brand name in a longer fake
+        # domain, e.g. 'totally-not-paypal.tk' contains 'paypal' as a substring but its
+        # real second-level label is 'totallynotpaypal', not 'paypal'.
+        labels = domain.replace("-", "").split(".") if domain else []
+        second_level = labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
+        if brand in display_name and domain and second_level != brand_compact:
             score += 4
             reasons.append(f"sender display name claims '{brand}' but domain is '{domain}'")
             break  # one impersonation signal is enough -- multiple brand names in one

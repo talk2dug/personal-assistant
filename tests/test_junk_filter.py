@@ -15,8 +15,8 @@ def test_ordinary_email_scores_low_and_is_not_junk():
 
 def test_obvious_phishing_scores_high_and_is_junk():
     sender = '"PayPal Security" <alerts@totally-not-paypal.tk>'
-    subject = "URGENT: Verify your account NOW!!!"
-    body = "Click here immediately to verify your account or it will be suspended."
+    subject = "URGENT VERIFY YOUR ACCOUNT NOW!!!"
+    body = "Click here immediately to verify your account or we will have suspended your account."
 
     verdict = junk_filter.score_message(sender, subject, body)
 

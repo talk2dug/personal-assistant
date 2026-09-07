@@ -1,4 +1,4 @@
-"""Background poller that fires due reminders, and (optionally) pulls Apple Calendar
+﻿"""Background poller that fires due reminders, and (optionally) pulls Apple Calendar
 changes into the reminders table and refreshes the Era finance cache. Transport-agnostic:
 takes a notify(chat_id, text) callback so it doesn't need to know about Telegram.
 """
@@ -26,7 +26,7 @@ def start(
     market_api_key: str | None = None, market_poll_seconds: int = 60,
     market_track_limit: int = 250,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
-    personal=None, personal_research_minutes: int = 30,
+    personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
     mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
@@ -169,7 +169,7 @@ def start(
                         era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
                         home_assistant=home_assistant, business=business, personal=personal,
                         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                        letterstream=letterstream,
+                        letterstream=letterstream, git_ops=git_ops, recipe=recipe,
                     )
                     if reply:
                         notify(owner["telegram_chat_id"], f"{routine['name']}: {reply}")
@@ -452,3 +452,5 @@ def run_mail_junk_scan(mcp_client, limit: int = 25) -> dict:
     refresh_era_cache/sync_calendar already use.
     """
     return mcp_client.call_tool("scan_inbox_for_junk", {"limit": limit, "only_unread": True})
+
+

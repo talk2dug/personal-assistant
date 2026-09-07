@@ -15,7 +15,7 @@ from .claude_cli import ClaudeCLIClient
 from .engine import (
     AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, GitOpsContext,
     HomeAssistantContext, KrogerContext, LetterStreamContext, MailContext, ObsidianContext,
-    PersonalContext, PhoneContext, TicketmasterContext,
+    PersonalContext, PhoneContext, RecipeContext, TicketmasterContext,
 )
 from .git_ops import GitOpsClient
 from .git_tools import GIT_TOOLS
@@ -215,6 +215,22 @@ def build_era_context(cfg) -> EraContext | None:
     ]
     logger.info("Era: discovered %d tools, %d gated as sensitive", len(era_tools), len(cfg.era_sensitive_tools))
     return EraContext(mcp_client=mcp_client, era_tools=era_tools, sensitive_tools=set(cfg.era_sensitive_tools))
+
+
+def build_recipe_context(cfg) -> RecipeContext | None:
+    if not cfg.recipe_api_key:
+        return None
+    mcp_client = MCPClient(cfg.recipe_mcp_url, cfg.recipe_api_key)
+    discovered = mcp_client.list_tools()
+    recipe_tools = [
+        {
+            "type": "function",
+            "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]},
+        }
+        for t in discovered
+    ]
+    logger.info("Recipe API: discovered %d tools", len(recipe_tools))
+    return RecipeContext(mcp_client=mcp_client, recipe_tools=recipe_tools)
 
 
 def build_phone_context(cfg) -> PhoneContext | None:

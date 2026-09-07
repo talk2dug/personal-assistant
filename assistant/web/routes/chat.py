@@ -54,6 +54,7 @@ async def send_message(request: Request):
     ccxt = request.app.state.ccxt if is_owner else None
     letterstream = request.app.state.letterstream if is_owner else None
     git_ops = request.app.state.git_ops if is_owner else None
+    recipe = request.app.state.recipe if is_owner else None
     # handle_message blocks (LLM call to simrig, and sometimes Era/CalDAV/the phone) and Era/phone
     # tool calls internally use asyncio.run(), which raises if called from a thread that already
     # has a running event loop — this route runs on uvicorn's event loop, so handle_message must
@@ -65,7 +66,7 @@ async def send_message(request: Request):
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         image_bytes=image_bytes,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops,
+        git_ops=git_ops, recipe=recipe,
     )
     reply = await loop.run_in_executor(None, call)
     # show_camera (if the model called it this turn) leaves its result here rather than

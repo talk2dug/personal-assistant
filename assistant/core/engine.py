@@ -153,6 +153,24 @@ class TicketmasterContext:
 
 
 @dataclass
+class RecipeContext:
+    """Bundles what handle_message needs for Recipe API (search_recipes, filter_recipes,
+    get_recipe, generate_recipe, plus ingredient/category/cuisine lookups). Remote
+    Streamable HTTP MCP server, same transport and bearer-key auth as Era — see
+    mcp_client.py — but unlike Era there's nothing here that can spend money, send
+    anything, or touch an external account: search/filter/lookup are pure reads, and
+    generate_recipe only returns a newly-composed recipe object, so like Airbnb/
+    Ticketmaster this needs no sensitive_tools set."""
+
+    mcp_client: object
+    recipe_tools: list[dict]
+
+    @property
+    def tool_names(self) -> set[str]:
+        return {t["function"]["name"] for t in self.recipe_tools}
+
+
+@dataclass
 class KrogerContext:
     """Bundles what handle_message needs for Kroger: store/product search plus a real
     cart tied to the owner's actual Kroger account via OAuth. Same shape as EraContext —
@@ -374,6 +392,19 @@ def _select_ticketmaster_tools(ticketmaster: "TicketmasterContext", user_text: s
     if not any(kw in text for kw in TICKETMASTER_KEYWORDS):
         return []
     return ticketmaster.ticketmaster_tools
+
+
+RECIPE_KEYWORDS = [
+    "recipe", "recipes", "cook", "cooking", "bake", "baking", "dinner", "meal", "dish",
+    "cuisine", "ingredient", "ingredients", "nutrition", "calories", "protein", "carbs",
+]
+
+
+def _select_recipe_tools(recipe: "RecipeContext", user_text: str) -> list[dict]:
+    text = user_text.lower()
+    if not any(kw in text for kw in RECIPE_KEYWORDS):
+        return []
+    return recipe.recipe_tools
 
 
 KROGER_CATEGORY_KEYWORDS = {
@@ -976,7 +1007,7 @@ SYSTEM_PROMPT = (
     "yourself, just confirm it's open or report that no camera is registered for that room. "
     "list_cameras shows what's registered, and add_camera registers a new one from a stream URL."
     "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{web_note}"
-    "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}"
+    "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}{recipe_note}"
 )
 
 WEB_SEARCH_SYSTEM_NOTE = (
@@ -1067,6 +1098,19 @@ TICKETMASTER_SYSTEM_NOTE = (
     "at this venue' type questions, answering with the real event details found."
 )
 
+RECIPE_SYSTEM_NOTE = (
+    " You can also search a real recipe database with USDA-backed nutrition data: "
+    "search_recipes (free text), filter_recipes (category/cuisine/dietary/macros), "
+    "search_ingredients and get_ingredient, list_categories/list_cuisines/"
+    "list_dietary_flags for what's available, get_recipe for the full ingredients/steps/"
+    "nutrition of one result (needs the UUID id search_recipes or filter_recipes "
+    "returned — never invent one), and generate_recipe to compose a brand-new recipe "
+    "from a brief when nothing in the database fits. All of these execute immediately — "
+    "nothing here spends money, sends anything, or touches an account, so none of it "
+    "needs confirmation. Answer with the real recipe/ingredient details returned, not by "
+    "describing the search itself."
+)
+
 LETTERSTREAM_SYSTEM_NOTE = (
     " You can also send physical mail via LetterStream — first-class letters, certified "
     "mail, postcards. letterstream_send_mail only QUOTES a letter: it prices and stages "
@@ -1115,6 +1159,7 @@ def build_system_prompt(
     tz_name: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     now: str | None = None, web_search: bool = False, business=None, personal=None,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
+    recipe=None,
 ) -> str:
     """Builds Jarvis's system prompt with whichever integration notes apply.
 
@@ -1154,13 +1199,14 @@ def build_system_prompt(
         ccxt_note=CCXT_SYSTEM_NOTE if ccxt is not None else "",
         letterstream_note=LETTERSTREAM_SYSTEM_NOTE if letterstream is not None else "",
         git_note=GIT_SYSTEM_NOTE if git_ops is not None else "",
+        recipe_note=RECIPE_SYSTEM_NOTE if recipe is not None else "",
     )
 
 
 def select_tools(
     user_text: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     route: bool = True, business=None, personal=None, airbnb=None, ticketmaster=None, kroger=None,
-    ccxt=None, letterstream=None, git_ops=None,
+    ccxt=None, letterstream=None, git_ops=None, recipe=None,
 ) -> list[dict]:
     """The tool set for one turn, in Ollama's function-schema format.
 
@@ -1197,6 +1243,7 @@ def select_tools(
             + (ccxt.ccxt_tools if ccxt is not None else [])
             + (LETTERSTREAM_TOOLS if letterstream is not None else [])
             + (git_ops.git_tools if git_ops is not None else [])
+            + (recipe.recipe_tools if recipe is not None else [])
         )
     return (
         TOOLS
@@ -1231,6 +1278,7 @@ def select_tools(
         # capture reliably with a keyword list, and these tools are safe to always offer
         # (branch/write/push/PR-open are all reversible; only merge is gated).
         + (git_ops.git_tools if git_ops is not None else [])
+        + (_select_recipe_tools(recipe, user_text) if recipe is not None else [])
     )
 
 
@@ -1256,6 +1304,7 @@ def _dispatch_tool_call(
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None,
     git_ops: "GitOpsContext | None" = None,
+    recipe: "RecipeContext | None" = None,
     employee_key: str | None = None,
 ) -> str:
     if name == "show_camera":
@@ -1420,6 +1469,12 @@ def _dispatch_tool_call(
     if ticketmaster is not None and name in ticketmaster.tool_names:
         try:
             return json.dumps(ticketmaster.mcp_client.call_tool(name, arguments))
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    if recipe is not None and name in recipe.tool_names:
+        try:
+            return json.dumps(recipe.mcp_client.call_tool(name, arguments))
         except Exception as e:
             return json.dumps({"error": str(e)})
 
@@ -1680,6 +1735,7 @@ def handle_message(
     airbnb: AirbnbContext | None = None, ticketmaster: TicketmasterContext | None = None,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
+    recipe: "RecipeContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
 ) -> str:
     """Runs one user turn through the LLM (with tool-calling), persists the
@@ -1703,7 +1759,7 @@ def handle_message(
     tools = select_tools(
         user_text, era, phone, mail, obsidian, home_assistant, route=not agentic, business=business,
         personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-        letterstream=letterstream, git_ops=git_ops)
+        letterstream=letterstream, git_ops=git_ops, recipe=recipe)
 
     # Agentic backends (the Claude CLI) run their own tool-calling loop against Jarvis's
     # tools over MCP, so the hop loop below doesn't apply — they get the conversation and
@@ -1714,7 +1770,7 @@ def handle_message(
             tz_name, era, phone, mail, obsidian, home_assistant,
             web_search=getattr(llm, "web_search", False), business=business, personal=personal,
             airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-            letterstream=letterstream, git_ops=git_ops,
+            letterstream=letterstream, git_ops=git_ops, recipe=recipe,
         )
         try:
             reply = llm.converse(
@@ -1731,7 +1787,7 @@ def handle_message(
         {"role": "system", "content": build_system_prompt(
             tz_name, era, phone, mail, obsidian, home_assistant, now=now, business=business,
             personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-            letterstream=letterstream, git_ops=git_ops)}
+            letterstream=letterstream, git_ops=git_ops, recipe=recipe)}
     ] + history
     if image_bytes is not None and messages[-1]["role"] == "user":
         messages[-1] = {**messages[-1], "images": [image_bytes]}
@@ -1770,7 +1826,7 @@ def handle_message(
                 db_path, tz_name, requesting_user_id, fn["name"], fn.get("arguments", {}), era, calendar, phone,
                 mail=mail, obsidian=obsidian, home_assistant=home_assistant, business=business,
                 personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops,
+                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
             )
             messages.append({"role": "tool", "content": result})
 

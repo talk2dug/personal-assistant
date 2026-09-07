@@ -46,6 +46,11 @@ class Config:
     era_api_key: str | None = None
     era_mcp_url: str = "https://context.era.app/mcp"
     era_sensitive_tools: list[str] = None
+    # Recipe API: remote Streamable HTTP MCP server, same shape as Era, bearer-key auth.
+    # Read-only/generative (search, filter, lookups, plus generate_recipe) -- nothing here
+    # needs sensitive_tools, see RecipeContext's docstring in engine.py.
+    recipe_api_key: str | None = None
+    recipe_mcp_url: str = "https://recipe-api.com/api/mcp"
     apple_id: str | None = None
     apple_app_password: str | None = None
     caldav_url: str = "https://caldav.icloud.com"
@@ -191,6 +196,8 @@ def load_config(path: str = "config.json") -> Config:
         era_api_key=data.get("era_api_key"),
         era_mcp_url=data.get("era_mcp_url", "https://context.era.app/mcp"),
         era_sensitive_tools=data.get("era_sensitive_tools", []),
+        recipe_api_key=data.get("recipe_api_key"),
+        recipe_mcp_url=data.get("recipe_mcp_url", "https://recipe-api.com/api/mcp"),
         apple_id=data.get("apple_id"),
         apple_app_password=data.get("apple_app_password"),
         caldav_url=data.get("caldav_url", "https://caldav.icloud.com"),

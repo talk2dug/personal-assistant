@@ -61,6 +61,7 @@ def create_app(
     cfg, llm, era, calendar, phone=None, stt=None, mail=None, obsidian=None, home_assistant=None,
     business=None, personal=None, bridge=None, speaker=None, static_dir: str | None = None,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
+    recipe=None,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis")
     app.add_middleware(SessionMiddleware, secret_key=cfg.web_session_secret or "dev-insecure-secret-change-me")
@@ -84,6 +85,7 @@ def create_app(
     app.state.ccxt = ccxt
     app.state.letterstream = letterstream
     app.state.git_ops = git_ops
+    app.state.recipe = recipe
 
     app.include_router(auth_router)
     app.include_router(chat_router)

@@ -130,7 +130,7 @@ async def _handle(request: Request, body: dict) -> dict:
             business=request.app.state.business,
             airbnb=request.app.state.airbnb, ticketmaster=request.app.state.ticketmaster,
             kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
-            letterstream=request.app.state.letterstream,
+            letterstream=request.app.state.letterstream, recipe=request.app.state.recipe,
         )
         reply = await loop.run_in_executor(None, call)
         return {"ok": True, "action": action or "REPLY", "result": reply}

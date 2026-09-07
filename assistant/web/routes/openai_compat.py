@@ -92,6 +92,7 @@ async def chat_completions(request: Request):
             airbnb=request.app.state.airbnb, ticketmaster=request.app.state.ticketmaster,
             kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
             letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
+            recipe=request.app.state.recipe,
         )
         reply = await loop.run_in_executor(None, call)
 

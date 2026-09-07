@@ -26,7 +26,7 @@ def start(
     market_api_key: str | None = None, market_poll_seconds: int = 60,
     market_track_limit: int = 250,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
-    personal=None, personal_research_minutes: int = 30, git_ops=None,
+    personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -146,7 +146,7 @@ def start(
                         era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
                         home_assistant=home_assistant, business=business, personal=personal,
                         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                        letterstream=letterstream, git_ops=git_ops,
+                        letterstream=letterstream, git_ops=git_ops, recipe=recipe,
                     )
                     if reply:
                         notify(owner["telegram_chat_id"], f"{routine['name']}: {reply}")

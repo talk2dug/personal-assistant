@@ -19,15 +19,15 @@ logger = logging.getLogger(__name__)
 def build_application(
     token: str, db_path: str, llm, tz_name: str = "America/New_York", era=None, calendar=None, phone=None, mail=None,
     obsidian=None, home_assistant=None, business=None, personal=None, airbnb=None, ticketmaster=None, kroger=None,
-    ccxt=None, letterstream=None, git_ops=None,
+    ccxt=None, letterstream=None, git_ops=None, recipe=None,
 ) -> Application:
     """era, phone, mail, obsidian, and home_assistant (engine.EraContext / PhoneContext /
     MailContext / ObsidianContext / HomeAssistantContext) are exposed only to users with
     role == 'owner' — the partner's chat never sees Era's finance tools, control of the owner's
     phone, the owner's inbox, the owner's vault, or smart-home control. calendar
     (engine.CalendarContext) applies to both roles, same as the reminder tools it hooks into.
-    airbnb/ticketmaster/kroger follow the owner-only rule too: kroger holds the owner's real
-    cart, and there's no reason for airbnb/ticketmaster to be a one-off exception to it."""
+    airbnb/ticketmaster/kroger/recipe follow the owner-only rule too: kroger holds the owner's
+    real cart, and there's no reason for the others to be a one-off exception to it."""
     application = Application.builder().token(token).build()
 
     async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -50,6 +50,7 @@ def build_application(
         user_ccxt = ccxt if is_owner else None
         user_letterstream = letterstream if is_owner else None
         user_git_ops = git_ops if is_owner else None
+        user_recipe = recipe if is_owner else None
         # handle_message does a blocking HTTP call to simrig (and sometimes Era/Apple/the phone); run
         # it off the event loop thread so one user's request can't stall the other's.
         loop = asyncio.get_running_loop()
@@ -59,6 +60,7 @@ def build_application(
             obsidian=user_obsidian, home_assistant=user_home_assistant, business=user_business,
             personal=user_personal, airbnb=user_airbnb, ticketmaster=user_ticketmaster,
             kroger=user_kroger, ccxt=user_ccxt, letterstream=user_letterstream, git_ops=user_git_ops,
+            recipe=user_recipe,
         )
         reply = await loop.run_in_executor(None, call)
         await update.message.reply_text(reply)

@@ -15,6 +15,8 @@
     "accounts__manage_account",
     "knowledge__reset_pack_questions"
   ],
+  "recipe_api_key": "PUT_YOUR_RECIPE_API_KEY_HERE",
+  "recipe_mcp_url": "https://recipe-api.com/api/mcp",
   "apple_id": "PUT_YOUR_APPLE_ID_EMAIL_HERE",
   "apple_app_password": "PUT_YOUR_APP_SPECIFIC_PASSWORD_HERE",
   "caldav_url": "https://caldav.icloud.com",

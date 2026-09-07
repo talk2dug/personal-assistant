@@ -1,6 +1,6 @@
-"""FastAPI backend for the Jarvis web UI -- serves the built React app and exposes
+"""FastAPI backend for the Jarvis web UI â€” serves the built React app and exposes
 /api/*. Runs as its own process (jarvis-web.service on pi5nas002), sharing jarvis.db
-with the Telegram bot process (safe via WAL mode) but nothing else -- see the Phase 4
+with the Telegram bot process (safe via WAL mode) but nothing else â€” see the Phase 4
 plan for why this is a second process rather than threaded into the existing one.
 
 Adding a new section (future agents): add a router module under routes/, include it
@@ -18,7 +18,7 @@ class SPAStaticFiles(StaticFiles):
     """Serves the built React app, falling back to index.html for unknown paths.
 
     Client-side routes (/finance, /review, /device) don't exist as files, so a *direct*
-    load of one -- a hard refresh, a bookmark, or a kiosk browser opening a deep link --
+    load of one — a hard refresh, a bookmark, or a kiosk browser opening a deep link —
     404s under a plain static mount. That went unnoticed for a long time because the UI
     is always entered at / and navigates client-side; the Pi terminal, which boots
     straight to /device, hit it immediately.
@@ -41,10 +41,9 @@ class SPAStaticFiles(StaticFiles):
 from .auth import router as auth_router
 from .routes.agents import router as agents_router
 from .routes.chat import router as chat_router
-from .routes.cameras import router as cameras_router
-from .routes.credit import router as credit_router
 from .routes.crypto import router as crypto_router
 from .routes.devices import router as devices_router
+from .routes.email_drafts import router as email_drafts_router
 from .routes.notifications import router as notifications_router
 from .routes.finance import router as finance_router
 from .routes.grocery import router as grocery_router
@@ -60,8 +59,7 @@ from .routes.weather import router as weather_router
 def create_app(
     cfg, llm, era, calendar, phone=None, stt=None, mail=None, obsidian=None, home_assistant=None,
     business=None, personal=None, bridge=None, speaker=None, static_dir: str | None = None,
-    airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
-    recipe=None,
+    airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis")
     app.add_middleware(SessionMiddleware, secret_key=cfg.web_session_secret or "dev-insecure-secret-change-me")
@@ -84,12 +82,9 @@ def create_app(
     app.state.kroger = kroger
     app.state.ccxt = ccxt
     app.state.letterstream = letterstream
-    app.state.git_ops = git_ops
-    app.state.recipe = recipe
 
     app.include_router(auth_router)
     app.include_router(chat_router)
-    app.include_router(cameras_router)
     app.include_router(finance_router)
     app.include_router(openai_compat_router)
     app.include_router(tools_router)
@@ -103,7 +98,7 @@ def create_app(
     app.include_router(weather_router)
     app.include_router(personal_tasks_router)
     app.include_router(grocery_router)
-    app.include_router(credit_router)
+    app.include_router(email_drafts_router)
 
     if static_dir and Path(static_dir).is_dir():
         app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")

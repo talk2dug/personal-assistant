@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import agents, business_db, db, location, market_data, personal_agents, staff
+from . import agents, business_db, db, location, mail_triage, market_data, personal_agents, staff
 from .engine import handle_message
 from .finance import CADENCE_DAYS
 
@@ -27,18 +27,14 @@ def start(
     market_track_limit: int = 250,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
     personal=None, personal_research_minutes: int = 30,
-    mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
+    mail_triage_interval_minutes: int = 30, mail_triage_scan_limit: int = 15,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
     business is an engine.BusinessContext; together with a web-searching llm AND
     business_agents_enabled it schedules the market/trend/research/pipeline agents and the
     daily briefing. With business_agents_enabled False (the default) nothing agent-related
-    is scheduled at all, though every agent still runs on demand from chat.
-    mail is an engine.MailContext; when present it also schedules the autonomous
-    junk-flagging pass (mail_junk_scan) regardless of business_agents_enabled -- triaging
-    the owner's own inbox isn't a print-business agent, it's core mail hygiene, the same
-    reasoning personal_research_interval_minutes uses below."""
+    is scheduled at all, though every agent still runs on demand from chat."""
     business_intervals = business_intervals or {
         "market_hours": 72, "trend_hours": 24, "research_minutes": 120,
         "pipeline_hours": 12, "digest_hour": 8,
@@ -97,24 +93,6 @@ def start(
                 logger.exception("era cache refresh failed")
 
         scheduler.add_job(_era_cache_tick, "interval", seconds=era_cache_interval_seconds, id="era_cache_refresh")
-
-    if mail is not None:
-        def _mail_junk_tick():
-            result = run_mail_junk_scan(mail.mcp_client, limit=mail_junk_scan_limit)
-            if result.get("flagged"):
-                logger.info(
-                    "mail junk scan: flagged %d of %d scanned message(s) as junk (moved %d)",
-                    result["flagged"], result["scanned"], result.get("moved", 0),
-                )
-
-        scheduler.add_job(
-            _guarded_simple("mail_junk_scan", _mail_junk_tick), "interval",
-            seconds=mail_junk_scan_interval_seconds, id="mail_junk_scan",
-            # A minute after boot rather than a full interval away, same reasoning as
-            # the research queues below: new spam doesn't wait for a service restart's
-            # remaining interval to elapse before it's worth a first look.
-            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
-        )
 
     if home_assistant is not None:
         owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
@@ -332,6 +310,24 @@ def start(
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
 
+    if mail is not None and llm is not None:
+        # Draft-reply generation (see mail_triage.py). Deliberately requires only mail +
+        # a plain .chat()-capable llm, NOT hasattr(llm, "research") like the agents above
+        # -- drafting a reply from a message already in hand needs no web search, so this
+        # runs on the Ollama backend too, not just Claude CLI. It only ever writes to the
+        # email_drafts table and the review queue; nothing here can send anything.
+        owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+        if owner is not None:
+            scheduler.add_job(
+                _guarded_simple(
+                    "mail_triage",
+                    lambda: mail_triage.run_mail_triage_once(
+                        db_path, llm, mail.mcp_client, owner["id"], limit=mail_triage_scan_limit),
+                ),
+                "interval", minutes=mail_triage_interval_minutes, id="mail_triage_agent",
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+            )
+
     if market_api_key:
         # The crypto feed. Deliberately outside the business_agents_enabled gate: the
         # cache is cheap (1 credit a poll, 14% of the daily budget at 60s) and an
@@ -440,15 +436,3 @@ def refresh_era_cache(mcp_client, db_path: str) -> None:
                 db_path, group["category_key"], period, group.get("label", ""),
                 group["amount"], group.get("percent_of_total"), group.get("transaction_count"),
             )
-
-
-def run_mail_junk_scan(mcp_client, limit: int = 25) -> dict:
-    """One pass of the autonomous junk-flagging job: asks the mail client to score
-    recent unread inbox mail and move likely junk into the Junk folder, returning its
-    summary for logging.
-
-    A thin top-level wrapper (rather than inlining this in start()'s closure) so it's
-    directly unit-testable against a fake mail client, the same pattern
-    refresh_era_cache/sync_calendar already use.
-    """
-    return mcp_client.call_tool("scan_inbox_for_junk", {"limit": limit, "only_unread": True})

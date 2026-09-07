@@ -13,7 +13,7 @@ the reason Kroger/CCXT/Airbnb/Ticketmaster/Recipe API are all keyword-routed). S
 the true "capture what he just said" tools are unconditional; recipe lookup/editing is
 keyword-gated the same way _select_kroger_tools gates Kroger's larger catalog.
 """
-from . import kitchen_db
+from . import kitchen_db, meal_plan_db
 
 KITCHEN_ALWAYS_TOOLS = [
     {"type": "function", "function": {
@@ -258,6 +258,83 @@ KITCHEN_GATED_TOOLS = [
             },
         }, "required": ["recipe_id"]},
     }},
+    {"type": "function", "function": {
+        "name": "get_pay_period",
+        "description": (
+            "Find the pay period(s) around today, for meal planning ('plan meals for the "
+            "days between paydays'). Returns both the period today falls inside "
+            "(is_current: true) and the next upcoming one, since which he means when he "
+            "just says 'let's plan meals' is genuinely ambiguous mid-cycle — ask him if "
+            "it isn't obvious from context, don't just assume."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "start_meal_plan",
+        "description": (
+            "Start a new meal plan for a date range (normally one pay period, from "
+            "get_pay_period). Creates it as a draft — keep adding meals with "
+            "add_meal_plan_entry, then call finalize_meal_plan once he's happy with it."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "period_start": {"type": "string", "description": "ISO date, inclusive."},
+            "period_end": {"type": "string", "description": "ISO date — the next payday."},
+            "max_deliveries": {
+                "type": "integer",
+                "description": "Grocery deliveries allowed this period — defaults to 2 (one main trip, one fresh top-off) unless he says otherwise.",
+            },
+        }, "required": ["period_start", "period_end"]},
+    }},
+    {"type": "function", "function": {
+        "name": "add_meal_plan_entry",
+        "description": (
+            "Plan one meal on one date. Calling this again for the same plan/date/meal_type "
+            "replaces whatever was already planned there, rather than duplicating it — use "
+            "that freely as the conversation changes its mind about a night. title is "
+            "required even when recipe_id is given (denormalized for quick display); for "
+            "something with no saved recipe ('order pizza', 'leftovers'), give title alone."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "meal_plan_id": {"type": "integer"},
+            "plan_date": {"type": "string", "description": "ISO date."},
+            "meal_type": {"type": "string", "enum": ["breakfast", "lunch", "dinner"]},
+            "title": {"type": "string"},
+            "recipe_id": {"type": "integer", "description": "A saved recipe, if this meal is one."},
+            "servings_planned": {"type": "integer"},
+            "source": {
+                "type": "string",
+                "enum": ["fresh", "frozen_substitute", "frozen_premade", "batch_frozen", "leftover", "eating_out"],
+                "description": "Defaults to 'fresh'. Use frozen_substitute when swapping a fresh ingredient for frozen to cut delivery trips — always propose that swap and get his OK in conversation first, never set it silently.",
+            },
+            "notes": {"type": "string"},
+        }, "required": ["meal_plan_id", "plan_date", "meal_type", "title"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_meal_plan",
+        "description": "Show a meal plan and everything planned in it so far. Omit meal_plan_id for the current draft/active plan.",
+        "parameters": {"type": "object", "properties": {
+            "meal_plan_id": {"type": "integer"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "remove_meal_plan_entry",
+        "description": "Remove one planned meal (he changed his mind about that night, or it was a mistake).",
+        "parameters": {"type": "object", "properties": {
+            "entry_id": {"type": "integer"},
+        }, "required": ["entry_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "finalize_meal_plan",
+        "description": (
+            "Lock in a meal plan once he's happy with it — call this when the planning "
+            "conversation reaches a clear 'that's the plan.' Marks it active rather than "
+            "draft; later steps (the shopping list, shopping-day scheduling) key off a plan "
+            "actually being finalized."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "meal_plan_id": {"type": "integer"},
+        }, "required": ["meal_plan_id"]},
+    }},
 ]
 
 KITCHEN_TOOLS = KITCHEN_ALWAYS_TOOLS + KITCHEN_GATED_TOOLS
@@ -267,6 +344,7 @@ KITCHEN_KEYWORDS = [
     "inventory", "pantry", "stock", "on hand", "kroger",
     "shopping list", "grocery list", "makeable", "made this", "made the",
     "display", "show me the", "pull up",
+    "meal plan", "meal planning", "plan meals", "pay period", "payday",
 ]
 
 # Which physical screen a location name resolves to. Not a generic location registry --
@@ -315,6 +393,22 @@ KITCHEN_SYSTEM_NOTE = (
     " display_recipe puts a saved recipe's ingredients and steps up on the kitchen "
     "screen — use it whenever he wants to see a recipe while cooking, whether he's "
     "standing at that screen or asking from anywhere else in the house."
+    " Meal planning is meant to be an actual back-and-forth conversation, not a form to "
+    "fill in silently — talk it through with him rather than dumping a finished plan. "
+    "Start with get_pay_period so the date range is grounded in his real pay schedule "
+    "rather than a guess, confirming which period he means if it's ambiguous. Use "
+    "check_kroger_deals on the specific ingredients/categories you're actually "
+    "considering to steer toward what's cheap right now — it can only answer for terms "
+    "you give it, never browse a general deals list, so don't imply you checked "
+    "anything broader than that. He has ADHD: favor low-prep, low-decision-fatigue "
+    "meals (few steps, minimal simultaneous multitasking, things that reheat or batch "
+    "well) over anything demanding a lot of attention-switching, and ask about his "
+    "energy/appetite patterns rather than assuming — frozen convenience meals (pizza, "
+    "fish sticks, fries) are entirely legitimate plan entries, not a fallback to "
+    "apologize for. Build the plan with start_meal_plan/add_meal_plan_entry/"
+    "list_meal_plan/remove_meal_plan_entry as you go, and only call finalize_meal_plan "
+    "once he's actually said the plan looks good — don't finalize on your own judgment "
+    "that it's probably done."
 )
 
 
@@ -418,5 +512,38 @@ def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict, kroge
             "ingredients": recipe["ingredients"], "steps": recipe["steps"],
         })
         return {"ok": True, "device_id": device_id, "title": recipe["title"]}
+
+    if name == "get_pay_period":
+        return {"pay_periods": meal_plan_db.get_pay_periods(db_path, owner_user_id)}
+
+    if name == "start_meal_plan":
+        meal_plan_id = meal_plan_db.create_meal_plan(
+            db_path, owner_user_id, arguments["period_start"], arguments["period_end"],
+            max_deliveries=arguments.get("max_deliveries", 2), notes=arguments.get("notes"))
+        return {"ok": True, "meal_plan_id": meal_plan_id}
+
+    if name == "add_meal_plan_entry":
+        entry = meal_plan_db.add_meal_plan_entry(
+            db_path, owner_user_id, arguments["meal_plan_id"], arguments["plan_date"], arguments["meal_type"],
+            arguments["title"], recipe_id=arguments.get("recipe_id"),
+            servings_planned=arguments.get("servings_planned"), source=arguments.get("source", "fresh"),
+            notes=arguments.get("notes"))
+        if entry is None:
+            return {"error": "meal plan not found"}
+        return {"ok": True, "entry": entry}
+
+    if name == "list_meal_plan":
+        result = meal_plan_db.get_meal_plan_with_entries(db_path, owner_user_id, arguments.get("meal_plan_id"))
+        if result is None:
+            return {"error": "no meal plan found"}
+        return result
+
+    if name == "remove_meal_plan_entry":
+        ok = meal_plan_db.remove_meal_plan_entry(db_path, owner_user_id, arguments["entry_id"])
+        return {"ok": ok} if ok else {"error": "entry not found"}
+
+    if name == "finalize_meal_plan":
+        ok = meal_plan_db.finalize_meal_plan(db_path, owner_user_id, arguments["meal_plan_id"])
+        return {"ok": ok} if ok else {"error": "meal plan not found"}
 
     return {"error": f"unknown kitchen tool {name}"}

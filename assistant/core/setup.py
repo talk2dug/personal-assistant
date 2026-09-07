@@ -21,7 +21,7 @@ from .git_ops import GitOpsClient
 from .git_tools import GIT_TOOLS
 from .personal_tools import PersonalClient
 from .home_assistant_client import HomeAssistantClient
-from .kroger_recipe import RECIPE_TOOL_SCHEMA, KrogerRecipeClient
+from .kroger_recipe import DEAL_TOOL_SCHEMA, RECIPE_TOOL_SCHEMA, KrogerRecipeClient
 from .mail_client import MailClient
 from .mcp_client import MCPClient
 from .mcp_stdio_client import StdioMCPClient
@@ -447,10 +447,11 @@ def build_kroger_context(cfg) -> KrogerContext | None:
     except Exception as e:
         logger.warning("Kroger MCP server failed to start (%s) — disabled this session", e)
         return None
-    # add_recipe_to_cart is synthetic (Jarvis's own, not part of kroger-mcp's catalog) --
-    # see kroger_recipe.py for why matching a recipe's ingredients to real products is a
-    # judgment call that belongs here rather than in the vendored server.
-    tools = tools + [RECIPE_TOOL_SCHEMA]
+    # add_recipe_to_cart and check_kroger_deals are both synthetic (Jarvis's own, not part
+    # of kroger-mcp's catalog) -- see kroger_recipe.py for why matching ingredients to real
+    # products, and checking what's on sale, are judgment calls that belong here rather
+    # than in the vendored server.
+    tools = tools + [RECIPE_TOOL_SCHEMA, DEAL_TOOL_SCHEMA]
     client = KrogerRecipeClient(raw_client)
     logger.info("Kroger: %d tools discovered, %d gated as sensitive (cart/order writes)",
                len(tools), len(KROGER_SENSITIVE_TOOLS))

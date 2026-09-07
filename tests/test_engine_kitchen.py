@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from assistant.core import db, engine, kitchen_db
+from assistant.core import db, engine, kitchen_db, meal_plan_db
 from assistant.core.kitchen_tools import KITCHEN_ALWAYS_TOOLS, KITCHEN_GATED_TOOLS
 from assistant.core.personal_tools import PersonalClient
 
@@ -19,6 +19,7 @@ def db_path(tmp_path):
     path = str(tmp_path / "test.db")
     db.init_db(path)
     kitchen_db.init_kitchen_db(path)
+    meal_plan_db.init_meal_plan_db(path)
     return path
 
 
@@ -316,6 +317,91 @@ def test_display_recipe_unknown_location_reports_an_error(db_path, owner_id):
 
     engine.handle_message(db_path, llm, owner_id, "show the pancakes recipe in the garage", personal=personal)
     assert kitchen_db.pop_pending_recipe_view(db_path, "laptop1") is None
+
+
+def test_meal_plan_full_flow_via_chat(db_path, owner_id):
+    db.create_manual_recurring_charge(
+        db_path, owner_id, "Paycheck (15th)", 4000.0, "income", "monthly_on_day", "2026-09-15")
+    db.create_manual_recurring_charge(
+        db_path, owner_id, "Paycheck (last day)", 4000.0, "income", "monthly_on_last_day", "2026-09-30")
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "get_pay_period", "arguments": {}}}
+        ]},
+        {"role": "assistant", "content": "You're in the Sep 15 - Sep 30 pay period. Want to plan meals for it?"},
+    ])
+    reply = engine.handle_message(db_path, llm, owner_id, "let's plan meals for this pay period", personal=personal)
+    assert "Sep" in reply
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "start_meal_plan", "arguments": {
+                "period_start": "2026-09-15", "period_end": "2026-09-30",
+            }}}
+        ]},
+        {"role": "assistant", "content": "Started the plan."},
+    ])
+    engine.handle_message(db_path, llm, owner_id, "start the plan", personal=personal)
+    plan = meal_plan_db.get_current_meal_plan(db_path, owner_id)
+    assert plan["status"] == "draft"
+    assert plan["max_deliveries"] == 2
+
+    plan_id = plan["id"]
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "add_meal_plan_entry", "arguments": {
+                "meal_plan_id": plan_id, "plan_date": "2026-09-16", "meal_type": "dinner",
+                "title": "Weeknight Chili", "servings_planned": 4,
+            }}}
+        ]},
+        {"role": "assistant", "content": "Chili's on for the 16th."},
+    ])
+    engine.handle_message(db_path, llm, owner_id, "let's do chili on the 16th", personal=personal)
+    entries = meal_plan_db.list_meal_plan_entries(db_path, owner_id, plan_id)
+    assert entries[0]["title"] == "Weeknight Chili"
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "list_meal_plan", "arguments": {}}}
+        ]},
+        {"role": "assistant", "content": "So far you've got chili on the 16th."},
+    ])
+    assert engine.handle_message(
+        db_path, llm, owner_id, "what's the plan look like so far", personal=personal,
+    ) == "So far you've got chili on the 16th."
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "finalize_meal_plan", "arguments": {"meal_plan_id": plan_id}}}
+        ]},
+        {"role": "assistant", "content": "Locked it in."},
+    ])
+    engine.handle_message(db_path, llm, owner_id, "that's the plan, lock it in", personal=personal)
+    assert meal_plan_db.get_meal_plan(db_path, owner_id, plan_id)["status"] == "active"
+
+
+def test_remove_meal_plan_entry_via_chat(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    entry = meal_plan_db.add_meal_plan_entry(db_path, owner_id, plan_id, "2026-09-16", "dinner", "Chili")
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "remove_meal_plan_entry", "arguments": {"entry_id": entry["id"]}}}
+        ]},
+        {"role": "assistant", "content": "Took chili off the 16th."},
+    ])
+    engine.handle_message(db_path, llm, owner_id, "actually skip the chili on the 16th", personal=personal)
+    assert meal_plan_db.list_meal_plan_entries(db_path, owner_id, plan_id) == []
+
+
+def test_payday_keyword_alone_gates_in_meal_plan_tools(db_path, owner_id):
+    personal = make_personal(db_path, owner_id)
+    names = {t["function"]["name"] for t in engine.select_tools("when's my next payday", personal=personal)}
+    assert "get_pay_period" in names
+    assert "start_meal_plan" in names
 
 
 def test_kitchen_tools_absent_when_no_personal_context(db_path, owner_id):

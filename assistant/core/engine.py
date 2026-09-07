@@ -414,7 +414,10 @@ KROGER_CATEGORY_KEYWORDS = {
     "shopping": ["kroger", "grocery", "groceries", "product", "cart", "shopping list"],
     "store": ["store hours", "nearest store", "store location", "which kroger"],
     "auth": ["authenticate", "authorize", "log into kroger", "connect my kroger", "kroger account"],
-    "recipe": ["make", "cook", "cooking", "recipe", "dinner", "ingredients", "bake", "baking"],
+    "recipe": [
+        "make", "cook", "cooking", "recipe", "dinner", "ingredients", "bake", "baking",
+        "meal plan", "meal planning", "plan meals", "pay period", "payday",
+    ],
 }
 
 # Search/store lookup covers most grocery questions without the model needing to guess

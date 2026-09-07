@@ -102,9 +102,71 @@ def match_ingredients(raw_client, ingredients: list[str], location_id: str | Non
     }
 
 
+DEAL_TOOL_NAME = "check_kroger_deals"
+
+DEAL_TOOL_SCHEMA = {"type": "function", "function": {
+    "name": DEAL_TOOL_NAME,
+    "description": (
+        "Check whether specific grocery items are currently on sale at Kroger — use this "
+        "while meal planning to steer toward what's actually cheap right now. There is no "
+        "'what's on sale this week' browse in Kroger's API: this can only answer for terms "
+        "you actually supply (e.g. 'chicken breast', 'ground beef', 'broccoli'), never a "
+        "general deals list, so feed it terms relevant to what he might buy rather than a "
+        "bare/generic query. An empty result means nothing you asked about happens to be on "
+        "sale right now — that's a normal outcome, not a failure, and is worth saying "
+        "plainly rather than implying you checked something broader than you did."
+    ),
+    "parameters": {"type": "object", "properties": {
+        "terms": {
+            "type": "array", "items": {"type": "string"},
+            "description": "Grocery search terms to check, e.g. ['chicken breast', 'broccoli', 'pasta'].",
+        },
+    }, "required": ["terms"]},
+}}
+
+
+def check_deals(raw_client, terms: list[str], location_id: str | None = None) -> dict:
+    """One bulk_search_products call across the given terms, returns only the results
+    where pricing.on_sale is true. Reads each result's own "term" field back (rather than
+    zip-ing positionally against the input, the way match_ingredients above does) since
+    bulk_search_products already echoes it per-result -- more robust if the server ever
+    reorders or drops a failed search."""
+    terms = [t.strip() for t in terms if t and t.strip()][:25]
+    if not terms:
+        return {"deals": [], "error": "no search terms provided"}
+
+    searches = [{"term": t, "limit": 5} for t in terms]
+    args = {"searches": searches}
+    if location_id:
+        args["location_id"] = location_id
+
+    try:
+        payload = _parse_content(raw_client.call_tool("bulk_search_products", args))
+    except Exception as e:
+        return {"deals": [], "error": f"search failed: {e}"}
+
+    deals = []
+    for result in payload.get("results") or []:
+        for product in result.get("data") or []:
+            pricing = product.get("pricing") or {}
+            if not pricing.get("on_sale"):
+                continue
+            deals.append({
+                "term": result.get("term"),
+                "product_id": product.get("product_id"),
+                "description": product.get("description"),
+                "brand": product.get("brand"),
+                "regular_price": pricing.get("formatted_regular"),
+                "sale_price": pricing.get("formatted_sale"),
+            })
+
+    return {"deals": deals}
+
+
 class KrogerRecipeClient:
-    """Wraps the real Kroger stdio client to add the one synthetic add_recipe_to_cart
-    tool. Every other tool name passes straight through untouched."""
+    """Wraps the real Kroger stdio client to add the two synthetic tools above
+    (add_recipe_to_cart, check_kroger_deals). Every other tool name passes straight
+    through untouched."""
 
     def __init__(self, raw):
         self._raw = raw
@@ -113,10 +175,12 @@ class KrogerRecipeClient:
         return self._raw.list_tools()
 
     def call_tool(self, name: str, arguments: dict) -> dict:
-        if name != RECIPE_TOOL_NAME:
-            return self._raw.call_tool(name, arguments)
-        result = match_ingredients(self._raw, arguments.get("ingredients") or [])
-        result["dish"] = arguments.get("dish")
-        if arguments.get("servings"):
-            result["servings"] = arguments["servings"]
-        return result
+        if name == RECIPE_TOOL_NAME:
+            result = match_ingredients(self._raw, arguments.get("ingredients") or [])
+            result["dish"] = arguments.get("dish")
+            if arguments.get("servings"):
+                result["servings"] = arguments["servings"]
+            return result
+        if name == DEAL_TOOL_NAME:
+            return check_deals(self._raw, arguments.get("terms") or [])
+        return self._raw.call_tool(name, arguments)

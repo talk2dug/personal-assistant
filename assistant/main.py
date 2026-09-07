@@ -1,16 +1,15 @@
-﻿"""Entrypoint: wires together the db, LLM client, scheduler, and Telegram transport."""
+"""Entrypoint: wires together the db, LLM client, scheduler, and Telegram transport."""
 import asyncio
 import logging
 
 from .config import load_config
-from .core import business_db, db, vision
+from .core import db
 from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
-    build_era_context, build_git_ops_context, build_gpu_bridge, build_notifier,
-    build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
-    build_mail_context, build_obsidian_context, build_personal_context, build_phone_context,
-    build_recipe_context, build_ticketmaster_context,
+    build_era_context, build_gpu_bridge, build_notifier, build_home_assistant_context, build_kroger_context,
+    build_letterstream_context, build_llm, build_mail_context, build_obsidian_context,
+    build_personal_context, build_phone_context, build_ticketmaster_context,
 )
 from .transports import telegram_bot
 
@@ -23,13 +22,6 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     cfg = load_config()
     db.init_db(cfg.db_path)
-    # review_items is the Review page's single decision queue -- pending_actions (Kroger/
-    # CCXT/mail/HA/git confirmations) get a linked row there regardless of whether the
-    # business feature itself is configured, so this can't stay gated behind that flag.
-    business_db.init_business_db(cfg.db_path)
-    # show_camera/list_cameras/add_camera are always-on tools (see engine.py's CAMERA_TOOLS),
-    # not behind a build_*_context flag, so the cameras table must exist unconditionally too.
-    vision.init_vision_db(cfg.db_path)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)
 
@@ -44,17 +36,12 @@ def main() -> None:
     home_assistant = build_home_assistant_context(cfg)
     bridge = build_gpu_bridge(cfg)
     business = build_business_context(cfg, owner_row["id"] if owner_row else None, llm=llm, bridge=bridge)
+    personal = build_personal_context(cfg, owner_row["id"] if owner_row else None)
     airbnb = build_airbnb_context(cfg)
     ticketmaster = build_ticketmaster_context(cfg)
     kroger = build_kroger_context(cfg)
     ccxt = build_ccxt_context(cfg)
-    # Built before Personal so its LetterStreamTools client can be handed into
-    # PersonalClient for the credit dispute tracker's draft_dispute_letter/
-    # track_dispute_letter tools -- see build_personal_context's docstring.
     letterstream = build_letterstream_context(cfg)
-    personal = build_personal_context(cfg, owner_row["id"] if owner_row else None, letterstream=letterstream)
-    git_ops = build_git_ops_context(cfg)
-    recipe = build_recipe_context(cfg)
     # The bridge worker lives in this process alongside the scheduler — one place owns
     # all background work, so there's exactly one queue draining the GPU.
     if bridge is not None:
@@ -67,7 +54,6 @@ def main() -> None:
         cfg.telegram_bot_token, cfg.db_path, llm, cfg.timezone, era=era, calendar=calendar, phone=phone, mail=mail,
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops, recipe=recipe,
     )
     # Routed through the user's notification policy: reminders follow the same
     # 'phone when I'm out' preference as anything else Jarvis sends unprompted.
@@ -100,7 +86,10 @@ def main() -> None:
         market_track_limit=cfg.market_track_limit,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
         personal=personal, personal_research_minutes=cfg.personal_research_interval_minutes,
-        git_ops=git_ops, recipe=recipe,
+        # Autonomous inbox triage: scores and moves likely junk out of INBOX on an
+        # interval, independent of business_agents_enabled (see scheduler.py's
+        # docstring for why this isn't gated behind that switch).
+        mail_junk_scan_interval_seconds=cfg.mail_junk_scan_interval_seconds,
     )
 
     logger.info("Jarvis core starting, polling Telegram...")
@@ -109,6 +98,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

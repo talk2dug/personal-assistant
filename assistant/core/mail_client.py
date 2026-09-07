@@ -4,6 +4,10 @@ app-specific passwords authenticate the whole Apple ID, not a single protocol, s
 new credential is needed. Exposes call_tool(name, arguments) so engine.py can treat
 this exactly like Era/phone's MCP-style tool contexts, even though nothing here
 actually goes over MCP.
+
+Also owns junk/spam triage (scan_inbox_for_junk/flag_as_junk): scoring itself lives in
+junk_filter.py (kept pure and separately testable), this module is just the IMAP side
+-- listing candidate messages and moving the ones that score high enough into Junk.
 """
 import email
 import imaplib
@@ -12,8 +16,15 @@ import smtplib
 from email.header import decode_header
 from email.message import EmailMessage
 
+from . import junk_filter
+
 IMAP_HOST = "imap.mail.me.com"
 SMTP_HOST = "smtp.mail.me.com"
+
+# Where flagged junk goes. "Junk" is the folder iCloud/Mail.app itself uses, so a
+# message moved here also disappears from every other IMAP client's inbox and shows up
+# wherever the owner already looks for spam -- no new folder concept to teach him.
+JUNK_FOLDER = "Junk"
 
 
 def _decode(value: str | None) -> str:
@@ -54,9 +65,13 @@ def _extract_body(msg: "email.message.Message", max_chars: int) -> str:
 
 
 class MailClient:
-    def __init__(self, apple_id: str, app_password: str):
+    def __init__(self, apple_id: str, app_password: str, junk_threshold: float = junk_filter.DEFAULT_THRESHOLD):
         self.apple_id = apple_id
         self.app_password = app_password
+        # Configurable rather than hardcoded to junk_filter.DEFAULT_THRESHOLD directly,
+        # so a deployment that's getting false positives/negatives can tune it without
+        # a code change (see config.py's mail_junk_score_threshold).
+        self.junk_threshold = junk_threshold
 
     def _imap(self) -> imaplib.IMAP4_SSL:
         conn = imaplib.IMAP4_SSL(IMAP_HOST)
@@ -129,6 +144,83 @@ class MailClient:
             smtp.send_message(message)
         return {"ok": True, "to": to, "subject": subject}
 
+    def flag_as_junk(self, uid: str, folder: str = "INBOX", target_folder: str = JUNK_FOLDER) -> dict:
+        """Moves a single message into the Junk folder: IMAP COPY there, then mark the
+        original \\Deleted and EXPUNGE. This is the same COPY+delete mechanism Mail.app
+        itself performs for "Move to Junk" -- there's no native IMAP MOVE this library
+        needs, and doing it as copy-then-delete means a failed copy never loses the
+        original message."""
+        conn = self._imap()
+        try:
+            conn.select(folder)
+            typ, _ = conn.uid("copy", uid, target_folder)
+            if typ != "OK":
+                return {"ok": False, "uid": uid, "error": f"could not copy uid {uid} to {target_folder}"}
+            conn.uid("store", uid, "+FLAGS", "(\\Deleted)")
+            conn.expunge()
+            return {"ok": True, "uid": uid, "moved_to": target_folder}
+        finally:
+            conn.logout()
+
+    def scan_inbox_for_junk(
+        self, folder: str = "INBOX", limit: int = 25, only_unread: bool = True,
+        threshold: float | None = None, dry_run: bool = False,
+    ) -> dict:
+        """One autonomous triage pass: scores the most recent incoming mail with
+        junk_filter and moves anything over threshold into Junk.
+
+        Limited to UNSEEN (unread) messages by default -- this is meant to run
+        repeatedly in the background (see scheduler.py), and re-scoring the same
+        already-read mail on every tick would be wasted IMAP round trips for no benefit.
+        dry_run=True scores without moving anything, useful for tuning the threshold or
+        testing from chat before trusting it to act on its own.
+        """
+        threshold = junk_filter.DEFAULT_THRESHOLD if threshold is None else threshold
+        conn = self._imap()
+        try:
+            conn.select(folder, readonly=True)
+            search_key = "UNSEEN" if only_unread else "ALL"
+            _, data = conn.uid("search", None, search_key)
+            uids = data[0].split()[-limit:][::-1] if data and data[0] else []
+
+            results = []
+            for uid in uids:
+                _, raw = conn.uid("fetch", uid, "(BODY.PEEK[])")
+                if not raw or raw[0] is None:
+                    continue
+                msg = email.message_from_bytes(raw[0][1])
+                sender = _decode(msg.get("From"))
+                subject = _decode(msg.get("Subject"))
+                # A couple thousand characters is plenty for the keyword/link checks
+                # junk_filter does -- no need to pull a whole newsletter body over IMAP.
+                body = _extract_body(msg, 2000)
+                verdict = junk_filter.score_message(sender, subject, body)
+                uid_str = uid.decode() if isinstance(uid, bytes) else uid
+                results.append({
+                    "uid": uid_str, "from": sender, "subject": subject,
+                    "score": verdict["score"], "reasons": verdict["reasons"],
+                    "flagged": verdict["score"] >= threshold,
+                })
+        finally:
+            conn.logout()
+
+        moved = 0
+        if not dry_run:
+            for r in results:
+                if not r["flagged"]:
+                    continue
+                outcome = self.flag_as_junk(r["uid"], folder=folder)
+                r["moved"] = outcome.get("ok", False)
+                if outcome.get("ok"):
+                    moved += 1
+
+        return {
+            "scanned": len(results),
+            "flagged": sum(1 for r in results if r["flagged"]),
+            "moved": moved,
+            "results": results,
+        }
+
     def call_tool(self, name: str, arguments: dict) -> dict:
         if name == "list_emails":
             return self.list_recent(folder=arguments.get("folder", "INBOX"), limit=arguments.get("limit", 10))
@@ -140,4 +232,12 @@ class MailClient:
             return self.read_message(arguments["uid"], folder=arguments.get("folder", "INBOX"))
         if name == "send_email":
             return self.send(arguments["to"], arguments["subject"], arguments["body"])
+        if name == "scan_inbox_for_junk":
+            return self.scan_inbox_for_junk(
+                folder=arguments.get("folder", "INBOX"), limit=arguments.get("limit", 25),
+                only_unread=arguments.get("only_unread", True), threshold=arguments.get("threshold"),
+                dry_run=arguments.get("dry_run", False),
+            )
+        if name == "flag_email_as_junk":
+            return self.flag_as_junk(arguments["uid"], folder=arguments.get("folder", "INBOX"))
         return {"error": f"unknown mail tool {name}"}

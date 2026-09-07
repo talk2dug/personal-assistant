@@ -19,11 +19,27 @@ def stream_camera(camera_key: str, request: Request):
     if camera["kind"] != "mjpeg":
         raise HTTPException(501, "this camera type does not support live web streaming yet")
 
+    # A camera's stored url is its base (uStreamer's own root serves an HTML preview
+    # page, not video -- the actual multipart stream lives at /stream, same convention
+    # vision.py's snapshot fetch already follows for /snapshot).
+    base = camera["url"].rstrip("/")
+    stream_url = base if base.endswith("/stream") else base + "/stream"
+
+    try:
+        upstream = urllib.request.urlopen(stream_url, timeout=10)
+    except Exception as e:
+        raise HTTPException(502, f"camera unreachable: {e}")
+
+    # uStreamer's boundary token isn't a fixed value we can hardcode -- forward its own
+    # Content-Type verbatim so the boundary the browser parses on actually matches the
+    # one the bytes use, or every part silently fails to split.
+    content_type = upstream.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+
     def chunks():
         try:
-            with urllib.request.urlopen(camera["url"], timeout=10) as response:
+            with upstream:
                 while True:
-                    chunk = response.read(64 * 1024)
+                    chunk = upstream.read(64 * 1024)
                     if not chunk:
                         break
                     yield chunk
@@ -32,6 +48,6 @@ def stream_camera(camera_key: str, request: Request):
 
     return StreamingResponse(
         chunks(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
+        media_type=content_type,
         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
     )

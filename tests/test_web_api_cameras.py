@@ -70,19 +70,70 @@ def test_rtsp_camera_is_not_yet_streamable(client, cfg):
     assert resp.status_code == 501
 
 
-def test_mjpeg_camera_proxies_the_upstream_bytes(client, cfg, monkeypatch):
+class FakeUpstream:
+    """Stands in for the object urllib.request.urlopen returns: a context manager whose
+    body IS the readable (not one level down, the way a plain BytesIO would need
+    wrapping) -- real uStreamer's own boundary token (boundarydonotcross, not the more
+    obvious 'frame') is exactly what a real bug here looked like, so this fake carries a
+    distinct, deliberately-unlikely-to-be-hardcoded boundary too."""
+
+    def __init__(self, body=b"--realboundary\r\nfake jpeg bytes\r\n", content_type=None):
+        self._buf = BytesIO(body)
+        self.headers = {
+            "Content-Type": content_type or "multipart/x-mixed-replace;boundary=realboundary",
+        }
+
+    def read(self, n):
+        return self._buf.read(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_mjpeg_camera_proxies_the_upstream_bytes_and_boundary(client, cfg, monkeypatch):
     vision.add_camera(cfg.db_path, key="kitchen", name="Kitchen", url="http://192.168.0.135:8081/", location="kitchen")
+    captured_url = {}
 
-    class FakeUpstream:
-        def __enter__(self):
-            return BytesIO(b"--frame\r\nfake jpeg bytes\r\n")
+    def fake_urlopen(url, timeout=10):
+        captured_url["url"] = url
+        return FakeUpstream()
 
-        def __exit__(self, *exc):
-            return False
-
-    monkeypatch.setattr(cameras.urllib.request, "urlopen", lambda url, timeout=10: FakeUpstream())
+    monkeypatch.setattr(cameras.urllib.request, "urlopen", fake_urlopen)
 
     resp = client.get("/api/cameras/kitchen/stream")
     assert resp.status_code == 200
-    assert resp.headers["content-type"] == "multipart/x-mixed-replace; boundary=frame"
-    assert resp.content == b"--frame\r\nfake jpeg bytes\r\n"
+    # uStreamer's own root ("/") serves an HTML preview page, not video -- the real
+    # stream lives at /stream, and the boundary declared here must be the upstream's
+    # actual one or a browser can't split the multipart body into frames at all.
+    assert captured_url["url"] == "http://192.168.0.135:8081/stream"
+    assert resp.headers["content-type"] == "multipart/x-mixed-replace;boundary=realboundary"
+    assert resp.content == b"--realboundary\r\nfake jpeg bytes\r\n"
+
+
+def test_stream_url_not_double_suffixed_if_already_present(client, cfg, monkeypatch):
+    vision.add_camera(cfg.db_path, key="kitchen", name="Kitchen", url="http://192.168.0.135:8081/stream", location="kitchen")
+    captured_url = {}
+
+    def fake_urlopen(url, timeout=10):
+        captured_url["url"] = url
+        return FakeUpstream()
+
+    monkeypatch.setattr(cameras.urllib.request, "urlopen", fake_urlopen)
+
+    client.get("/api/cameras/kitchen/stream")
+    assert captured_url["url"] == "http://192.168.0.135:8081/stream"
+
+
+def test_unreachable_camera_is_a_bad_gateway_not_a_silent_200(client, cfg, monkeypatch):
+    vision.add_camera(cfg.db_path, key="kitchen", name="Kitchen", url="http://192.168.0.135:8081/", location="kitchen")
+
+    def fake_urlopen(url, timeout=10):
+        raise OSError("Connection refused")
+
+    monkeypatch.setattr(cameras.urllib.request, "urlopen", fake_urlopen)
+
+    resp = client.get("/api/cameras/kitchen/stream")
+    assert resp.status_code == 502

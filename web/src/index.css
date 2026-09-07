@@ -1894,6 +1894,38 @@ body::after {
   letter-spacing: 0.06em; text-transform: uppercase;
 }
 
+/* Tap-to-dismiss only, no auto-close timer (unlike the camera view's 20s) -- cooking
+   takes longer than a glance, so this stays up until he's done with it. */
+.device-recipe-view {
+  position: fixed; inset: 0; z-index: 10; background: var(--bg);
+  display: flex; flex-direction: column; padding: clamp(16px, 4vw, 40px);
+  overflow-y: auto; animation: hud-materialize 0.2s ease-out both;
+}
+.device-recipe-title {
+  font-family: var(--font-display); color: var(--cyan-bright);
+  text-shadow: 0 0 12px var(--cyan-glow); font-size: clamp(20px, 4vw, 32px);
+  letter-spacing: 0.04em; margin: 0 0 4px;
+}
+.device-recipe-servings { color: var(--text-dim); font-size: clamp(12px, 2vw, 16px); margin-bottom: 20px; }
+.device-recipe-columns { display: flex; flex-wrap: wrap; gap: clamp(20px, 4vw, 48px); flex: 1; }
+.device-recipe-ingredients { min-width: 220px; }
+.device-recipe-ingredients h4, .device-recipe-steps h4 {
+  font-family: var(--font-hud); text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-dim); font-size: clamp(11px, 1.6vw, 14px); margin: 0 0 10px;
+}
+.device-recipe-ingredients ul { list-style: none; margin: 0; padding: 0; }
+.device-recipe-ingredients li {
+  color: var(--text); font-size: clamp(14px, 2.2vw, 19px); padding: 5px 0;
+  border-bottom: 1px solid var(--border-dim);
+}
+.device-recipe-steps { flex: 2; min-width: 260px; }
+.device-recipe-steps ol { margin: 0; padding-left: 1.4em; }
+.device-recipe-steps li { color: var(--text); font-size: clamp(14px, 2.2vw, 19px); line-height: 1.6; padding: 6px 0; }
+.device-recipe-dismiss-hint {
+  text-align: center; color: var(--text-faint); font-size: 12px; letter-spacing: 0.08em;
+  text-transform: uppercase; padding-top: 16px;
+}
+
 /* ── Media catalogue ─────────────────────────────────────────────────────────
    A dense table by necessity: the whole point is comparing hundreds of folders
    at a glance, so rows are tight and the visual weight goes to size and content

@@ -237,6 +237,23 @@ KITCHEN_GATED_TOOLS = [
             "item": {"type": "string"},
         }, "required": ["item"]},
     }},
+    {"type": "function", "function": {
+        "name": "display_recipe",
+        "description": (
+            "Show a saved recipe's ingredients and steps on a kitchen screen — use "
+            "whenever he asks to see, pull up, or display a recipe while cooking, from "
+            "anywhere in the house (not just standing at the screen itself). Stays up "
+            "until he taps it away, so don't worry about timing this to when he'll "
+            "actually look."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "recipe_id": {"type": "integer"},
+            "location": {
+                "type": "string",
+                "description": "Which screen — defaults to 'kitchen', the only one wired up today.",
+            },
+        }, "required": ["recipe_id"]},
+    }},
 ]
 
 KITCHEN_TOOLS = KITCHEN_ALWAYS_TOOLS + KITCHEN_GATED_TOOLS
@@ -245,7 +262,15 @@ KITCHEN_KEYWORDS = [
     "recipe", "recipes", "cook", "cooking", "cooked", "kitchen", "ingredient", "ingredients",
     "inventory", "pantry", "stock", "on hand", "kroger",
     "shopping list", "grocery list", "makeable", "made this", "made the",
+    "display", "show me the", "pull up",
 ]
+
+# Which physical screen a location name resolves to. Not a generic location registry --
+# laptop1 (a Dell Latitude running jarvis-device.service as the kitchen voice terminal,
+# confirmed during the show_camera work) is the only kitchen screen that exists today, so
+# a hardcoded map is honest about the current setup rather than building generality for
+# devices that don't exist yet.
+KITCHEN_DEVICE_MAP = {"kitchen": "laptop1"}
 
 
 def _select_kitchen_gated_tools(user_text: str) -> list[dict]:
@@ -283,6 +308,9 @@ KITCHEN_SYSTEM_NOTE = (
     "directly, and mark_shopping_list_item_purchased crosses something off once he's "
     "bought it — pair that with record_purchase for the actual amount, since marking "
     "purchased only touches the list, not inventory."
+    " display_recipe puts a saved recipe's ingredients and steps up on the kitchen "
+    "screen — use it whenever he wants to see a recipe while cooking, whether he's "
+    "standing at that screen or asking from anywhere else in the house."
 )
 
 
@@ -372,5 +400,19 @@ def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict, kroge
     if name == "mark_shopping_list_item_purchased":
         ok = kitchen_db.mark_shopping_list_item_purchased(db_path, owner_user_id, arguments["item"])
         return {"ok": ok} if ok else {"error": "item not found (pending) on the shopping list"}
+
+    if name == "display_recipe":
+        recipe = kitchen_db.get_recipe(db_path, owner_user_id, arguments["recipe_id"])
+        if recipe is None:
+            return {"error": "recipe not found"}
+        location = (arguments.get("location") or "kitchen").strip().lower()
+        device_id = KITCHEN_DEVICE_MAP.get(location)
+        if device_id is None:
+            return {"error": f"no kitchen screen known for '{location}'"}
+        kitchen_db.set_pending_recipe_view(db_path, device_id, {
+            "recipe_id": recipe["id"], "title": recipe["title"], "servings": recipe.get("servings"),
+            "ingredients": recipe["ingredients"], "steps": recipe["steps"],
+        })
+        return {"ok": True, "device_id": device_id, "title": recipe["title"]}
 
     return {"error": f"unknown kitchen tool {name}"}

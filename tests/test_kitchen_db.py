@@ -443,3 +443,28 @@ def test_list_makeable_recipes_ignores_zero_quantity_inventory_rows(db_path, own
 
     assert result["makeable"] == []
     assert result["not_makeable"] == [{"recipe_id": recipe_id, "title": "Cereal", "missing_ingredients": ["milk"]}]
+
+
+# --- kitchen kiosk recipe display -------------------------------------------------
+
+def test_set_then_pop_pending_recipe_view(db_path, owner_id):
+    recipe = {"recipe_id": 1, "title": "Pancakes", "servings": 4, "ingredients": [], "steps": []}
+    kitchen_db.set_pending_recipe_view(db_path, "laptop1", recipe)
+
+    assert kitchen_db.pop_pending_recipe_view(db_path, "laptop1") == recipe
+    # Popped once, gone -- must not resurface on a later unrelated poll.
+    assert kitchen_db.pop_pending_recipe_view(db_path, "laptop1") is None
+
+
+def test_pending_recipe_view_is_scoped_per_device(db_path, owner_id):
+    kitchen_db.set_pending_recipe_view(db_path, "laptop1", {"title": "Pancakes"})
+
+    assert kitchen_db.pop_pending_recipe_view(db_path, "touch1") is None
+    assert kitchen_db.pop_pending_recipe_view(db_path, "laptop1") == {"title": "Pancakes"}
+
+
+def test_setting_a_second_pending_view_for_the_same_device_replaces_the_first(db_path, owner_id):
+    kitchen_db.set_pending_recipe_view(db_path, "laptop1", {"title": "Pancakes"})
+    kitchen_db.set_pending_recipe_view(db_path, "laptop1", {"title": "Chili"})
+
+    assert kitchen_db.pop_pending_recipe_view(db_path, "laptop1") == {"title": "Chili"}

@@ -271,6 +271,53 @@ def test_shopping_list_tools_via_chat(db_path, owner_id):
     assert kitchen_db.list_shopping_list(db_path, owner_id) == []
 
 
+def test_display_recipe_via_chat_queues_a_pending_view_for_the_kitchen_screen(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Pancakes", [{"name": "flour", "quantity": "2", "unit": "cups"}], ["Mix.", "Cook."])
+    personal = make_personal(db_path, owner_id)
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "display_recipe", "arguments": {"recipe_id": recipe_id}}}
+        ]},
+        {"role": "assistant", "content": "Pulled up the pancake recipe on the kitchen screen."},
+    ])
+
+    reply = engine.handle_message(db_path, llm, owner_id, "show the pancake recipe on the kitchen screen", personal=personal)
+
+    assert reply == "Pulled up the pancake recipe on the kitchen screen."
+    view = kitchen_db.pop_pending_recipe_view(db_path, "laptop1")
+    assert view["title"] == "Pancakes"
+    assert view["ingredients"] == [{"name": "flour", "quantity": "2", "unit": "cups"}]
+    assert view["steps"] == ["Mix.", "Cook."]
+
+
+def test_display_recipe_unknown_recipe_reports_an_error(db_path, owner_id):
+    personal = make_personal(db_path, owner_id)
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "display_recipe", "arguments": {"recipe_id": 999}}}
+        ]},
+        {"role": "assistant", "content": "I couldn't find that recipe, sir."},
+    ])
+
+    engine.handle_message(db_path, llm, owner_id, "show recipe 999 on the kitchen screen", personal=personal)
+    assert kitchen_db.pop_pending_recipe_view(db_path, "laptop1") is None
+
+
+def test_display_recipe_unknown_location_reports_an_error(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(db_path, owner_id, "Pancakes", [{"name": "flour"}], ["Mix."])
+    personal = make_personal(db_path, owner_id)
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "display_recipe", "arguments": {"recipe_id": recipe_id, "location": "garage"}}}
+        ]},
+        {"role": "assistant", "content": "There's no screen in the garage, sir."},
+    ])
+
+    engine.handle_message(db_path, llm, owner_id, "show the pancakes recipe in the garage", personal=personal)
+    assert kitchen_db.pop_pending_recipe_view(db_path, "laptop1") is None
+
+
 def test_kitchen_tools_absent_when_no_personal_context(db_path, owner_id):
     llm = FakeLLM([{"role": "assistant", "content": "Hi there"}])
     reply = engine.handle_message(db_path, llm, owner_id, "save this recipe: ...", personal=None)
@@ -294,6 +341,12 @@ def test_kroger_keyword_alone_gates_in_sync_kroger_purchases(db_path, owner_id):
     personal = make_personal(db_path, owner_id)
     names = {t["function"]["name"] for t in engine.select_tools("did my kroger order go through", personal=personal)}
     assert "sync_kroger_purchases" in names
+
+
+def test_pull_up_keyword_alone_gates_in_display_recipe(db_path, owner_id):
+    personal = make_personal(db_path, owner_id)
+    names = {t["function"]["name"] for t in engine.select_tools("pull up the chili recipe", personal=personal)}
+    assert "display_recipe" in names
 
 
 def test_unrouted_tools_include_full_kitchen_catalog(db_path, owner_id):

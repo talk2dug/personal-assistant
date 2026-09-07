@@ -104,6 +104,22 @@ CREATE TABLE IF NOT EXISTS shopping_list_items (
 -- constraint would incorrectly block that second case too.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shopping_list_pending_item
     ON shopping_list_items(owner_user_id, normalized_item) WHERE status = 'pending';
+
+-- A one-shot signal that display_recipe leaves for a kitchen kiosk screen to pick up --
+-- structural copy of vision.py's pending_camera_views, same reason (the agentic Claude
+-- CLI backend dispatches tool calls from a subprocess via routes/tools.py, not from
+-- inside the request handler building the chat response, so a DB row is the only thing
+-- both sides share). Keyed by device_id, not user_id, unlike pending_camera_views: a
+-- camera's target is always whichever device is mid-interaction with the person asking,
+-- but a recipe's target screen is an explicit argument ("show it on the kitchen
+-- screen") that can be a *different* device than the one issuing the command -- see
+-- routes/devices.py's _apply_pending_recipe_view for how both the target device's own
+-- /turn fast path and its regular polling both check this.
+CREATE TABLE IF NOT EXISTS pending_recipe_views (
+    device_id TEXT PRIMARY KEY,
+    recipe TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -655,3 +671,32 @@ def sync_kroger_orders(kroger_mcp_client, db_path: str, owner_user_id: int) -> d
         synced_orders += 1
 
     return {"ok": True, "synced_orders": synced_orders, "items_updated": items_updated}
+
+
+# --- kitchen kiosk recipe display -------------------------------------------------
+
+def set_pending_recipe_view(db_path: str, device_id: str, recipe: dict) -> None:
+    """Leaves display_recipe's result for routes/devices.py to deliver -- structural
+    copy of vision.set_pending_camera_view, see pending_recipe_views' schema comment
+    for why this can't just be a Python variable."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO pending_recipe_views (device_id, recipe, created_at) VALUES (?, ?, ?)
+               ON CONFLICT(device_id) DO UPDATE SET recipe = excluded.recipe, created_at = excluded.created_at""",
+            (device_id, json.dumps(recipe), _now()),
+        )
+        conn.commit()
+
+
+def pop_pending_recipe_view(db_path: str, device_id: str) -> dict | None:
+    """Reads and clears in one call -- a recipe should only ever pop up once per
+    display_recipe call, not resurface on the kiosk's next unrelated poll."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT recipe FROM pending_recipe_views WHERE device_id = ?", (device_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM pending_recipe_views WHERE device_id = ?", (device_id,))
+        conn.commit()
+        return json.loads(row["recipe"])

@@ -328,3 +328,49 @@ def test_purchases_from_receipt_returns_an_unsaved_draft(cfg):
 
     # Nothing was committed -- POST /purchases (already covered above) is the commit step.
     assert client.get("/api/kitchen/inventory").json() == []
+
+
+# --- shopping list ---------------------------------------------------------------
+
+def test_shopping_list_requires_login(cfg):
+    app = create_app(cfg, FakeLLM(), era=None, calendar=None, static_dir=None)
+    assert TestClient(app).get("/api/kitchen/shopping-list").status_code == 401
+
+
+def test_add_list_and_remove_shopping_list_item(client):
+    resp = client.post("/api/kitchen/shopping-list", json={"item": "paper towels", "quantity_hint": "2 rolls"})
+    assert resp.status_code == 200
+    assert resp.json()["quantity_hint"] == "2 rolls"
+
+    listed = client.get("/api/kitchen/shopping-list").json()
+    assert len(listed) == 1 and listed[0]["item"] == "paper towels"
+
+    assert client.delete("/api/kitchen/shopping-list/paper%20towels").status_code == 200
+    assert client.get("/api/kitchen/shopping-list").json() == []
+
+
+def test_shopping_list_add_requires_item(client):
+    assert client.post("/api/kitchen/shopping-list", json={}).status_code == 400
+
+
+def test_mark_shopping_list_item_purchased(client):
+    client.post("/api/kitchen/shopping-list", json={"item": "milk"})
+
+    resp = client.post("/api/kitchen/shopping-list/milk/purchased")
+    assert resp.status_code == 200
+    assert client.get("/api/kitchen/shopping-list").json() == []
+    assert client.get("/api/kitchen/shopping-list?status=purchased").json()[0]["item"] == "milk"
+
+
+def test_remove_or_mark_purchased_on_a_missing_item_is_404(client):
+    assert client.delete("/api/kitchen/shopping-list/nonexistent").status_code == 404
+    assert client.post("/api/kitchen/shopping-list/nonexistent/purchased").status_code == 404
+
+
+def test_low_stock_write_auto_populates_the_shopping_list(client):
+    client.post("/api/kitchen/inventory", json={"item": "eggs", "quantity": 0})
+
+    listed = client.get("/api/kitchen/shopping-list").json()
+    assert len(listed) == 1
+    assert listed[0]["item"] == "eggs"
+    assert listed[0]["reason"] == "low_stock_auto"

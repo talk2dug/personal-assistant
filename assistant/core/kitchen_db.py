@@ -80,6 +80,30 @@ CREATE TABLE IF NOT EXISTS kroger_synced_orders (
     owner_user_id INTEGER NOT NULL,
     synced_at TEXT NOT NULL
 );
+
+-- Populated two ways: manually (add_to_shopping_list) and automatically, whenever
+-- upsert_inventory_item's own write leaves an item low/out (see _flag_low_stock) --
+-- every write path (manual, receipt, Kroger sync, cook-deduction) already funnels
+-- through that one function, so the list populates itself from whichever moment
+-- actually caused the shortage, with no separate periodic scan needed.
+CREATE TABLE IF NOT EXISTS shopping_list_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    item TEXT NOT NULL,
+    normalized_item TEXT NOT NULL,
+    quantity_hint TEXT,      -- free text, e.g. "a dozen" or "2 more" -- not math-checked
+    reason TEXT NOT NULL CHECK (reason IN ('low_stock_auto', 'manual')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'purchased', 'removed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+-- Partial (not table-level) unique index: repeated "still low on milk" auto-flags or a
+-- manual add for something already queued must never create a second pending row for
+-- the same item, but a *past* purchased/removed row must never block re-flagging it
+-- after it goes low again later -- a plain UNIQUE(owner_user_id, normalized_item)
+-- constraint would incorrectly block that second case too.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shopping_list_pending_item
+    ON shopping_list_items(owner_user_id, normalized_item) WHERE status = 'pending';
 """
 
 
@@ -195,6 +219,26 @@ def _inventory_row(row: dict) -> dict:
     return row
 
 
+def _flag_low_stock(db_path: str, owner_user_id: int, item: str, status: str) -> None:
+    """Auto-queues item on the shopping list when a write leaves it low/out -- called from
+    upsert_inventory_item itself so every write path (manual, receipt, Kroger sync,
+    cook-deduction) gets this for free, with no separate periodic scan. INSERT OR IGNORE
+    against idx_shopping_list_pending_item means a repeat shortfall on an
+    already-queued item is a silent no-op, never a duplicate pending row."""
+    if status not in ("low", "out"):
+        return
+    normalized = normalize_lead_name(item)
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO shopping_list_items
+                   (owner_user_id, item, normalized_item, reason, status, created_at, updated_at)
+               VALUES (?, ?, ?, 'low_stock_auto', 'pending', ?, ?)""",
+            (owner_user_id, item, normalized, now, now),
+        )
+        conn.commit()
+
+
 def upsert_inventory_item(
     db_path: str, owner_user_id: int, item: str, *,
     quantity_delta: float | None = None, quantity_set: float | None = None,
@@ -262,7 +306,9 @@ def upsert_inventory_item(
         ).fetchone()
         result = _inventory_row(row)
         result["shortfall"] = shortfall
-        return result
+
+    _flag_low_stock(db_path, owner_user_id, result["item"], result["status"])
+    return result
 
 
 def list_inventory(db_path: str, owner_user_id: int, status: str | None = None) -> list[dict]:
@@ -303,6 +349,187 @@ def inventory_log(db_path: str, owner_user_id: int, item: str | None = None, lim
     params.append(limit)
     with closing(_connect(db_path)) as conn:
         return _rows(conn.execute(sql, params))
+
+
+# --- shopping list ---------------------------------------------------------------
+
+def add_to_shopping_list(
+    db_path: str, owner_user_id: int, item: str,
+    quantity_hint: str | None = None, reason: str = "manual",
+) -> dict:
+    """Queues an item, manually or (via _flag_low_stock) automatically. A pending row
+    for the same normalized item is updated in place (only quantity_hint can change) --
+    not duplicated -- but a past purchased/removed row is left alone and a fresh pending
+    row is created instead, so history isn't overwritten when something goes low again
+    after being restocked."""
+    normalized = normalize_lead_name(item)
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        existing = conn.execute(
+            "SELECT * FROM shopping_list_items WHERE owner_user_id = ? AND normalized_item = ? AND status = 'pending'",
+            (owner_user_id, normalized),
+        ).fetchone()
+        if existing is not None:
+            conn.execute(
+                "UPDATE shopping_list_items SET quantity_hint = COALESCE(?, quantity_hint), updated_at = ? WHERE id = ?",
+                (quantity_hint, now, existing["id"]),
+            )
+            row_id = existing["id"]
+        else:
+            cur = conn.execute(
+                """INSERT INTO shopping_list_items
+                       (owner_user_id, item, normalized_item, quantity_hint, reason, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                (owner_user_id, item, normalized, quantity_hint, reason, now, now),
+            )
+            row_id = cur.lastrowid
+        conn.commit()
+        row = conn.execute("SELECT * FROM shopping_list_items WHERE id = ?", (row_id,)).fetchone()
+        return dict(row)
+
+
+def list_shopping_list(db_path: str, owner_user_id: int, status: str | None = "pending") -> list[dict]:
+    sql = "SELECT * FROM shopping_list_items WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    sql += " ORDER BY created_at DESC"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(sql, params))
+
+
+def _update_shopping_list_status(db_path: str, owner_user_id: int, item: str, status: str) -> bool:
+    normalized = normalize_lead_name(item)
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """UPDATE shopping_list_items SET status = ?, updated_at = ?
+               WHERE owner_user_id = ? AND normalized_item = ? AND status = 'pending'""",
+            (status, now, owner_user_id, normalized),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def remove_from_shopping_list(db_path: str, owner_user_id: int, item: str) -> bool:
+    return _update_shopping_list_status(db_path, owner_user_id, item, "removed")
+
+
+def mark_shopping_list_item_purchased(db_path: str, owner_user_id: int, item: str) -> bool:
+    return _update_shopping_list_status(db_path, owner_user_id, item, "purchased")
+
+
+# --- cook-time deduction / recipe matching ----------------------------------------
+
+def _ingredient_candidates(inventory: list[dict], ingredient_name: str) -> list[dict]:
+    """Best-guess inventory rows for one recipe ingredient -- substring match against
+    normalized names in either direction ("ground beef" <-> "Ground Beef, 1lb", "egg" <->
+    "eggs"), not an exact match, since a recipe's own wording and inventory's own wording
+    are never guaranteed to agree. Deliberately returns every plausible row rather than
+    picking a single best one -- the model does that judgment call, the same
+    gather-candidates-let-the-model-decide split kroger_recipe.match_ingredients uses for
+    cart matching."""
+    normalized_ing = normalize_lead_name(ingredient_name)
+    if not normalized_ing:
+        return []
+    return [
+        row for row in inventory
+        if normalized_ing in row["normalized_item"] or row["normalized_item"] in normalized_ing
+    ]
+
+
+def cook_recipe(db_path: str, owner_user_id: int, recipe_id: int, servings_made: int | None = None) -> dict:
+    """Gathers a recipe's ingredients plus best-guess matching inventory rows for the
+    model to reason about -- applies nothing itself. apply_recipe_deduction (below) is
+    the actual write, once the model has decided what quantity of which inventory item
+    each ingredient really used. Two calls, not one, mirrors kroger_recipe.py's own
+    propose/confirm split: matching a recipe's wording to inventory's wording, and
+    converting the recipe's units into inventory's units, are both judgment calls an LLM
+    should make -- this function's job is only to gather what it can find.
+    """
+    recipe = get_recipe(db_path, owner_user_id, recipe_id)
+    if recipe is None:
+        return {"error": "recipe not found"}
+    inventory = list_inventory(db_path, owner_user_id)
+    scale_hint = None
+    if servings_made and recipe.get("servings"):
+        scale_hint = round(servings_made / recipe["servings"], 2)
+    ingredients = [
+        {
+            "ingredient": ing,
+            "inventory_candidates": [
+                {"item": c["item"], "quantity": c["quantity"], "unit": c["unit"]}
+                for c in _ingredient_candidates(inventory, ing.get("name", ""))
+            ],
+        }
+        for ing in recipe["ingredients"]
+    ]
+    return {
+        "recipe_id": recipe_id, "title": recipe["title"], "recipe_servings": recipe.get("servings"),
+        "servings_made": servings_made, "scale_hint": scale_hint, "ingredients": ingredients,
+        "note": (
+            "inventory_candidates are best-guess name matches, not confirmed, and may be "
+            "empty for an ingredient with nothing plausible on hand. Unit conversion "
+            "(e.g. the recipe's cups vs inventory's lbs) is an approximation you should "
+            "reason about, not exact math. Call apply_recipe_deduction with your own "
+            "reasoned [{item, quantity_used, unit}] list once you've decided what was "
+            "actually used -- item must be one of inventory_candidates' exact item names."
+        ),
+    }
+
+
+def apply_recipe_deduction(db_path: str, owner_user_id: int, recipe_id: int, deductions: list[dict]) -> dict:
+    """Applies the model's own reasoned deduction list from cook_recipe -- the actual
+    write. Each entry's item must be an exact existing inventory item name; anything
+    else is reported back as skipped rather than silently creating a new inventory row
+    for a recipe ingredient that was never actually tracked."""
+    recipe = get_recipe(db_path, owner_user_id, recipe_id)
+    if recipe is None:
+        return {"error": "recipe not found"}
+
+    deducted, shortfalls, skipped = [], [], []
+    for entry in deductions:
+        item_name = entry.get("item")
+        quantity_used = entry.get("quantity_used")
+        if not item_name or not isinstance(quantity_used, (int, float)):
+            skipped.append(entry)
+            continue
+        if get_inventory_item(db_path, owner_user_id, item_name) is None:
+            skipped.append(entry)
+            continue
+        result = upsert_inventory_item(
+            db_path, owner_user_id, item_name, quantity_delta=-abs(quantity_used),
+            unit=entry.get("unit"), reason="cook_deduction", recipe_id=recipe_id,
+        )
+        deducted.append({"item": result["item"], "quantity_remaining": result["quantity"], "unit": result["unit"]})
+        if result.get("shortfall"):
+            shortfalls.append({"item": result["item"], "short_by": result["shortfall"]})
+
+    return {"ok": True, "recipe_id": recipe_id, "deducted": deducted, "shortfalls": shortfalls, "skipped": skipped}
+
+
+def list_makeable_recipes(db_path: str, owner_user_id: int) -> dict:
+    """Coarse ingredient-PRESENCE check per recipe -- explicitly not quantity-aware (the
+    same unit-conversion problem cook_recipe's own note calls out: one egg on hand reads
+    as "present" even if the recipe needs a dozen). Good enough for "what could I start
+    making" without pretending to be a real quantity solver."""
+    recipes = list_recipes(db_path, owner_user_id)
+    on_hand = [r for r in list_inventory(db_path, owner_user_id) if r["quantity"] > 0]
+
+    makeable, not_makeable = [], []
+    for recipe in recipes:
+        missing = [
+            ing["name"] for ing in recipe["ingredients"]
+            if ing.get("name") and not _ingredient_candidates(on_hand, ing["name"])
+        ]
+        entry = {"recipe_id": recipe["id"], "title": recipe["title"]}
+        (not_makeable.append({**entry, "missing_ingredients": missing}) if missing else makeable.append(entry))
+
+    return {
+        "makeable": makeable, "not_makeable": not_makeable,
+        "note": "Presence-only, not quantity-aware -- having any amount of an ingredient counts as present.",
+    }
 
 
 def migrate_pantry_to_inventory(db_path: str, owner_user_id: int) -> list[str]:

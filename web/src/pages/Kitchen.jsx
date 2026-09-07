@@ -451,6 +451,81 @@ function InventoryBoard() {
   )
 }
 
+/** Most items land here on their own (a low/out inventory write auto-queues them --
+ *  see kitchen_db._flag_low_stock) so this is mostly a review/manual-add surface, not
+ *  the primary way items get queued. */
+function ShoppingListPanel() {
+  const [items, setItems] = useState(null)
+  const [newItem, setNewItem] = useState('')
+  const [newHint, setNewHint] = useState('')
+  const [error, setError] = useState('')
+
+  async function load() {
+    setItems(await api.shoppingList())
+  }
+
+  useEffect(() => { load() }, [])
+
+  async function add(e) {
+    e.preventDefault()
+    if (!newItem.trim()) return
+    await api.addToShoppingList(newItem.trim(), newHint.trim() || undefined)
+    setNewItem('')
+    setNewHint('')
+    load()
+  }
+
+  async function remove(item) {
+    try {
+      await api.removeFromShoppingList(item)
+      load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function markPurchased(item) {
+    try {
+      await api.markShoppingListItemPurchased(item)
+      load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  if (items === null) return <p className="empty-hint">Loading…</p>
+
+  return (
+    <section>
+      <h3>Shopping List</h3>
+      <form className="inventory-form" onSubmit={add}>
+        <input placeholder="Item (e.g. paper towels)" value={newItem} onChange={(e) => setNewItem(e.target.value)} />
+        <input placeholder="Note (optional)" value={newHint} onChange={(e) => setNewHint(e.target.value)} />
+        <button type="submit">Add</button>
+      </form>
+      {error && <p className="empty-hint">{error}</p>}
+      {items.length === 0 && <p className="empty-hint">Nothing queued — low/out items land here on their own.</p>}
+      <ul className="task-list">
+        {items.map((it) => (
+          <li key={it.id} className="task-row">
+            <div className="task-body">
+              <div className="task-text">{it.item}</div>
+              <div className="task-meta">
+                {it.quantity_hint ? <span>{it.quantity_hint}</span> : null}
+                <span>{it.reason === 'low_stock_auto' ? 'auto-flagged' : 'added manually'}</span>
+              </div>
+            </div>
+            <div className="task-form-actions">
+              <button type="button" onClick={() => markPurchased(it.item)}>Bought it</button>
+              <button type="button" className="task-drop" onClick={() => remove(it.item)}>✕</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 export default function Kitchen() {
   const [tab, setTab] = useState('recipes')
 
@@ -463,8 +538,13 @@ export default function Kitchen() {
         <button className={`kitchen-tab ${tab === 'inventory' ? 'active' : ''}`} onClick={() => setTab('inventory')}>
           Inventory
         </button>
+        <button className={`kitchen-tab ${tab === 'shopping' ? 'active' : ''}`} onClick={() => setTab('shopping')}>
+          Shopping List
+        </button>
       </div>
-      {tab === 'recipes' ? <RecipesPanel /> : <InventoryBoard />}
+      {tab === 'recipes' && <RecipesPanel />}
+      {tab === 'inventory' && <InventoryBoard />}
+      {tab === 'shopping' && <ShoppingListPanel />}
     </div>
   )
 }

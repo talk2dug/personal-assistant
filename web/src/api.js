@@ -147,6 +147,13 @@ export const api = {
     return res.json()
   },
 
+  shoppingList: (status = 'pending') => request(`/api/kitchen/shopping-list?status=${status}`),
+  addToShoppingList: (item, quantityHint) =>
+    request('/api/kitchen/shopping-list', { method: 'POST', body: JSON.stringify({ item, quantity_hint: quantityHint }) }),
+  removeFromShoppingList: (item) => request(`/api/kitchen/shopping-list/${encodeURIComponent(item)}`, { method: 'DELETE' }),
+  markShoppingListItemPurchased: (item) =>
+    request(`/api/kitchen/shopping-list/${encodeURIComponent(item)}/purchased`, { method: 'POST' }),
+
   reviewItems: (status = 'pending') => request(`/api/review/items?status=${status}`),
   decideReview: (id, decision) =>
     request(`/api/review/items/${id}/decide`, { method: 'POST', body: JSON.stringify(decision) }),

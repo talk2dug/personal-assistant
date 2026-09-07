@@ -147,13 +147,104 @@ KITCHEN_GATED_TOOLS = [
         ),
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
+    {"type": "function", "function": {
+        "name": "cook_recipe",
+        "description": (
+            "Use when he says he made/is making a saved recipe (e.g. 'I made the chili "
+            "tonight'). Returns the recipe's ingredients alongside best-guess matching "
+            "inventory items and quantities — it does NOT deduct anything itself. Look at "
+            "what it returns, decide for yourself what quantity of which inventory item "
+            "each ingredient actually used (unit conversion is your judgment call, not "
+            "exact math), then call apply_recipe_deduction with your own reasoned list. "
+            "Never skip straight to apply_recipe_deduction without calling this first."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "recipe_id": {"type": "integer"},
+            "servings_made": {
+                "type": "integer",
+                "description": "If he made a different amount than the recipe's own serving size — used to hint scaling.",
+            },
+        }, "required": ["recipe_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "apply_recipe_deduction",
+        "description": (
+            "Actually deducts inventory after cook_recipe — call this only after "
+            "cook_recipe and only with your own reasoned quantities, never guessed "
+            "without having called cook_recipe first. item must be one of "
+            "cook_recipe's inventory_candidates' exact item names, not the recipe's own "
+            "ingredient wording. Reports anything that ran short rather than silently "
+            "going negative."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "recipe_id": {"type": "integer"},
+            "deductions": {
+                "type": "array",
+                "items": {"type": "object", "properties": {
+                    "item": {"type": "string", "description": "Exact inventory item name."},
+                    "quantity_used": {"type": "number"},
+                    "unit": {"type": "string"},
+                }, "required": ["item", "quantity_used"]},
+            },
+        }, "required": ["recipe_id", "deductions"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_makeable_recipes",
+        "description": (
+            "Which saved recipes he could start making right now, based on what's on "
+            "hand. Presence-only, NOT quantity-aware — say so plainly if he asks 'do I "
+            "have enough' for something specific rather than implying this checked "
+            "amounts (having a single egg counts as 'have eggs' even for a recipe "
+            "needing a dozen)."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "list_shopping_list",
+        "description": "What's queued to buy — pending by default, or filter to what's already purchased/removed.",
+        "parameters": {"type": "object", "properties": {
+            "status": {"type": "string", "enum": ["pending", "purchased", "removed"]},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "add_to_shopping_list",
+        "description": (
+            "Manually queue an item to buy. Most low/out items land here on their own "
+            "the moment inventory reflects it — use this for something he wants to buy "
+            "that isn't already tracked in inventory, or an explicit 'add X to the "
+            "shopping list'."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "item": {"type": "string"},
+            "quantity_hint": {"type": "string", "description": "Free text, e.g. 'a dozen' or '2 more' — not required."},
+        }, "required": ["item"]},
+    }},
+    {"type": "function", "function": {
+        "name": "remove_from_shopping_list",
+        "description": "Take an item off the shopping list without buying it (he decided against it, or it was flagged in error).",
+        "parameters": {"type": "object", "properties": {
+            "item": {"type": "string"},
+        }, "required": ["item"]},
+    }},
+    {"type": "function", "function": {
+        "name": "mark_shopping_list_item_purchased",
+        "description": (
+            "Cross an item off the shopping list because he bought it. This only updates "
+            "the list itself — also call record_purchase (or update_inventory_quantity) "
+            "for the actual amount bought so inventory reflects it too."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "item": {"type": "string"},
+        }, "required": ["item"]},
+    }},
 ]
 
 KITCHEN_TOOLS = KITCHEN_ALWAYS_TOOLS + KITCHEN_GATED_TOOLS
 
 KITCHEN_KEYWORDS = [
-    "recipe", "recipes", "cook", "cooking", "kitchen", "ingredient", "ingredients",
+    "recipe", "recipes", "cook", "cooking", "cooked", "kitchen", "ingredient", "ingredients",
     "inventory", "pantry", "stock", "on hand", "kroger",
+    "shopping list", "grocery list", "makeable", "made this", "made the",
 ]
 
 
@@ -181,6 +272,17 @@ KITCHEN_SYSTEM_NOTE = (
     "remove_inventory_item stops tracking something entirely, and sync_kroger_purchases "
     "checks right now for a Kroger order Jarvis itself built and that has since been "
     "checked out and marked placed — a background job also does this hourly."
+    " Cooking a saved recipe is always two calls, never one: cook_recipe first (shows "
+    "the recipe's ingredients plus best-guess matching inventory — decides nothing), "
+    "then apply_recipe_deduction with your own reasoned quantities once you've looked at "
+    "what it returned. list_makeable_recipes says what he could start making right now "
+    "from what's on hand — presence-only, not quantity-aware, so say that plainly if he "
+    "asks whether he has 'enough' of something specific. A shopping list also exists: "
+    "most items land on it themselves the moment inventory goes low or out, but "
+    "add_to_shopping_list/remove_from_shopping_list/list_shopping_list handle it "
+    "directly, and mark_shopping_list_item_purchased crosses something off once he's "
+    "bought it — pair that with record_purchase for the actual amount, since marking "
+    "purchased only touches the list, not inventory."
 )
 
 
@@ -244,5 +346,31 @@ def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict, kroge
         if kroger_mcp_client is None:
             return {"error": "Kroger is not configured"}
         return kitchen_db.sync_kroger_orders(kroger_mcp_client, db_path, owner_user_id)
+
+    if name == "cook_recipe":
+        return kitchen_db.cook_recipe(
+            db_path, owner_user_id, arguments["recipe_id"], arguments.get("servings_made"))
+
+    if name == "apply_recipe_deduction":
+        return kitchen_db.apply_recipe_deduction(
+            db_path, owner_user_id, arguments["recipe_id"], arguments.get("deductions", []))
+
+    if name == "list_makeable_recipes":
+        return kitchen_db.list_makeable_recipes(db_path, owner_user_id)
+
+    if name == "list_shopping_list":
+        return {"shopping_list": kitchen_db.list_shopping_list(db_path, owner_user_id, arguments.get("status", "pending"))}
+
+    if name == "add_to_shopping_list":
+        return {"ok": True, "item": kitchen_db.add_to_shopping_list(
+            db_path, owner_user_id, arguments["item"], arguments.get("quantity_hint"))}
+
+    if name == "remove_from_shopping_list":
+        ok = kitchen_db.remove_from_shopping_list(db_path, owner_user_id, arguments["item"])
+        return {"ok": ok} if ok else {"error": "item not found (pending) on the shopping list"}
+
+    if name == "mark_shopping_list_item_purchased":
+        ok = kitchen_db.mark_shopping_list_item_purchased(db_path, owner_user_id, arguments["item"])
+        return {"ok": ok} if ok else {"error": "item not found (pending) on the shopping list"}
 
     return {"error": f"unknown kitchen tool {name}"}

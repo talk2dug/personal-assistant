@@ -1,5 +1,5 @@
-"""Kitchen: the owner's own recipe catalog and kitchen inventory/purchase intake over the
-web UI (the shopping list arrives in a later phase).
+"""Kitchen: the owner's own recipe catalog, kitchen inventory/purchase intake, and
+shopping list over the web UI.
 
 Owner-only, same rule as every other personal-data route (grocery.py, schedule.py).
 """
@@ -251,3 +251,45 @@ async def purchases_from_receipt(request: Request, photo: UploadFile):
     draft = await loop.run_in_executor(None, call)
     draft["photo_path"] = str(saved_path)
     return draft
+
+
+@router.get("/shopping-list")
+async def list_shopping_list(request: Request, status: str | None = "pending"):
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    return kitchen_db.list_shopping_list(cfg.db_path, user["id"], status)
+
+
+@router.post("/shopping-list")
+async def add_to_shopping_list(request: Request):
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    body = await request.json()
+    item = (body.get("item") or "").strip()
+    if not item:
+        raise HTTPException(400, "item is required")
+    return kitchen_db.add_to_shopping_list(cfg.db_path, user["id"], item, body.get("quantity_hint"))
+
+
+@router.delete("/shopping-list/{item}")
+async def remove_from_shopping_list(item: str, request: Request):
+    """`item` is the item's own text, not a numeric id -- shopping_list_items has no
+    single stable id the frontend already knows the way inventory rows do (a repeated
+    add/auto-flag can produce several historical rows for the same name over time), and
+    the underlying kitchen_db functions already resolve by normalized name."""
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    ok = kitchen_db.remove_from_shopping_list(cfg.db_path, user["id"], item)
+    if not ok:
+        raise HTTPException(404, "item not found (pending) on the shopping list")
+    return {"ok": True}
+
+
+@router.post("/shopping-list/{item}/purchased")
+async def mark_shopping_list_item_purchased(item: str, request: Request):
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    ok = kitchen_db.mark_shopping_list_item_purchased(cfg.db_path, user["id"], item)
+    if not ok:
+        raise HTTPException(404, "item not found (pending) on the shopping list")
+    return {"ok": True}

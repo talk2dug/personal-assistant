@@ -267,3 +267,179 @@ def test_sync_reports_a_view_order_history_failure_without_raising(db_path, owne
 
     assert result["ok"] is False
     assert "Authentication failed" in result["error"]
+
+
+# --- shopping list -----------------------------------------------------------------
+
+def test_going_out_of_stock_auto_queues_the_item(db_path, owner_id):
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "milk", quantity_set=0)
+
+    pending = kitchen_db.list_shopping_list(db_path, owner_id)
+    assert len(pending) == 1
+    assert pending[0]["item"] == "milk"
+    assert pending[0]["reason"] == "low_stock_auto"
+
+
+def test_going_low_with_a_threshold_auto_queues_the_item(db_path, owner_id):
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "rice", quantity_set=10, low_threshold=2)
+    assert kitchen_db.list_shopping_list(db_path, owner_id) == []
+
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "rice", quantity_set=1, low_threshold=2)
+    pending = kitchen_db.list_shopping_list(db_path, owner_id)
+    assert len(pending) == 1 and pending[0]["item"] == "rice"
+
+
+def test_repeated_shortfalls_do_not_duplicate_the_pending_row(db_path, owner_id):
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "eggs", quantity_set=0)
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "eggs", quantity_delta=-1)  # clamps at 0 again
+
+    assert len(kitchen_db.list_shopping_list(db_path, owner_id)) == 1
+
+
+def test_manual_add_and_list_default_to_pending(db_path, owner_id):
+    kitchen_db.add_to_shopping_list(db_path, owner_id, "paper towels", quantity_hint="2 rolls")
+
+    pending = kitchen_db.list_shopping_list(db_path, owner_id)
+    assert len(pending) == 1
+    assert pending[0]["item"] == "paper towels"
+    assert pending[0]["quantity_hint"] == "2 rolls"
+    assert pending[0]["reason"] == "manual"
+
+
+def test_manual_add_for_an_already_pending_item_updates_the_hint_not_duplicates(db_path, owner_id):
+    kitchen_db.add_to_shopping_list(db_path, owner_id, "milk", quantity_hint="1 gal")
+    kitchen_db.add_to_shopping_list(db_path, owner_id, "milk", quantity_hint="2 gal")
+
+    pending = kitchen_db.list_shopping_list(db_path, owner_id)
+    assert len(pending) == 1
+    assert pending[0]["quantity_hint"] == "2 gal"
+
+
+def test_mark_purchased_flips_status_and_leaves_it_out_of_the_pending_list(db_path, owner_id):
+    kitchen_db.add_to_shopping_list(db_path, owner_id, "milk")
+
+    assert kitchen_db.mark_shopping_list_item_purchased(db_path, owner_id, "milk") is True
+    assert kitchen_db.list_shopping_list(db_path, owner_id) == []
+    all_rows = kitchen_db.list_shopping_list(db_path, owner_id, status=None)
+    assert all_rows[0]["status"] == "purchased"
+
+
+def test_remove_flips_status_to_removed(db_path, owner_id):
+    kitchen_db.add_to_shopping_list(db_path, owner_id, "milk")
+
+    assert kitchen_db.remove_from_shopping_list(db_path, owner_id, "milk") is True
+    assert kitchen_db.list_shopping_list(db_path, owner_id) == []
+
+
+def test_mark_purchased_or_remove_on_a_missing_item_reports_false(db_path, owner_id):
+    assert kitchen_db.mark_shopping_list_item_purchased(db_path, owner_id, "nonexistent") is False
+    assert kitchen_db.remove_from_shopping_list(db_path, owner_id, "nonexistent") is False
+
+
+def test_going_low_again_after_being_purchased_creates_a_fresh_pending_row(db_path, owner_id):
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "milk", quantity_set=0)
+    kitchen_db.mark_shopping_list_item_purchased(db_path, owner_id, "milk")
+    assert kitchen_db.list_shopping_list(db_path, owner_id) == []
+
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "milk", quantity_set=5, unit="gal")
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "milk", quantity_set=0)
+
+    pending = kitchen_db.list_shopping_list(db_path, owner_id)
+    assert len(pending) == 1
+    history = kitchen_db.list_shopping_list(db_path, owner_id, status=None)
+    assert len(history) == 2  # the purchased row survives untouched, plus the new pending one
+
+
+# --- cook-time deduction / recipe matching ------------------------------------------
+
+def test_cook_recipe_returns_ingredients_with_best_guess_inventory_candidates(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Weeknight Chili",
+        [{"name": "ground beef", "quantity": "1", "unit": "lb"}, {"name": "kidney beans", "quantity": "1", "unit": "can"}],
+        ["Brown the beef.", "Add beans."], servings=4,
+    )
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "Ground Beef", quantity_set=2, unit="lb")
+
+    result = kitchen_db.cook_recipe(db_path, owner_id, recipe_id, servings_made=8)
+
+    assert result["title"] == "Weeknight Chili"
+    assert result["scale_hint"] == 2.0
+    beef_entry = next(i for i in result["ingredients"] if i["ingredient"]["name"] == "ground beef")
+    assert beef_entry["inventory_candidates"] == [{"item": "Ground Beef", "quantity": 2, "unit": "lb"}]
+    beans_entry = next(i for i in result["ingredients"] if i["ingredient"]["name"] == "kidney beans")
+    assert beans_entry["inventory_candidates"] == []  # nothing on hand plausibly matches
+
+
+def test_cook_recipe_unknown_recipe_returns_an_error(db_path, owner_id):
+    assert kitchen_db.cook_recipe(db_path, owner_id, 999) == {"error": "recipe not found"}
+
+
+def test_apply_recipe_deduction_writes_with_cook_deduction_reason_and_reports_shortfall(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Pancakes", [{"name": "flour", "quantity": "2", "unit": "cups"}], ["Mix.", "Cook."])
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "flour", quantity_set=1, unit="cups")
+
+    result = kitchen_db.apply_recipe_deduction(
+        db_path, owner_id, recipe_id, [{"item": "flour", "quantity_used": 2, "unit": "cups"}])
+
+    assert result["ok"] is True
+    assert result["deducted"] == [{"item": "flour", "quantity_remaining": 0, "unit": "cups"}]
+    assert result["shortfalls"] == [{"item": "flour", "short_by": 1}]
+    log = kitchen_db.inventory_log(db_path, owner_id, item="flour")
+    assert log[0]["reason"] == "cook_deduction"
+    assert log[0]["recipe_id"] == recipe_id
+
+
+def test_apply_recipe_deduction_skips_an_item_not_in_inventory_rather_than_creating_it(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Pancakes", [{"name": "flour", "quantity": "2", "unit": "cups"}], ["Mix."])
+
+    result = kitchen_db.apply_recipe_deduction(
+        db_path, owner_id, recipe_id, [{"item": "flour", "quantity_used": 2, "unit": "cups"}])
+
+    assert result["deducted"] == []
+    assert len(result["skipped"]) == 1
+    assert kitchen_db.get_inventory_item(db_path, owner_id, "flour") is None
+
+
+def test_apply_recipe_deduction_unknown_recipe_returns_an_error(db_path, owner_id):
+    result = kitchen_db.apply_recipe_deduction(db_path, owner_id, 999, [])
+    assert result == {"error": "recipe not found"}
+
+
+def test_cooking_a_recipe_can_trigger_the_shopping_list_the_same_as_any_other_write(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Pancakes", [{"name": "flour", "quantity": "2", "unit": "cups"}], ["Mix."])
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "flour", quantity_set=2, unit="cups")
+
+    kitchen_db.apply_recipe_deduction(
+        db_path, owner_id, recipe_id, [{"item": "flour", "quantity_used": 2, "unit": "cups"}])
+
+    pending = kitchen_db.list_shopping_list(db_path, owner_id)
+    assert len(pending) == 1 and pending[0]["item"] == "flour"
+
+
+def test_list_makeable_recipes_classifies_by_ingredient_presence_only(db_path, owner_id):
+    makeable_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Cereal", [{"name": "milk", "quantity": "1", "unit": "cup"}], ["Pour."])
+    not_makeable_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Chili", [{"name": "ground beef", "quantity": "1", "unit": "lb"}], ["Cook."])
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "milk", quantity_set=1, unit="cup")
+
+    result = kitchen_db.list_makeable_recipes(db_path, owner_id)
+
+    assert {r["recipe_id"] for r in result["makeable"]} == {makeable_id}
+    assert {r["recipe_id"] for r in result["not_makeable"]} == {not_makeable_id}
+    chili = next(r for r in result["not_makeable"] if r["recipe_id"] == not_makeable_id)
+    assert chili["missing_ingredients"] == ["ground beef"]
+
+
+def test_list_makeable_recipes_ignores_zero_quantity_inventory_rows(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Cereal", [{"name": "milk", "quantity": "1", "unit": "cup"}], ["Pour."])
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "milk", quantity_set=0)  # tracked, but none on hand
+
+    result = kitchen_db.list_makeable_recipes(db_path, owner_id)
+
+    assert result["makeable"] == []
+    assert result["not_makeable"] == [{"recipe_id": recipe_id, "title": "Cereal", "missing_ingredients": ["milk"]}]

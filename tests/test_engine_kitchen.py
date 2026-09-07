@@ -201,6 +201,76 @@ def test_sync_kroger_purchases_without_kroger_configured_reports_that_clearly(db
     assert reply == "Kroger isn't set up, sir."
 
 
+def test_cook_recipe_then_apply_deduction_via_chat(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Pancakes", [{"name": "flour", "quantity": "2", "unit": "cups"}], ["Mix.", "Cook."])
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "flour", quantity_set=5, unit="cups")
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "cook_recipe", "arguments": {"recipe_id": recipe_id}}}
+        ]},
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "apply_recipe_deduction", "arguments": {
+                "recipe_id": recipe_id, "deductions": [{"item": "flour", "quantity_used": 2, "unit": "cups"}],
+            }}}
+        ]},
+        {"role": "assistant", "content": "Used 2 cups of flour for the pancakes."},
+    ])
+
+    reply = engine.handle_message(db_path, llm, owner_id, "I made the pancakes tonight", personal=personal)
+
+    assert reply == "Used 2 cups of flour for the pancakes."
+    assert kitchen_db.get_inventory_item(db_path, owner_id, "flour")["quantity"] == 3
+
+
+def test_list_makeable_recipes_via_chat(db_path, owner_id):
+    kitchen_db.create_recipe(
+        db_path, owner_id, "Cereal", [{"name": "milk", "quantity": "1", "unit": "cup"}], ["Pour."])
+    kitchen_db.upsert_inventory_item(db_path, owner_id, "milk", quantity_set=1, unit="cup")
+    personal = make_personal(db_path, owner_id)
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "list_makeable_recipes", "arguments": {}}}
+        ]},
+        {"role": "assistant", "content": "You could make cereal right now."},
+    ])
+
+    reply = engine.handle_message(db_path, llm, owner_id, "what can I make tonight", personal=personal)
+    assert reply == "You could make cereal right now."
+
+
+def test_shopping_list_tools_via_chat(db_path, owner_id):
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "add_to_shopping_list", "arguments": {"item": "paper towels"}}}
+        ]},
+        {"role": "assistant", "content": "Added paper towels to the shopping list."},
+    ])
+    engine.handle_message(db_path, llm, owner_id, "add paper towels to the shopping list", personal=personal)
+    assert [r["item"] for r in kitchen_db.list_shopping_list(db_path, owner_id)] == ["paper towels"]
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "list_shopping_list", "arguments": {}}}
+        ]},
+        {"role": "assistant", "content": "Just paper towels on the list."},
+    ])
+    assert engine.handle_message(db_path, llm, owner_id, "what's on the shopping list", personal=personal) == "Just paper towels on the list."
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "mark_shopping_list_item_purchased", "arguments": {"item": "paper towels"}}}
+        ]},
+        {"role": "assistant", "content": "Crossed off paper towels."},
+    ])
+    engine.handle_message(db_path, llm, owner_id, "I got the paper towels", personal=personal)
+    assert kitchen_db.list_shopping_list(db_path, owner_id) == []
+
+
 def test_kitchen_tools_absent_when_no_personal_context(db_path, owner_id):
     llm = FakeLLM([{"role": "assistant", "content": "Hi there"}])
     reply = engine.handle_message(db_path, llm, owner_id, "save this recipe: ...", personal=None)

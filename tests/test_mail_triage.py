@@ -95,7 +95,7 @@ def test_scan_drafts_only_the_messages_that_need_a_reply(db_path):
     path, owner_id = db_path
     headers = [{"uid": "1", "from": "customer@example.com", "subject": "Where's my order?", "date": "", "unread": True},
                {"uid": "2", "from": "shop@example.com", "subject": "Your receipt", "date": "", "unread": True}]
-    bodies = {"1": _message(uid="1") if False else _message(), "2": _message(subject="Your receipt")}
+    bodies = {"1": _message(), "2": _message(subject="Your receipt")}
     mail = FakeMailClient(headers, bodies)
     llm = FakeLLM([NEEDS_REPLY_JSON, NO_REPLY_JSON])
 

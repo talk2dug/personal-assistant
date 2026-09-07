@@ -26,12 +26,41 @@ function IngredientRow({ ingredient, index, onChange, onRemove }) {
   )
 }
 
-function NewRecipeForm({ onChange }) {
+/** initialDraft, when given (from a photo upload), pre-fills the form and forces it
+ *  open -- review-before-save, never auto-saved, since vision extraction from a photo
+ *  is genuinely lossy. draft.parsed === false still opens the form (empty, ready for
+ *  manual entry) with the model's raw reading shown so nothing is silently discarded. */
+function NewRecipeForm({ onChange, initialDraft, onDraftConsumed }) {
   const [show, setShow] = useState(false)
   const [title, setTitle] = useState('')
   const [servings, setServings] = useState('')
   const [ingredients, setIngredients] = useState([{ name: '', quantity: '', unit: '' }])
   const [stepsText, setStepsText] = useState('')
+  const [source, setSource] = useState('manual')
+  const [photoPath, setPhotoPath] = useState(null)
+  const [photoNote, setPhotoNote] = useState(null)
+
+  useEffect(() => {
+    if (!initialDraft) return
+    setShow(true)
+    setSource('photo')
+    setPhotoPath(initialDraft.photo_path || null)
+    if (initialDraft.parsed) {
+      setTitle(initialDraft.title || '')
+      setServings(initialDraft.servings ? String(initialDraft.servings) : '')
+      setIngredients(
+        initialDraft.ingredients?.length ? initialDraft.ingredients : [{ name: '', quantity: '', unit: '' }],
+      )
+      setStepsText((initialDraft.steps || []).join('\n'))
+      setPhotoNote(null)
+    } else {
+      setPhotoNote(
+        `Couldn't fully read that photo (${initialDraft.error}). Here's what it did make out — ` +
+        'fill in the rest by hand:\n\n' + (initialDraft.raw_text || '(no text returned)'),
+      )
+    }
+    onDraftConsumed()
+  }, [initialDraft])
 
   function updateIngredient(index, next) {
     setIngredients((prev) => prev.map((ing, i) => (i === index ? next : ing)))
@@ -41,6 +70,17 @@ function NewRecipeForm({ onChange }) {
   }
   function addIngredientRow() {
     setIngredients((prev) => [...prev, { name: '', quantity: '', unit: '' }])
+  }
+
+  function reset() {
+    setTitle('')
+    setServings('')
+    setIngredients([{ name: '', quantity: '', unit: '' }])
+    setStepsText('')
+    setSource('manual')
+    setPhotoPath(null)
+    setPhotoNote(null)
+    setShow(false)
   }
 
   async function submit(e) {
@@ -53,12 +93,10 @@ function NewRecipeForm({ onChange }) {
       servings: servings ? Number(servings) : undefined,
       ingredients: cleanIngredients,
       steps,
+      source,
+      photo_path: photoPath || undefined,
     })
-    setTitle('')
-    setServings('')
-    setIngredients([{ name: '', quantity: '', unit: '' }])
-    setStepsText('')
-    setShow(false)
+    reset()
     onChange()
   }
 
@@ -66,6 +104,7 @@ function NewRecipeForm({ onChange }) {
 
   return (
     <form className="task-form recipe-form" onSubmit={submit}>
+      {photoNote && <div className="recipe-photo-note">{photoNote}</div>}
       <input placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
       <input
         placeholder="Servings (optional)"
@@ -90,9 +129,37 @@ function NewRecipeForm({ onChange }) {
       />
       <div className="task-form-actions">
         <button type="submit">Save</button>
-        <button type="button" onClick={() => setShow(false)}>Cancel</button>
+        <button type="button" onClick={reset}>Cancel</button>
       </div>
     </form>
+  )
+}
+
+function PhotoUploadButton({ onDraft }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setError('')
+    setBusy(true)
+    try {
+      onDraft(await api.recipeFromPhoto(file))
+    } catch (err) {
+      setError(err.message || 'Could not read that photo.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <label className={`task-add-btn recipe-photo-btn ${busy ? 'is-busy' : ''}`}>
+      {busy ? 'Reading photo…' : '+ Add from photo'}
+      <input type="file" accept="image/*" capture="environment" onChange={handleFile} disabled={busy} hidden />
+      {error && <span className="recipe-photo-error">{error}</span>}
+    </label>
   )
 }
 
@@ -123,6 +190,7 @@ export default function Kitchen() {
   const [recipes, setRecipes] = useState(null)
   const [query, setQuery] = useState('')
   const [openId, setOpenId] = useState(null)
+  const [photoDraft, setPhotoDraft] = useState(null)
 
   async function load() {
     setRecipes(await api.kitchenRecipes(query || undefined))
@@ -166,7 +234,8 @@ export default function Kitchen() {
             </li>
           ))}
         </ul>
-        <NewRecipeForm onChange={load} />
+        <NewRecipeForm onChange={load} initialDraft={photoDraft} onDraftConsumed={() => setPhotoDraft(null)} />
+        <PhotoUploadButton onDraft={setPhotoDraft} />
       </section>
 
       {openRecipe && <RecipeDetail recipe={openRecipe} onClose={() => setOpenId(null)} onDelete={deleteRecipe} />}

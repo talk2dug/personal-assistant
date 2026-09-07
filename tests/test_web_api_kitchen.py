@@ -15,6 +15,7 @@ class FakeConfig:
     users: list = field(default_factory=list)
     timezone: str = "America/New_York"
     web_session_secret: str = "test-secret"
+    generated_media_path: str = "generated"
 
 
 class FakeLLM:
@@ -33,11 +34,15 @@ def db_path(tmp_path):
 
 
 @pytest.fixture
-def cfg(db_path):
-    return FakeConfig(db_path=db_path, users=[
-        UserConfig(telegram_chat_id="111", display_name="Dug", role="owner", web_password="ownerpass"),
-        UserConfig(telegram_chat_id="222", display_name="Partner", role="partner", web_password="partnerpass"),
-    ])
+def cfg(db_path, tmp_path):
+    return FakeConfig(
+        db_path=db_path,
+        users=[
+            UserConfig(telegram_chat_id="111", display_name="Dug", role="owner", web_password="ownerpass"),
+            UserConfig(telegram_chat_id="222", display_name="Partner", role="partner", web_password="partnerpass"),
+        ],
+        generated_media_path=str(tmp_path / "generated"),
+    )
 
 
 @pytest.fixture
@@ -124,3 +129,98 @@ def test_recipes_are_owner_scoped(client, cfg):
 
     listed = client.get("/api/kitchen/recipes").json()
     assert all(r["title"] != "Secret Recipe" for r in listed)
+
+
+# --- photo upload / serving ---------------------------------------------------
+
+class FakeBridge:
+    def __init__(self, job):
+        self._job = job
+
+    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900):
+        return self._job
+
+
+def _client_with_bridge(cfg, bridge):
+    app = create_app(cfg, FakeLLM(), era=None, calendar=None, static_dir=None, bridge=bridge)
+    c = TestClient(app)
+    c.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    return c
+
+
+def test_from_photo_requires_a_configured_bridge(cfg):
+    client = _client_with_bridge(cfg, bridge=None)
+    resp = client.post("/api/kitchen/recipes/from-photo", files={"photo": ("card.jpg", b"fake-bytes", "image/jpeg")})
+    assert resp.status_code == 503
+
+
+def test_from_photo_returns_an_unsaved_draft(cfg):
+    bridge = FakeBridge({"status": "done", "result": (
+        '{"title": "Weeknight Chili", "servings": 6, '
+        '"ingredients": [{"name": "ground beef", "quantity": "1", "unit": "lb"}], '
+        '"steps": ["Brown the beef.", "Simmer 20 minutes."]}'
+    )})
+    client = _client_with_bridge(cfg, bridge)
+
+    resp = client.post("/api/kitchen/recipes/from-photo", files={"photo": ("card.jpg", b"fake-bytes", "image/jpeg")})
+    assert resp.status_code == 200
+    draft = resp.json()
+    assert draft["parsed"] is True
+    assert draft["title"] == "Weeknight Chili"
+    assert draft["photo_path"]
+
+    # Nothing was saved to the catalog -- from-photo only ever returns a draft.
+    assert client.get("/api/kitchen/recipes").json() == []
+
+    # The photo itself was written to disk under generated_media_path.
+    import pathlib
+    assert pathlib.Path(draft["photo_path"]).is_file()
+
+
+def test_from_photo_reports_a_failed_parse_without_losing_the_photo(cfg):
+    bridge = FakeBridge({"status": "done", "result": "couldn't read the handwriting"})
+    client = _client_with_bridge(cfg, bridge)
+
+    resp = client.post("/api/kitchen/recipes/from-photo", files={"photo": ("card.jpg", b"fake-bytes", "image/jpeg")})
+    assert resp.status_code == 200
+    draft = resp.json()
+    assert draft["parsed"] is False
+    assert draft["photo_path"]
+    import pathlib
+    assert pathlib.Path(draft["photo_path"]).is_file()
+
+
+def test_recipe_photo_is_served_when_present(client, cfg):
+    import pathlib
+    photo_dir = pathlib.Path(cfg.generated_media_path) / "kitchen_photos"
+    photo_dir.mkdir(parents=True, exist_ok=True)
+    photo_path = photo_dir / "test.jpg"
+    photo_path.write_bytes(b"fake-jpeg-bytes")
+
+    recipe_id = client.post("/api/kitchen/recipes", json={
+        "title": "Pancakes", "ingredients": [{"name": "flour"}], "steps": ["mix"],
+        "photo_path": str(photo_path),
+    }).json()["recipe_id"]
+
+    resp = client.get(f"/api/kitchen/recipes/{recipe_id}/photo")
+    assert resp.status_code == 200
+    assert resp.content == b"fake-jpeg-bytes"
+
+
+def test_recipe_photo_404s_without_one(client):
+    recipe_id = client.post("/api/kitchen/recipes", json={
+        "title": "Pancakes", "ingredients": [{"name": "flour"}], "steps": ["mix"]}).json()["recipe_id"]
+    assert client.get(f"/api/kitchen/recipes/{recipe_id}/photo").status_code == 404
+
+
+def test_recipe_photo_refuses_a_path_outside_generated_media(client, cfg, tmp_path):
+    outside_file = tmp_path / "outside.jpg"
+    outside_file.write_bytes(b"not allowed")
+
+    recipe_id = client.post("/api/kitchen/recipes", json={
+        "title": "Pancakes", "ingredients": [{"name": "flour"}], "steps": ["mix"],
+        "photo_path": str(outside_file),
+    }).json()["recipe_id"]
+
+    resp = client.get(f"/api/kitchen/recipes/{recipe_id}/photo")
+    assert resp.status_code == 403

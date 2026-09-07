@@ -109,6 +109,17 @@ export const api = {
   getRecipe: (id) => request(`/api/kitchen/recipes/${id}`),
   updateRecipe: (id, patch) => request(`/api/kitchen/recipes/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteRecipe: (id) => request(`/api/kitchen/recipes/${id}`, { method: 'DELETE' }),
+  // FormData, not JSON — same reasoning as transcribe above.
+  recipeFromPhoto: async (file) => {
+    const form = new FormData()
+    form.append('photo', file, file.name)
+    const res = await fetch('/api/kitchen/recipes/from-photo', { method: 'POST', credentials: 'include', body: form })
+    if (!res.ok) {
+      const body = await res.json().catch(() => null)
+      throw new ApiError(res.status, body)
+    }
+    return res.json()
+  },
 
   reviewItems: (status = 'pending') => request(`/api/review/items?status=${status}`),
   decideReview: (id, decision) =>

@@ -1,4 +1,4 @@
-﻿"""Background poller that fires due reminders, and (optionally) pulls Apple Calendar
+"""Background poller that fires due reminders, and (optionally) pulls Apple Calendar
 changes into the reminders table and refreshes the Era finance cache. Transport-agnostic:
 takes a notify(chat_id, text) callback so it doesn't need to know about Telegram.
 """
@@ -26,14 +26,19 @@ def start(
     market_api_key: str | None = None, market_poll_seconds: int = 60,
     market_track_limit: int = 250,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
-    personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
+    personal=None, personal_research_minutes: int = 30,
+    mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
     business is an engine.BusinessContext; together with a web-searching llm AND
     business_agents_enabled it schedules the market/trend/research/pipeline agents and the
     daily briefing. With business_agents_enabled False (the default) nothing agent-related
-    is scheduled at all, though every agent still runs on demand from chat."""
+    is scheduled at all, though every agent still runs on demand from chat.
+    mail is an engine.MailContext; when present it also schedules the autonomous
+    junk-flagging pass (mail_junk_scan) regardless of business_agents_enabled -- triaging
+    the owner's own inbox isn't a print-business agent, it's core mail hygiene, the same
+    reasoning personal_research_interval_minutes uses below."""
     business_intervals = business_intervals or {
         "market_hours": 72, "trend_hours": 24, "research_minutes": 120,
         "pipeline_hours": 12, "digest_hour": 8,
@@ -93,6 +98,24 @@ def start(
 
         scheduler.add_job(_era_cache_tick, "interval", seconds=era_cache_interval_seconds, id="era_cache_refresh")
 
+    if mail is not None:
+        def _mail_junk_tick():
+            result = run_mail_junk_scan(mail.mcp_client, limit=mail_junk_scan_limit)
+            if result.get("flagged"):
+                logger.info(
+                    "mail junk scan: flagged %d of %d scanned message(s) as junk (moved %d)",
+                    result["flagged"], result["scanned"], result.get("moved", 0),
+                )
+
+        scheduler.add_job(
+            _guarded_simple("mail_junk_scan", _mail_junk_tick), "interval",
+            seconds=mail_junk_scan_interval_seconds, id="mail_junk_scan",
+            # A minute after boot rather than a full interval away, same reasoning as
+            # the research queues below: new spam doesn't wait for a service restart's
+            # remaining interval to elapse before it's worth a first look.
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
     if home_assistant is not None:
         owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
         _last_forced_refresh = 0.0
@@ -146,7 +169,7 @@ def start(
                         era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
                         home_assistant=home_assistant, business=business, personal=personal,
                         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                        letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+                        letterstream=letterstream,
                     )
                     if reply:
                         notify(owner["telegram_chat_id"], f"{routine['name']}: {reply}")
@@ -419,3 +442,13 @@ def refresh_era_cache(mcp_client, db_path: str) -> None:
             )
 
 
+def run_mail_junk_scan(mcp_client, limit: int = 25) -> dict:
+    """One pass of the autonomous junk-flagging job: asks the mail client to score
+    recent unread inbox mail and move likely junk into the Junk folder, returning its
+    summary for logging.
+
+    A thin top-level wrapper (rather than inlining this in start()'s closure) so it's
+    directly unit-testable against a fake mail client, the same pattern
+    refresh_era_cache/sync_calendar already use.
+    """
+    return mcp_client.call_tool("scan_inbox_for_junk", {"limit": limit, "only_unread": True})

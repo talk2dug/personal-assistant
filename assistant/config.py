@@ -85,6 +85,24 @@ class Config:
     # 2-5 minutes is GitHub-poll-latency territory per docs/watchdog-system-design.md --
     # far under GitHub's 5,000 req/hr authenticated rate limit at this scale.
     github_watchdog_interval_seconds: int = 180
+    # The local-first fast path (assistant/core/local_fast_path.py): tries a local
+    # Ollama model before ever reaching the cloud backend for simple, well-scoped
+    # requests (Home Assistant commands today). Deliberately separate from
+    # ollama_host/ollama_model (used only when llm_backend == "ollama", and shared with
+    # the GPU bridge's own host) -- the owner's actual plan is a second, dedicated local
+    # LLM box that eventually becomes Jarvis's main backend, and this fast path is where
+    # that migration's rough edges (tool-calling reliability, keeping a model warm) get
+    # worked out on a narrow, low-stakes slice of traffic first. None/unset means the
+    # fast path is disabled and every request behaves exactly as it does today.
+    local_llm_host: str | None = None
+    local_llm_model: str = "gemma4:12b-it-q4_K_M"
+    local_llm_timeout_seconds: float = 20.0
+    # How often to ping the local model with a trivial message to keep it resident in
+    # VRAM -- Ollama's own keep_alive only resets on each real use, so a quiet period
+    # (or another job on the same GPU claiming its memory) can let it fall out, and the
+    # very first request after that pays a real ~10s reload cost instead of the
+    # sub-second warm response the fast path exists to provide.
+    local_llm_keepalive_interval_seconds: int = 600
     obsidian_vault_path: str | None = None
     ha_base_url: str | None = None
     ha_token: str | None = None
@@ -248,6 +266,10 @@ def load_config(path: str = "config.json") -> Config:
         review_watchdog_interval_seconds=data.get("review_watchdog_interval_seconds", 900),
         review_watchdog_stale_hours=data.get("review_watchdog_stale_hours", 2.0),
         github_watchdog_interval_seconds=data.get("github_watchdog_interval_seconds", 180),
+        local_llm_host=data.get("local_llm_host"),
+        local_llm_model=data.get("local_llm_model", "gemma4:12b-it-q4_K_M"),
+        local_llm_timeout_seconds=data.get("local_llm_timeout_seconds", 20.0),
+        local_llm_keepalive_interval_seconds=data.get("local_llm_keepalive_interval_seconds", 600),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
         ha_token=data.get("ha_token"),

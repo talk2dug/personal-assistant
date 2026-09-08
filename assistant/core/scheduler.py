@@ -35,6 +35,7 @@ def start(
     task_watchdog_interval_seconds: int = 60,
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
     github_watchdog_interval_seconds: int = 180,
+    local_llm=None, local_llm_keepalive_interval_seconds: int = 600,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -152,7 +153,7 @@ def start(
                 era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
                 home_assistant=home_assistant, business=business, personal=personal,
                 airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+                letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
             )
             if results:
                 logger.info("review watchdog: nudged on %d stale item(s)", len(results))
@@ -175,7 +176,7 @@ def start(
                 era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
                 home_assistant=home_assistant, business=business, personal=personal,
                 airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+                letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
             )
             if results:
                 logger.info("github watchdog: nudged on %d PR change(s)", len(results))
@@ -184,6 +185,21 @@ def start(
             _guarded_simple("github_watchdog", _github_watchdog_tick), "interval",
             seconds=github_watchdog_interval_seconds, id="github_watchdog",
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
+    if local_llm is not None:
+        # Keeps the local-fast-path model resident in VRAM (local_fast_path.py) --
+        # Ollama's own keep_alive only resets on each real use, so a quiet period, or
+        # another job on the same GPU claiming its memory, can let it fall out. Without
+        # this, the very first real request after that pays a real ~10s reload cost
+        # instead of the sub-second warm response the fast path exists to provide.
+        def _local_llm_keepalive_tick():
+            local_llm.chat([{"role": "user", "content": "ok"}], think=False)
+
+        scheduler.add_job(
+            _guarded_simple("local_llm_keepalive", _local_llm_keepalive_tick), "interval",
+            seconds=local_llm_keepalive_interval_seconds, id="local_llm_keepalive",
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
         )
 
     if home_assistant is not None:
@@ -239,7 +255,7 @@ def start(
                         era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
                         home_assistant=home_assistant, business=business, personal=personal,
                         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                        letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+                        letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
                     )
                     if reply:
                         notify(owner["telegram_chat_id"], f"{routine['name']}: {reply}")

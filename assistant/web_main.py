@@ -9,9 +9,9 @@ from .core import business_db, db, media_scan, vision
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_home_assistant_context,
-    build_kroger_context, build_letterstream_context, build_llm, build_mail_context,
-    build_obsidian_context, build_personal_context, build_phone_context, build_recipe_context,
-    build_ticketmaster_context,
+    build_kroger_context, build_letterstream_context, build_llm, build_local_llm_context,
+    build_mail_context, build_obsidian_context, build_personal_context, build_phone_context,
+    build_recipe_context, build_ticketmaster_context,
 )
 from .core.stt import Transcriber
 from .core.tts import Speaker
@@ -67,6 +67,7 @@ def main() -> None:
         cfg, owner_row["id"] if owner_row else None, letterstream=letterstream, kroger=kroger)
     git_ops = build_git_ops_context(cfg)
     recipe = build_recipe_context(cfg)
+    local_llm = build_local_llm_context(cfg)
     stt = Transcriber(model_size=cfg.stt_model_size)
     speaker = Speaker(voice_path=cfg.piper_voice_path)
 
@@ -74,7 +75,7 @@ def main() -> None:
         cfg, llm, era, calendar, phone, stt, mail=mail, obsidian=obsidian, home_assistant=home_assistant,
         business=business, personal=personal, bridge=bridge, speaker=speaker, static_dir="web/dist",
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops, recipe=recipe,
+        git_ops=git_ops, recipe=recipe, local_llm=local_llm,
     )
 
     logger.info("Jarvis web UI starting on port %d", cfg.web_port)

@@ -53,6 +53,22 @@ def build_llm(cfg, owner_user_id: int | None = None):
     return LLMClient(cfg.ollama_host, cfg.ollama_model)
 
 
+def build_local_llm_context(cfg):
+    """The local-first fast path's own model client (assistant/core/local_fast_path.py)
+    -- deliberately independent of build_llm's ollama_host/ollama_model (only used when
+    llm_backend == "ollama", and shared with the GPU bridge's own host) so this can
+    point at different hardware -- namely the owner's planned dedicated local-LLM box --
+    without disturbing either. None when local_llm_host isn't set, and every caller
+    treats None as "fast path disabled, behave exactly as before"."""
+    if not cfg.local_llm_host:
+        return None
+    from .llm import LLMClient
+
+    client = LLMClient(cfg.local_llm_host, cfg.local_llm_model, timeout=cfg.local_llm_timeout_seconds)
+    logger.info("Local LLM fast path: %s at %s", cfg.local_llm_model, cfg.local_llm_host)
+    return client
+
+
 def build_notifier(cfg, telegram_notify, home_assistant=None):
     """Wraps the Telegram notifier so Jarvis's own outgoing messages follow the user's
     notification policy.

@@ -62,13 +62,14 @@ def create_app(
     cfg, llm, era, calendar, phone=None, stt=None, mail=None, obsidian=None, home_assistant=None,
     business=None, personal=None, bridge=None, speaker=None, static_dir: str | None = None,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
-    recipe=None,
+    recipe=None, local_llm=None,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis")
     app.add_middleware(SessionMiddleware, secret_key=cfg.web_session_secret or "dev-insecure-secret-change-me")
 
     app.state.cfg = cfg
     app.state.llm = llm
+    app.state.local_llm = local_llm
     app.state.era = era
     app.state.calendar = calendar
     app.state.phone = phone

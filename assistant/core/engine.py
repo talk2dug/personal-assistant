@@ -1869,12 +1869,18 @@ def handle_message(
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
     recipe: "RecipeContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
+    local_llm=None,
 ) -> str:
     """Runs one user turn through the LLM (with tool-calling), persists the
     conversation, and returns the reply text. image_bytes (a JPEG snapshot from the
     web UI's on-demand camera capture) is attached only to this turn's outgoing
     message, never persisted — gemma4 is multimodal, so it's just another field on
-    the user message ollama sends, not a separate code path."""
+    the user message ollama sends, not a separate code path.
+
+    local_llm (set only when config.local_llm_host is configured) is tried first for
+    simple Home-Assistant-flavored requests via local_fast_path.py, before this ever
+    reaches the main backend -- see that module's own docstring for why. None means the
+    fast path is disabled and this behaves exactly as it always has."""
     if (era is not None or phone is not None or mail is not None or home_assistant is not None
             or kroger is not None or ccxt is not None or letterstream is not None or git_ops is not None):
         pending = db.get_pending_action(db_path, requesting_user_id)
@@ -1882,6 +1888,15 @@ def handle_message(
             return _resolve_pending_action(
                 db_path, llm, era, phone, mail, home_assistant, pending, user_text,
                 kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops)
+
+    if local_llm is not None and home_assistant is not None and image_bytes is None:
+        from . import local_fast_path
+        fast_reply = local_fast_path.try_home_assistant_fast_path(
+            local_llm, home_assistant, db_path, requesting_user_id, user_text, tz_name=tz_name)
+        if fast_reply is not None:
+            db.add_message(db_path, requesting_user_id, "user", user_text)
+            db.add_message(db_path, requesting_user_id, "assistant", fast_reply)
+            return fast_reply
 
     db.add_message(db_path, requesting_user_id, "user", user_text)
 

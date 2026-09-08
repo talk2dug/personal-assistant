@@ -3,7 +3,7 @@ import asyncio
 import logging
 
 from .config import load_config
-from .core import business_db, db, vision
+from .core import business_db, db, github_client, vision
 from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
@@ -30,6 +30,10 @@ def main() -> None:
     # show_camera/list_cameras/add_camera are always-on tools (see engine.py's CAMERA_TOOLS),
     # not behind a build_*_context flag, so the cameras table must exist unconditionally too.
     vision.init_vision_db(cfg.db_path)
+    # github_pr_state backs the GitHub PR/CI watchdog (scheduler.py's run_github_watchdog)
+    # -- unconditional for the same reason business_db/vision are: cheap to create, and
+    # the watchdog job itself is what actually checks whether git_ops is configured.
+    github_client.init_github_db(cfg.db_path)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)
 
@@ -113,6 +117,7 @@ def main() -> None:
         task_watchdog_interval_seconds=cfg.task_watchdog_interval_seconds,
         review_watchdog_interval_seconds=cfg.review_watchdog_interval_seconds,
         review_watchdog_stale_hours=cfg.review_watchdog_stale_hours,
+        github_watchdog_interval_seconds=cfg.github_watchdog_interval_seconds,
     )
 
     logger.info("Jarvis core starting, polling Telegram...")

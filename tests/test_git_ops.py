@@ -191,6 +191,11 @@ class FakeHTTP:
         self.calls.append(("GET", path, None))
         if "check-runs" in path:
             return FakeResponse(200, {"check_runs": [{"name": "backend-tests", "status": "completed", "conclusion": "success"}]})
+        if path.startswith("/repos/owner/repo/pulls?"):
+            return FakeResponse(200, [
+                {"number": 42, "title": "My PR", "html_url": "https://github.com/owner/repo/pull/42"},
+                {"number": 43, "title": "Another PR", "html_url": "https://github.com/owner/repo/pull/43"},
+            ])
         return FakeResponse(200, {
             "state": "open", "mergeable": True, "merged": False,
             "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
@@ -213,6 +218,27 @@ def test_get_pr_status_includes_check_runs(client):
     result = client.get_pr_status(42)
     assert result["ok"] is True
     assert result["checks"] == [{"name": "backend-tests", "status": "completed", "conclusion": "success"}]
+
+
+def test_list_open_prs_returns_number_title_and_url(client):
+    client._http = FakeHTTP()
+    result = client.list_open_prs()
+    assert result == [
+        {"number": 42, "title": "My PR", "url": "https://github.com/owner/repo/pull/42"},
+        {"number": 43, "title": "Another PR", "url": "https://github.com/owner/repo/pull/43"},
+    ]
+    assert client._http.calls[0][0] == "GET"
+    assert client._http.calls[0][1].startswith("/repos/owner/repo/pulls?")
+
+
+def test_list_open_prs_returns_empty_on_error(client):
+    class ErrorHTTP(FakeHTTP):
+        def get(self, path):
+            self.calls.append(("GET", path, None))
+            return FakeResponse(404, {"message": "not found"})
+
+    client._http = ErrorHTTP()
+    assert client.list_open_prs() == []
 
 
 def test_merge_pr_calls_the_github_api(client):

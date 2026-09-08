@@ -9,7 +9,10 @@ from datetime import date, datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import agents, business_db, db, kitchen_db, location, market_data, personal_agents, personal_db, staff
+from . import (
+    agents, business_db, db, github_client, kitchen_db, location, market_data,
+    personal_agents, personal_db, staff,
+)
 from .engine import handle_message
 from .finance import CADENCE_DAYS
 
@@ -31,6 +34,7 @@ def start(
     kroger_sync_interval_seconds: int = 3600,
     task_watchdog_interval_seconds: int = 60,
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
+    github_watchdog_interval_seconds: int = 180,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -50,10 +54,13 @@ def start(
     personal, on its own, also schedules the task-due-date watchdog (mechanical --
     notifies directly, no LLM round trip, same as reminders). business, together with
     llm, schedules the Review-queue staleness watchdog (a pending item nudges the owner
-    through handle_message once it's sat unreviewed past review_watchdog_stale_hours) --
-    deliberately NOT gated behind business_agents_enabled, same reasoning as
-    mail_junk_scan: noticing the owner has something waiting on him is core watchdog
-    behaviour, not a print-business agent. See docs/watchdog-system-design.md."""
+    through handle_message once it's sat unreviewed past review_watchdog_stale_hours).
+    git_ops, together with llm, schedules the GitHub PR/CI watchdog (polls every open
+    PR via the same GitOpsClient every git tool uses, and nudges the owner on any real
+    state change -- a check failing, a PR becoming (un)mergeable, a merge/close). All
+    three watchdog jobs are deliberately NOT gated behind business_agents_enabled, same
+    reasoning as mail_junk_scan: noticing the owner has something waiting on him is core
+    watchdog behaviour, not a print-business agent. See docs/watchdog-system-design.md."""
     business_intervals = business_intervals or {
         "market_hours": 72, "trend_hours": 24, "research_minutes": 120,
         "pipeline_hours": 12, "digest_hour": 8,
@@ -153,6 +160,29 @@ def start(
         scheduler.add_job(
             _guarded_simple("review_watchdog", _review_watchdog_tick), "interval",
             seconds=review_watchdog_interval_seconds, id="review_watchdog",
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
+    if git_ops is not None and llm is not None:
+        # The GitHub PR/CI watchdog -- the sharpest pain point this whole watchdog
+        # effort was built for ("coding isn't getting done, I find out hours later").
+        # Deliberately outside business_agents_enabled, same reasoning as mail_junk_scan
+        # and review_watchdog above: noticing a dev-team PR's CI just failed is core
+        # watchdog behaviour, not a print-business agent.
+        def _github_watchdog_tick():
+            results = run_github_watchdog(
+                db_path, git_ops.mcp_client, llm, notify, tz_name=tz_name,
+                era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
+                home_assistant=home_assistant, business=business, personal=personal,
+                airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
+                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+            )
+            if results:
+                logger.info("github watchdog: nudged on %d PR change(s)", len(results))
+
+        scheduler.add_job(
+            _guarded_simple("github_watchdog", _github_watchdog_tick), "interval",
+            seconds=github_watchdog_interval_seconds, id="github_watchdog",
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
         )
 
@@ -599,6 +629,52 @@ def run_review_watchdog(db_path: str, llm, notify, hours: float = 2.0, tz_name: 
         except Exception:
             logger.exception("review watchdog failed for item %s", item["id"])
             results.append({"item_id": item["id"], "notified": False, "error": True})
+    return results
+
+
+def run_github_watchdog(db_path: str, git_ops_client, llm, notify, tz_name: str = "UTC",
+                         **context) -> list[dict]:
+    """One pass of the GitHub PR/CI watchdog: polls every open PR (github_client.refresh,
+    which persists the new state before this even looks at what changed -- same
+    mark-before-running-the-prompt reasoning as run_review_watchdog, just structured as
+    part of the poll itself here), and for every real transition it found (a check just
+    failed, a PR became mergeable/unmergeable, CI finished, a PR got merged or closed)
+    synthesizes a short prompt and runs it through handle_message so Jarvis describes
+    what happened in his own words, then notifies the reply.
+
+    Same judgement-needed path as run_review_watchdog, same reason it's safe: the
+    watchdog's only way to act is handle_message, so it inherits the pending_actions
+    confirmation gate automatically -- noticing a PR is green can never become merging
+    it without the owner saying yes (git_merge_pr already sits in GIT_SENSITIVE_TOOLS,
+    so this needed no new sensitive-tool-list entry, unlike docs/watchdog-system-design.md
+    section 4's general caution for a brand new surface).
+    """
+    result = github_client.refresh(db_path, git_ops_client)
+    if not result.get("ok"):
+        logger.warning("github watchdog poll failed: %s", result.get("error"))
+        return []
+
+    results = []
+    owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+    if owner is None:
+        return results
+    for change in result["changes"]:
+        prev, now = change["previous"], change["now"]
+        prompt = (
+            f"PR #{change['pr_number']} \"{change['title']}\" ({change['url']}) just changed. "
+            f"Before: state={prev['state']} merged={prev['merged']} mergeable={prev['mergeable']} "
+            f"checks={prev['checks_conclusion']}. Now: state={now['state']} merged={now['merged']} "
+            f"mergeable={now['mergeable']} checks={now['checks_conclusion']}. "
+            "Briefly let the owner know what changed and whether it needs his attention."
+        )
+        try:
+            reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name, **context)
+            if reply:
+                notify(owner["telegram_chat_id"], reply)
+            results.append({"pr_number": change["pr_number"], "notified": bool(reply)})
+        except Exception:
+            logger.exception("github watchdog failed for PR %s", change["pr_number"])
+            results.append({"pr_number": change["pr_number"], "notified": False, "error": True})
     return results
 
 

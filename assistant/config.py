@@ -82,6 +82,9 @@ class Config:
     task_watchdog_interval_seconds: int = 60
     review_watchdog_interval_seconds: int = 900
     review_watchdog_stale_hours: float = 2.0
+    # 2-5 minutes is GitHub-poll-latency territory per docs/watchdog-system-design.md --
+    # far under GitHub's 5,000 req/hr authenticated rate limit at this scale.
+    github_watchdog_interval_seconds: int = 180
     obsidian_vault_path: str | None = None
     ha_base_url: str | None = None
     ha_token: str | None = None
@@ -244,6 +247,7 @@ def load_config(path: str = "config.json") -> Config:
         task_watchdog_interval_seconds=data.get("task_watchdog_interval_seconds", 60),
         review_watchdog_interval_seconds=data.get("review_watchdog_interval_seconds", 900),
         review_watchdog_stale_hours=data.get("review_watchdog_stale_hours", 2.0),
+        github_watchdog_interval_seconds=data.get("github_watchdog_interval_seconds", 180),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
         ha_token=data.get("ha_token"),

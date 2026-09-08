@@ -1,16 +1,17 @@
-"""Verifies the watchdog jobs' wiring: run_task_watchdog (mechanical, notify() directly)
-and run_review_watchdog (judgement-needed, routed through handle_message first) --
-see docs/watchdog-system-design.md section 3 for why these are split that way. The
-underlying due_tasks/stale_review_items query logic has its own tests in
-test_personal_db_watchdog.py/test_business_db_watchdog.py; this only checks the wiring,
-the same way test_scheduler_mail_junk.py only checks run_mail_junk_scan's wiring.
+"""Verifies the watchdog jobs' wiring: run_task_watchdog (mechanical, notify() directly),
+run_review_watchdog and run_github_watchdog (both judgement-needed, routed through
+handle_message first) -- see docs/watchdog-system-design.md section 3 for why these are
+split that way. The underlying due_tasks/stale_review_items/github refresh-and-diff
+logic has its own tests in test_personal_db_watchdog.py/test_business_db_watchdog.py/
+test_github_client.py; this only checks the wiring, the same way
+test_scheduler_mail_junk.py only checks run_mail_junk_scan's wiring.
 """
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from assistant.core import business_db, db, personal_db, scheduler
+from assistant.core import business_db, db, github_client, personal_db, scheduler
 
 
 @pytest.fixture
@@ -19,6 +20,7 @@ def db_path(tmp_path):
     db.init_db(path)
     personal_db.init_personal_db(path)
     business_db.init_business_db(path)
+    github_client.init_github_db(path)
     return path
 
 
@@ -88,5 +90,75 @@ def test_run_review_watchdog_is_a_noop_with_nothing_stale(db_path, owner, monkey
     )
 
     results = scheduler.run_review_watchdog(db_path, llm=object(), notify=lambda *a: None, hours=2)
+
+    assert results == []
+
+
+class FakeGitOpsClient:
+    def __init__(self, open_prs, statuses):
+        self._open_prs = open_prs
+        self._statuses = statuses
+
+    def list_open_prs(self):
+        return self._open_prs
+
+    def get_pr_status(self, pr_number):
+        return self._statuses[pr_number]
+
+
+def _pr_status(state="open", mergeable=True, merged=False, conclusion="success"):
+    return {"ok": True, "state": state, "mergeable": mergeable, "merged": merged,
+            "url": "https://github.com/o/r/pull/7",
+            "checks": [{"name": "backend", "status": "completed", "conclusion": conclusion}]}
+
+
+def test_run_github_watchdog_nudges_through_handle_message_on_a_real_change(db_path, owner, monkeypatch):
+    open_prs = [{"number": 7, "title": "Add feature", "url": "https://github.com/o/r/pull/7"}]
+    first_poll = FakeGitOpsClient(open_prs, {7: _pr_status(conclusion="success")})
+    github_client.refresh(db_path, first_poll)  # establishes a baseline, not itself a change
+
+    seen = {}
+
+    def fake_handle_message(db_path_arg, llm, owner_id, text, **kwargs):
+        seen["owner_id"] = owner_id
+        seen["text"] = text
+        return "Sir, PR #7's backend check just failed."
+
+    monkeypatch.setattr(scheduler, "handle_message", fake_handle_message)
+    notified = []
+    second_poll = FakeGitOpsClient(open_prs, {7: _pr_status(conclusion="failure")})
+
+    results = scheduler.run_github_watchdog(
+        db_path, second_poll, llm=object(), notify=lambda chat_id, text: notified.append((chat_id, text)),
+    )
+
+    assert results == [{"pr_number": 7, "notified": True}]
+    assert seen["owner_id"] == owner["id"]
+    assert "PR #7" in seen["text"] and "Add feature" in seen["text"]
+    assert notified == [("111", "Sir, PR #7's backend check just failed.")]
+
+
+def test_run_github_watchdog_is_a_noop_on_the_first_poll(db_path, owner, monkeypatch):
+    open_prs = [{"number": 7, "title": "Add feature", "url": "https://github.com/o/r/pull/7"}]
+    git_ops = FakeGitOpsClient(open_prs, {7: _pr_status()})
+    monkeypatch.setattr(
+        scheduler, "handle_message",
+        lambda *a, **k: pytest.fail("a first-ever-seen PR should not be reported as a change"),
+    )
+
+    results = scheduler.run_github_watchdog(db_path, git_ops, llm=object(), notify=lambda *a: None)
+
+    assert results == []
+
+
+def test_run_github_watchdog_logs_and_continues_on_a_failed_poll(db_path, owner, monkeypatch):
+    class BrokenGitOps:
+        def list_open_prs(self):
+            return {"error": "rate limited"}
+
+    monkeypatch.setattr(
+        scheduler, "handle_message", lambda *a, **k: pytest.fail("should never reach handle_message"))
+
+    results = scheduler.run_github_watchdog(db_path, BrokenGitOps(), llm=object(), notify=lambda *a: None)
 
     assert results == []

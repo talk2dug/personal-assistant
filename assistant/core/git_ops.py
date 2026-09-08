@@ -203,6 +203,19 @@ class GitOpsClient:
             "checks": [{"name": c["name"], "status": c["status"], "conclusion": c["conclusion"]} for c in checks],
         }
 
+    def list_open_prs(self) -> list[dict]:
+        """Every currently-open PR, for github_client.py's watchdog poll to diff against
+        what it last saw. Not exposed as a chat tool -- internal to the watchdog, same as
+        _run_git is internal to the tools built on top of it. The query string is
+        embedded in the path rather than passed as a separate params= kwarg so this
+        works against the same minimal fake HTTP client (get(path) only) the rest of
+        this module's tests already use.
+        """
+        resp = self._http.get(f"/repos/{self.repo}/pulls?state=open&per_page=100")
+        if resp.status_code >= 400:
+            return []
+        return [{"number": p["number"], "title": p["title"], "url": p["html_url"]} for p in resp.json()]
+
     def merge_pr(self, pr_number: int, merge_method: str = "squash") -> dict:
         resp = self._http.put(f"/repos/{self.repo}/pulls/{pr_number}/merge", json={"merge_method": merge_method})
         if resp.status_code >= 400:

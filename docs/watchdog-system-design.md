@@ -1,6 +1,6 @@
 # Watchdog System — Making Jarvis Proactive
 
-Status: **proposal, not built**. For owner decision on scope before any code is written.
+Status: **Phases 1-5 built and live** (quieted alert flooding; task/Review/GitHub watchdogs; diff-scope safety check; auto-merge governance). Phases 6-7 (local SSH/MCP-install access, proactive-contact tie-together) remain. See personal project 15, "Jarvis Operations: Watchdog & Dev-Team Autonomy".
 
 ## 1. The problem, stated precisely
 
@@ -232,3 +232,8 @@ of the Pi.
 3. Confirm which GitHub actions beyond "merge" should be treated as sensitive
    (e.g. should Jarvis be allowed to auto-comment or auto-label without confirmation,
    while merge and branch-deletion always pause)?
+
+
+## Implementation status (2026-09-08)
+
+This design shipped, in order: the notification-flooding fix (Phase 1), the Review/task watchdog MVP recommended above (Phase 2), the GitHub PR/CI watchdog this doc scoped as "Phase 2" in its own recommended-MVP section (Phase 3 here), a new diff-scope safety check not originally scoped in this doc at all -- added because this project hit three real instances of `main` silently losing shipped code, which made "trust green CI alone" for auto-merge insufficient (Phase 4) -- and the auto-merge governance change to `git_merge_pr` itself, gated on both (Phase 5). This PR is itself a live test of that last piece.

@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { api } from './api'
 import JarvisDock from './components/JarvisDock'
@@ -45,10 +45,31 @@ function Shell() {
   const onOrb = location.pathname === ORB_PATH
   const pendingReviews = usePendingReviews()
 
+  // Below the tablet breakpoint the nav collapses into a hamburger (see
+  // responsive.css); this just tracks whether that collapsed panel is open. It's reset
+  // to closed on every navigation so picking a link doesn't leave the menu covering the
+  // page you just asked for.
+  const [navOpen, setNavOpen] = useState(false)
+  useEffect(() => { setNavOpen(false) }, [location.pathname])
+
   return (
     <div className="app-shell">
-      <nav className="app-nav">
+      <nav className={`app-nav${navOpen ? ' nav-open' : ''}`}>
         <div className="app-title">Jarvis</div>
+        {/* Desktop ignores this entirely (display: none above 900px). Below that,
+            responsive.css hides every other child of .app-nav until nav-open is set,
+            so this is the only thing visible besides the title. */}
+        <button
+          type="button"
+          className="nav-hamburger"
+          aria-label={navOpen ? 'Close menu' : 'Open menu'}
+          aria-expanded={navOpen}
+          onClick={() => setNavOpen((o) => !o)}
+        >
+          <span />
+          <span />
+          <span />
+        </button>
         {sections.map((s) => (
           <NavLink key={s.path} to={s.path} className={({ isActive }) => (isActive ? 'active' : '')}>
             {s.label}
@@ -100,4 +121,3 @@ export default function App() {
     </AuthProvider>
   )
 }
-

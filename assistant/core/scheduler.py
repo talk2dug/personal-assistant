@@ -16,6 +16,21 @@ from .finance import CADENCE_DAYS
 logger = logging.getLogger(__name__)
 
 
+def run_mail_junk_scan(mail_client, limit: int = 25, only_unread: bool = True) -> dict:
+    """Wiring for the autonomous junk-scan job: calls into the mail client's own
+    scan_inbox_for_junk tool and returns its result unchanged. The scoring/moving logic
+    itself belongs to mail_client.py and junk_filter.py (see their own tests); this is
+    just the same kind of thin wiring function refresh_era_cache is for the Era cache
+    job below -- easy to unit test without a real IMAP connection or a running
+    scheduler.
+
+    Limited to unread mail by default for the same reason mail_client.scan_inbox_for_junk
+    itself defaults that way: this runs repeatedly on an interval, and re-scoring
+    already-read mail every tick would be wasted IMAP round trips for no benefit.
+    """
+    return mail_client.call_tool("scan_inbox_for_junk", {"limit": limit, "only_unread": only_unread})
+
+
 def start(
     db_path: str, notify, poll_interval_seconds: int = 30,
     calendar=None, caldav_sync_interval_seconds: int = 300,
@@ -28,6 +43,7 @@ def start(
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
     personal=None, personal_research_minutes: int = 30,
     mail_triage_interval_minutes: int = 30, mail_triage_scan_limit: int = 15,
+    mail_junk_scan_interval_seconds: int = 900,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -327,6 +343,21 @@ def start(
                 "interval", minutes=mail_triage_interval_minutes, id="mail_triage_agent",
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
+
+    if mail is not None:
+        # Autonomous junk-flagging (see junk_filter.py and MailClient.scan_inbox_for_junk):
+        # scores and moves obvious spam/phishing out of INBOX on its own. Deliberately a
+        # separate job from mail_triage_agent above (drafting replies) and NOT gated on
+        # an llm being configured at all -- junk_filter is pure heuristics, no model
+        # call -- and NOT gated on business_agents_enabled, same reasoning as that flag's
+        # docstring: this is inbox hygiene, not one of the print business's unattended
+        # agents. It only ever moves a message to the Junk folder (nothing is deleted),
+        # so it's safe to run unattended on its own schedule.
+        scheduler.add_job(
+            _guarded_simple("mail_junk_scan", lambda: run_mail_junk_scan(mail.mcp_client)),
+            "interval", seconds=mail_junk_scan_interval_seconds, id="mail_junk_scan",
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
 
     if market_api_key:
         # The crypto feed. Deliberately outside the business_agents_enabled gate: the

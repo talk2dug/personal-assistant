@@ -74,6 +74,14 @@ class Config:
     # No documented Kroger rate limit exists anywhere in kroger-mcp or its API docs, so
     # this mirrors Era's real-world default rather than inventing a number.
     kroger_sync_interval_seconds: int = 3600
+    # Watchdog polling (see scheduler.py's run_task_watchdog/run_review_watchdog and
+    # docs/watchdog-system-design.md). Tasks poll fast since it's a cheap mechanical
+    # check; Review staleness polls slower since the threshold itself is hours, not
+    # seconds -- there's no value in checking every minute for something that only
+    # matters after review_watchdog_stale_hours have passed.
+    task_watchdog_interval_seconds: int = 60
+    review_watchdog_interval_seconds: int = 900
+    review_watchdog_stale_hours: float = 2.0
     obsidian_vault_path: str | None = None
     ha_base_url: str | None = None
     ha_token: str | None = None
@@ -233,6 +241,9 @@ def load_config(path: str = "config.json") -> Config:
         mail_junk_scan_interval_seconds=data.get("mail_junk_scan_interval_seconds", 900),
         mail_junk_score_threshold=data.get("mail_junk_score_threshold", 4.0),
         kroger_sync_interval_seconds=data.get("kroger_sync_interval_seconds", 3600),
+        task_watchdog_interval_seconds=data.get("task_watchdog_interval_seconds", 60),
+        review_watchdog_interval_seconds=data.get("review_watchdog_interval_seconds", 900),
+        review_watchdog_stale_hours=data.get("review_watchdog_stale_hours", 2.0),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
         ha_token=data.get("ha_token"),

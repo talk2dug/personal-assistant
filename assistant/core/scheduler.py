@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import agents, business_db, db, kitchen_db, location, market_data, personal_agents, staff
+from . import agents, business_db, db, kitchen_db, location, market_data, personal_agents, personal_db, staff
 from .engine import handle_message
 from .finance import CADENCE_DAYS
 
@@ -29,6 +29,8 @@ def start(
     personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
     mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
     kroger_sync_interval_seconds: int = 3600,
+    task_watchdog_interval_seconds: int = 60,
+    review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -43,7 +45,15 @@ def start(
     kroger, when given alongside personal, schedules kroger_sync -- see
     kitchen_db.sync_kroger_orders's own docstring for the real (narrow) limits of what
     this can actually find: only orders Jarvis's own cart tools built and that were
-    later marked placed, never a trip made independently on Kroger's own app or site."""
+    later marked placed, never a trip made independently on Kroger's own app or site.
+
+    personal, on its own, also schedules the task-due-date watchdog (mechanical --
+    notifies directly, no LLM round trip, same as reminders). business, together with
+    llm, schedules the Review-queue staleness watchdog (a pending item nudges the owner
+    through handle_message once it's sat unreviewed past review_watchdog_stale_hours) --
+    deliberately NOT gated behind business_agents_enabled, same reasoning as
+    mail_junk_scan: noticing the owner has something waiting on him is core watchdog
+    behaviour, not a print-business agent. See docs/watchdog-system-design.md."""
     business_intervals = business_intervals or {
         "market_hours": 72, "trend_hours": 24, "research_minutes": 120,
         "pipeline_hours": 12, "digest_hour": 8,
@@ -118,6 +128,31 @@ def start(
             # A minute after boot rather than a full interval away, same reasoning as
             # the research queues below: new spam doesn't wait for a service restart's
             # remaining interval to elapse before it's worth a first look.
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
+    if business is not None and llm is not None:
+        # The Review-queue staleness watchdog: catches a pending item nobody ever came
+        # back to, not just what's currently pending when someone happens to open the
+        # page. Deliberately outside the business_agents_enabled gate -- same reasoning
+        # as mail_junk_scan above: noticing the owner has something waiting on him
+        # (which includes any sensitive-tool confirmation, e.g. a PR ready to merge --
+        # see review.py's ref_table == 'pending_actions' branch) is core watchdog
+        # behaviour, not a print-business agent that owner switch is meant to gate.
+        def _review_watchdog_tick():
+            results = run_review_watchdog(
+                db_path, llm, notify, hours=review_watchdog_stale_hours, tz_name=tz_name,
+                era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
+                home_assistant=home_assistant, business=business, personal=personal,
+                airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
+                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+            )
+            if results:
+                logger.info("review watchdog: nudged on %d stale item(s)", len(results))
+
+        scheduler.add_job(
+            _guarded_simple("review_watchdog", _review_watchdog_tick), "interval",
+            seconds=review_watchdog_interval_seconds, id="review_watchdog",
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
         )
 
@@ -337,6 +372,20 @@ def start(
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
 
+    if personal is not None:
+        # The task-due-date watchdog. Purely mechanical (see run_task_watchdog), so
+        # unlike personal_research above it needs no LLM at all -- a due_at column
+        # already saying "now" is the judgement, same as reminders.
+        def _task_watchdog_tick():
+            results = run_task_watchdog(db_path, notify)
+            if results:
+                logger.info("task watchdog: notified %d due task(s)", len(results))
+
+        scheduler.add_job(
+            _guarded_simple("task_watchdog", _task_watchdog_tick), "interval",
+            seconds=task_watchdog_interval_seconds, id="task_watchdog",
+        )
+
     if kroger is not None and personal is not None:
         owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
 
@@ -482,5 +531,74 @@ def run_mail_junk_scan(mcp_client, limit: int = 25) -> dict:
     refresh_era_cache/sync_calendar already use.
     """
     return mcp_client.call_tool("scan_inbox_for_junk", {"limit": limit, "only_unread": True})
+
+
+def run_task_watchdog(db_path: str, notify, as_of: str | None = None) -> list[dict]:
+    """One pass of the personal-task due-date watchdog: notifies the owner of every
+    task whose due_at has arrived and hasn't been notified about yet, then marks it
+    notified so a slow poll interval can't fire on it twice.
+
+    Purely mechanical -- no LLM round trip -- same reasoning db.due_reminders()'s own
+    _tick uses: there's no judgement to make about a due-date table already saying a
+    task is due. A thin top-level wrapper, same pattern as run_mail_junk_scan, so it's
+    directly unit-testable against a fake notify callback.
+    """
+    results = []
+    users_by_id = {u["id"]: u for u in db.all_users(db_path)}
+    for task in personal_db.due_tasks(db_path, as_of=as_of):
+        owner = users_by_id.get(task["owner_user_id"])
+        notified = False
+        if owner is not None:
+            try:
+                notify(owner["telegram_chat_id"], f"Task due: {task['text']}")
+                notified = True
+            except Exception:
+                logger.exception("failed to notify task %s due", task["id"])
+        personal_db.mark_task_notified(db_path, task["id"])
+        results.append({"task_id": task["id"], "notified": notified})
+    return results
+
+
+def run_review_watchdog(db_path: str, llm, notify, hours: float = 2.0, tz_name: str = "UTC",
+                         **context) -> list[dict]:
+    """One pass of the Review-queue staleness watchdog: for every pending Review item
+    that's sat without a decision longer than `hours`, marks it notified (before running
+    the prompt below -- same reasoning as routines: a slow or failing run must not be
+    retried into a repeat-fire storm) and runs a short synthesized prompt through
+    handle_message so Jarvis describes what's waiting in his own words, then notifies
+    the reply.
+
+    This is the "judgement-needed" watchdog path from docs/watchdog-system-design.md
+    section 3 -- one more caller of handle_message/notify, same as chat and routines,
+    so it inherits the pending_actions confirmation gate automatically and gets no
+    shortcut around it. **context forwards whatever contexts start() was given (era,
+    calendar, business, kroger, git_ops, ...) so the synthesized prompt has the same
+    tool surface a typed chat message would.
+    """
+    results = []
+    users_by_id = {u["id"]: u for u in db.all_users(db_path)}
+    for item in business_db.stale_review_items(db_path, hours=hours):
+        # Mark first: if handle_message throws or hangs, the next tick must not re-nudge
+        # on the same item and pile up duplicate notifications.
+        business_db.mark_review_item_watchdog_notified(db_path, item["id"])
+        owner = users_by_id.get(item["owner_user_id"])
+        if owner is None:
+            results.append({"item_id": item["id"], "notified": False})
+            continue
+        prompt = (
+            f"A Review item has been sitting pending without a decision for over "
+            f"{hours:g} hours: \"{item['title']}\" ({item['kind']}). "
+            f"Summary: {item.get('summary') or 'no summary given'}. "
+            "Briefly let the owner know it's still waiting on his decision."
+        )
+        try:
+            reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name, **context)
+            if reply:
+                notify(owner["telegram_chat_id"], reply)
+            results.append({"item_id": item["id"], "notified": bool(reply)})
+        except Exception:
+            logger.exception("review watchdog failed for item %s", item["id"])
+            results.append({"item_id": item["id"], "notified": False, "error": True})
+    return results
 
 

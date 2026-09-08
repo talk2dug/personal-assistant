@@ -108,6 +108,11 @@ def main() -> None:
         # docstring for why this isn't gated behind that switch).
         mail_junk_scan_interval_seconds=cfg.mail_junk_scan_interval_seconds,
         kroger_sync_interval_seconds=cfg.kroger_sync_interval_seconds,
+        # Watchdog: notices a due personal task or a Review item nobody came back to,
+        # instead of the owner only finding out when he happens to ask or check the page.
+        task_watchdog_interval_seconds=cfg.task_watchdog_interval_seconds,
+        review_watchdog_interval_seconds=cfg.review_watchdog_interval_seconds,
+        review_watchdog_stale_hours=cfg.review_watchdog_stale_hours,
     )
 
     logger.info("Jarvis core starting, polling Telegram...")

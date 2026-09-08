@@ -833,17 +833,31 @@ HOME_ASSISTANT_TOOLS = [
         "function": {
             "name": "call_service",
             "description": (
-                "Call a Home Assistant service to control a device, e.g. domain='light', "
-                "service='turn_on', entity_id='light.living_room'. Locking/unlocking doors, "
-                "opening/closing garage doors or gates, and arming/disarming the alarm are sensitive "
-                "and stage for the user's explicit confirmation before they execute."
+                "Call a Home Assistant service to control one or more devices, e.g. domain='light', "
+                "service='turn_on', entity_id='light.living_room'. "
+                "IMPORTANT -- if the same service applies to more than one entity (e.g. 'turn off the "
+                "lights' meaning several lights, or any request naming/implying multiple devices), you "
+                "MUST call this tool exactly ONCE with entity_id as a list of every target, e.g. "
+                "entity_id=['light.living_room', 'light.kitchen']. Do NOT call this tool once per "
+                "device -- each call is a slow real round trip, and HA natively supports acting on a "
+                "list of entities in a single call, so calling it repeatedly for one user request is "
+                "always wrong, never just a style choice. "
+                "Locking/unlocking doors, opening/closing garage doors or gates, and arming/disarming "
+                "the alarm are sensitive and stage for the user's explicit confirmation before they "
+                "execute."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "domain": {"type": "string", "description": "Service domain, e.g. 'light', 'lock', 'climate'."},
                     "service": {"type": "string", "description": "Service name, e.g. 'turn_on', 'unlock', 'set_temperature'."},
-                    "entity_id": {"type": "string", "description": "Target entity id."},
+                    "entity_id": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}},
+                        ],
+                        "description": "Target entity id, or a list of entity ids to act on all of them in one call.",
+                    },
                     "data": {"type": "object", "description": "Extra service data, e.g. {'temperature': 72}."},
                 },
                 "required": ["domain", "service", "entity_id"],

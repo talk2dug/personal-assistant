@@ -95,6 +95,28 @@ def test_light_domain_calls_directly_without_confirmation(db_path, owner_id):
     assert db.get_pending_action(db_path, owner_id) is None
 
 
+def test_a_list_of_entities_dispatches_in_one_call_not_one_per_light(db_path, owner_id):
+    """The actual latency fix: 'turn off the lights' (plural) should reach call_service
+    ONCE with a list, not once per light -- each extra call is a full extra model turn."""
+    ha, client = make_ha()
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "call_service", "arguments": {
+                "domain": "light", "service": "turn_off",
+                "entity_id": ["light.living_room", "light.kitchen"],
+            }}}
+        ]},
+        {"role": "assistant", "content": "Turned off the lights."},
+    ])
+
+    engine.handle_message(db_path, llm, owner_id, "turn off the lights", home_assistant=ha)
+
+    assert client.calls == [("call_service", {
+        "domain": "light", "service": "turn_off", "entity_id": ["light.living_room", "light.kitchen"],
+    })]
+    assert db.get_pending_action(db_path, owner_id) is None
+
+
 def test_home_assistant_tools_absent_when_no_context(db_path, owner_id):
     llm = FakeLLM([{"role": "assistant", "content": "Hi there"}])
 

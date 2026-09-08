@@ -1,6 +1,6 @@
-"""FastAPI backend for the Jarvis web UI -- serves the built React app and exposes
+"""FastAPI backend for the Jarvis web UI â€” serves the built React app and exposes
 /api/*. Runs as its own process (jarvis-web.service on pi5nas002), sharing jarvis.db
-with the Telegram bot process (safe via WAL mode) but nothing else -- see the Phase 4
+with the Telegram bot process (safe via WAL mode) but nothing else â€” see the Phase 4
 plan for why this is a second process rather than threaded into the existing one.
 
 Adding a new section (future agents): add a router module under routes/, include it
@@ -13,12 +13,14 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
+from ..core import vision
+
 
 class SPAStaticFiles(StaticFiles):
     """Serves the built React app, falling back to index.html for unknown paths.
 
     Client-side routes (/finance, /review, /device) don't exist as files, so a *direct*
-    load of one -- a hard refresh, a bookmark, or a kiosk browser opening a deep link --
+    load of one — a hard refresh, a bookmark, or a kiosk browser opening a deep link —
     404s under a plain static mount. That went unnoticed for a long time because the UI
     is always entered at / and navigates client-side; the Pi terminal, which boots
     straight to /device, hit it immediately.
@@ -41,35 +43,37 @@ class SPAStaticFiles(StaticFiles):
 from .auth import router as auth_router
 from .routes.agents import router as agents_router
 from .routes.chat import router as chat_router
-from .routes.cameras import router as cameras_router
-from .routes.credit import router as credit_router
 from .routes.crypto import router as crypto_router
 from .routes.devices import router as devices_router
 from .routes.notifications import router as notifications_router
 from .routes.finance import router as finance_router
 from .routes.grocery import router as grocery_router
-from .routes.kitchen import router as kitchen_router
 from .routes.media import router as media_router
 from .routes.openai_compat import router as openai_compat_router
 from .routes.personal_tasks import router as personal_tasks_router
 from .routes.review import router as review_router
 from .routes.schedule import router as schedule_router
 from .routes.tools import router as tools_router
+from .routes.vision import router as vision_router
 from .routes.weather import router as weather_router
 
 
 def create_app(
     cfg, llm, era, calendar, phone=None, stt=None, mail=None, obsidian=None, home_assistant=None,
     business=None, personal=None, bridge=None, speaker=None, static_dir: str | None = None,
-    airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
-    recipe=None, local_llm=None,
+    airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis")
     app.add_middleware(SessionMiddleware, secret_key=cfg.web_session_secret or "dev-insecure-secret-change-me")
 
+    # The camera/identity tables are read by routes/vision.py and routes/devices.py's
+    # identity gate regardless of whether the camera-watch process has ever run on this
+    # box — same reasoning as media_scan.init_media_db below: create them here so those
+    # routes return empty/fail-closed results rather than a 500 on a fresh install.
+    vision.init_vision_db(cfg.db_path)
+
     app.state.cfg = cfg
     app.state.llm = llm
-    app.state.local_llm = local_llm
     app.state.era = era
     app.state.calendar = calendar
     app.state.phone = phone
@@ -86,12 +90,9 @@ def create_app(
     app.state.kroger = kroger
     app.state.ccxt = ccxt
     app.state.letterstream = letterstream
-    app.state.git_ops = git_ops
-    app.state.recipe = recipe
 
     app.include_router(auth_router)
     app.include_router(chat_router)
-    app.include_router(cameras_router)
     app.include_router(finance_router)
     app.include_router(openai_compat_router)
     app.include_router(tools_router)
@@ -105,10 +106,12 @@ def create_app(
     app.include_router(weather_router)
     app.include_router(personal_tasks_router)
     app.include_router(grocery_router)
-    app.include_router(kitchen_router)
-    app.include_router(credit_router)
+    app.include_router(vision_router)
 
     if static_dir and Path(static_dir).is_dir():
         app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")
 
     return app
+
+
+

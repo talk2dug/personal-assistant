@@ -12,6 +12,14 @@ each stage completes rather than the client guessing.
 
 Auth is a static device key, not the session cookie: these clients are headless, and the
 kiosk browser showing the orb has nobody to log it in.
+
+Chunk 2 (Presence/Identity): before calling the assistant, /turn asks identity_gate
+whether the owner is confirmed present at this device's linked camera. Confirmed, and
+nothing changes from before. Not confirmed — no kiosk camera, no face, an unrecognized
+face, a disabled/unreachable camera, anything -- the turn still runs (a voice terminal
+should still answer *something*), but only with the shared tool tier identity_gate
+decides on, never with the owner's private integrations. See identity_gate.py's
+docstring for exactly what that tier is and why it fails closed.
 """
 import asyncio
 import base64
@@ -23,7 +31,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
-from ...core import db, kitchen_db, vision
+from ...core import db, identity_gate
 from ...core.engine import handle_message
 
 logger = logging.getLogger(__name__)
@@ -61,24 +69,27 @@ def _owner_user_id(request: Request) -> int:
     return owner["id"]
 
 
+def _resolve_identity(request: Request, device_id: str) -> identity_gate.IdentityResult:
+    """Off by default (cfg.identity_gating_enabled) -- see config.py's comment on that
+    flag for why a fresh checkout, or a house with no kiosk camera mounted yet, must not
+    silently start restricting every voice turn. getattr with a default so a minimal or
+    older Config/test double that predates this flag behaves as 'off', not as an error.
+    """
+    cfg = request.app.state.cfg
+    if not getattr(cfg, "identity_gating_enabled", False):
+        return identity_gate.IdentityResult(confirmed_owner=True, reason="identity_gating_disabled")
+    return identity_gate.resolve(
+        cfg.db_path, device_id,
+        getattr(request.app.state, "detector", None),
+        getattr(request.app.state, "face_recognizer", None),
+    )
+
+
 def _set_state(device_id: str, **fields) -> dict:
     entry = DEVICE_STATE.setdefault(device_id, {"device_id": device_id, "state": "idle", "caption": ""})
     entry.update(fields)
     entry["updated_at"] = time.time()
     return entry
-
-
-def _apply_pending_recipe_view(device_id: str, db_path: str) -> None:
-    """display_recipe (if called from anywhere in the house) leaves its result here for
-    whichever device_id it targeted -- unlike show_camera's pending_camera_views (keyed
-    by user_id, always the device mid-interaction with whoever's talking), a recipe's
-    target is an explicit argument that can be a *different* device than the one issuing
-    the command, so this has to be checked from both /turn's own-device fast path (the
-    kiosk's own mic, for an immediate same-turn display) and the top of GET /{device_id}
-    (the regular ~700ms poll, for a command issued elsewhere in the house)."""
-    recipe = kitchen_db.pop_pending_recipe_view(db_path, device_id)
-    if recipe is not None:
-        _set_state(device_id, recipe=recipe, recipe_seq=DEVICE_STATE.get(device_id, {}).get("recipe_seq", 0) + 1)
 
 
 @router.post("/{device_id}/state")
@@ -100,8 +111,6 @@ async def get_state(device_id: str, request: Request):
     """What the kiosk page polls. Falls back to a sane idle rather than 404ing, so a
     freshly-booted screen shows the orb instead of an error while its client starts."""
     _require_device_key(request)
-    cfg = request.app.state.cfg
-    _apply_pending_recipe_view(device_id, cfg.db_path)
     entry = DEVICE_STATE.get(device_id)
     if entry is None:
         return {"device_id": device_id, "state": "offline", "caption": "", "online": False}
@@ -150,17 +159,34 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
 
     _set_state(device_id, state="thinking", caption=transcript)
 
-    owner_id = _owner_user_id(request)
-    call = functools.partial(
-        handle_message, cfg.db_path, request.app.state.llm, owner_id, transcript,
-        tz_name=cfg.timezone, era=request.app.state.era, calendar=request.app.state.calendar,
+    # Identity gate runs before the assistant is asked anything. It never blocks the
+    # turn -- a voice terminal should still answer -- it only decides which integration
+    # tools are on the table for this particular turn. See identity_gate.py.
+    try:
+        identity = await loop.run_in_executor(None, _resolve_identity, request, device_id)
+    except Exception:
+        logger.exception("identity gate failed for device %s -- failing closed", device_id)
+        identity = identity_gate.IdentityResult(confirmed_owner=False, reason="gate_exception")
+
+    base_kwargs = dict(
+        era=request.app.state.era, calendar=request.app.state.calendar,
         phone=request.app.state.phone, mail=request.app.state.mail,
         obsidian=request.app.state.obsidian, home_assistant=request.app.state.home_assistant,
-        business=request.app.state.business, personal=request.app.state.personal,
+        business=request.app.state.business,
         airbnb=request.app.state.airbnb, ticketmaster=request.app.state.ticketmaster,
         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
-        letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
-        recipe=request.app.state.recipe, local_llm=request.app.state.local_llm,
+        letterstream=request.app.state.letterstream,
+    )
+    if identity.confirmed_owner:
+        call_kwargs = base_kwargs
+    else:
+        call_kwargs = identity_gate.restricted_kwargs(base_kwargs)
+        logger.info("device %s: identity not confirmed (%s) — restricting to shared tools",
+                   device_id, identity.reason)
+
+    call = functools.partial(
+        handle_message, cfg.db_path, request.app.state.llm, _owner_user_id(request), transcript,
+        tz_name=cfg.timezone, **call_kwargs,
     )
     try:
         reply = await loop.run_in_executor(None, call)
@@ -177,23 +203,8 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
             # A voice failure must still deliver the answer on screen.
             logger.exception("tts failed for device %s", device_id)
 
-    # show_camera (if this turn called it) leaves its result here rather than
-    # returning it directly through handle_message -- see pending_camera_views in
-    # vision.py. The kiosk screen only ever polls /{device_id} for its state, so the
-    # camera has to ride along on that same polled object, not just this response;
-    # camera_seq lets Device.jsx notice a *new* one without the server needing to
-    # "clear" it afterward (a GET poll shouldn't have side effects).
-    camera = vision.pop_pending_camera_view(cfg.db_path, owner_id)
-    state_fields = {"state": "speaking", "caption": reply}
-    if camera is not None:
-        state_fields["camera"] = camera
-        state_fields["camera_seq"] = DEVICE_STATE.get(device_id, {}).get("camera_seq", 0) + 1
-    _set_state(device_id, **state_fields)
-    # display_recipe's target is this same device_id when asked at the kiosk's own mic --
-    # check it here too (on top of get_state's poll-based check) so that case shows up
-    # within this same turn rather than waiting for the next ~700ms poll.
-    _apply_pending_recipe_view(device_id, cfg.db_path)
-    return {"transcript": transcript, "reply": reply, "audio": spoken_audio, "camera": camera}
+    _set_state(device_id, state="speaking", caption=reply)
+    return {"transcript": transcript, "reply": reply, "audio": spoken_audio}
 
 
 @router.post("/say")

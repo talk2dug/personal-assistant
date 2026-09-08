@@ -63,7 +63,18 @@ class SSHOpsClient:
         try:
             transport = client.get_transport()
             channel = transport.open_session()
-            channel.get_pty()
+            # Deliberately NOT channel.get_pty() -- deploy_to_pi.py's stream_exec (which
+            # this was originally mirrored from) requests one, but confirmed live against
+            # a real Windows OpenSSH Server host (jarvisbox) that doing so makes
+            # recv_exit_status() always come back 0, regardless of the command's real
+            # exit code -- `exit 1`, a thrown exception, and a failed cmd.exe command all
+            # silently read back as success. The identical command without a PTY reports
+            # its real exit code correctly. Since ops_plans.run_plan's entire
+            # change/test/verify/rollback logic depends on exit_code being trustworthy,
+            # a PTY here would make a broken verify step silently report "succeeded" --
+            # exactly the class of silent-false-positive this project is trying hardest
+            # to eliminate elsewhere. Streaming output (recv_ready/recv below) works
+            # identically without one.
             channel.exec_command(command)
             chunks = []
             start = time.time()

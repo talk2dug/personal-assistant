@@ -123,6 +123,15 @@ class Config:
     claude_timeout_seconds: int = 300
     claude_tools_api_key: str | None = None
     claude_tools_url: str = "http://127.0.0.1:8080/api/tools/call"
+    # staff.assign()'s subprocess ceiling for an employee's own assignment (research- or
+    # execute-tier) -- deliberately its own knob, separate from claude_timeout_seconds
+    # (which bounds the owner's own live conversational turn and should stay short). A
+    # real dev-team coding assignment (read the repo, run tools, open a PR) routinely
+    # needs far longer than a chat reply, and the previous shared-ish 900s default killed
+    # real in-progress jobs via subprocess.run's hard timeout, silently losing the work.
+    # Generous rather than unbounded: a genuinely wedged subprocess should still free its
+    # slot eventually rather than pin one of staff_cadence's max_instances forever.
+    staff_assignment_timeout_seconds: int = 10800
     business: BusinessProfile | None = None
     # simrig as a shared inference resource for agent work that doesn't need Claude.
     # Defaults to the same host Ollama already runs on. gpu_task_models overrides the
@@ -312,6 +321,7 @@ def load_config(path: str = "config.json") -> Config:
         claude_cli_path=data.get("claude_cli_path"),
         claude_model=data.get("claude_model", "sonnet"),
         claude_timeout_seconds=data.get("claude_timeout_seconds", 300),
+        staff_assignment_timeout_seconds=data.get("staff_assignment_timeout_seconds", 10800),
         # Authenticates the MCP bridge subprocess to /api/tools/call. Equivalent to full
         # owner access — anything holding it can invoke every tool Jarvis has.
         claude_tools_api_key=data.get("claude_tools_api_key"),

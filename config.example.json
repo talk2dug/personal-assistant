@@ -55,6 +55,8 @@
   "claude_cli_path": "C:\\Users\\YOU\\.local\\bin\\claude.exe",
   "claude_model": "sonnet",
   "claude_timeout_seconds": 300,
+  "_comment_staff_assignment_timeout": "How long an employee's own assignment (staff.assign, research- or execute-tier) may run before it's killed -- separate from claude_timeout_seconds, which bounds the owner's own live chat turn. A real dev-team coding assignment needs much longer than a chat reply; this used to share a 900s default and real in-progress jobs were getting killed mid-task.",
+  "staff_assignment_timeout_seconds": 10800,
   "_comment_claude_tools_api_key": "Authenticates the MCP bridge subprocess to /api/tools/call. Equivalent to full owner access - anything holding it can invoke every Jarvis tool.",
   "claude_tools_api_key": "GENERATE_A_RANDOM_SECRET_HERE",
   "claude_tools_url": "http://127.0.0.1:8080/api/tools/call",

@@ -128,6 +128,7 @@ def main() -> None:
         review_watchdog_stale_hours=cfg.review_watchdog_stale_hours,
         github_watchdog_interval_seconds=cfg.github_watchdog_interval_seconds,
         local_llm=local_llm, local_llm_keepalive_interval_seconds=cfg.local_llm_keepalive_interval_seconds,
+        staff_assignment_timeout_seconds=cfg.staff_assignment_timeout_seconds,
     )
 
     logger.info("Jarvis core starting, polling Telegram...")

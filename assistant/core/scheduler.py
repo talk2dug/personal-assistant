@@ -37,6 +37,7 @@ def start(
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
     github_watchdog_interval_seconds: int = 180,
     local_llm=None, local_llm_keepalive_interval_seconds: int = 600,
+    staff_assignment_timeout_seconds: int = 10800,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -404,7 +405,8 @@ def start(
                 logger.debug("staff tick: nobody due")
                 return
             logger.info("staff tick: running %s", [p["key"] for p in due])
-            results = staff.run_due(db_path, llm, tz_name=tz_name, notify=_staff_alert)
+            results = staff.run_due(db_path, llm, tz_name=tz_name, notify=_staff_alert,
+                                    timeout=staff_assignment_timeout_seconds)
             for r in results:
                 logger.info("staff run %s ok=%s alert=%s alerted=%s",
                             r["employee"], r["ok"], r["alert"], r["alerted"])

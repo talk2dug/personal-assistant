@@ -124,3 +124,78 @@ class TestRunDueIsolation:
         work = staff.recent_work(db, key, limit=1)
         assert work and work[0]["status"] == "failed"
         assert "backend down" in work[0]["error"]
+
+
+class TestFailureNotification:
+    """A failed/timed-out scheduled run used to notify nobody: the whole notify block in
+    run_due was gated on outcome.get("ok"), so alert_policy never even got consulted for
+    a run that crashed. That's the exact "Jarvis wasn't told the job failed" gap -- a
+    coding job dying mid-task (e.g. hitting the subprocess timeout) was only ever visible
+    in staff_work/the logs, never to the owner."""
+
+    def test_a_failed_run_notifies_even_with_alert_policy_never(self, db):
+        key = staff.hire(db, "Delta", "Delta is a senior specialist with fifteen years of relevant experience.",
+                         cadence="interval", interval_minutes=5, standing_assignment="do the thing",
+                         alert_policy="never")["key"]
+        staff.set_status(db, key, "active")
+
+        class DeadLLM:
+            def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
+                raise RuntimeError("backend down")
+
+        notified = []
+        staff.run_due(db, DeadLLM(), tz_name="UTC",
+                      notify=lambda headline, body, urgency, person: notified.append(headline))
+        assert notified, "a failed run must reach the owner regardless of alert_policy"
+        assert "failed" in notified[0].lower()
+
+    def test_a_second_failure_within_cooldown_is_not_double_notified(self, db):
+        key = staff.hire(db, "Epsilon", "Epsilon is a senior specialist with fifteen years of relevant experience.",
+                         cadence="interval", interval_minutes=5, standing_assignment="do the thing",
+                         alert_policy="never", alert_cooldown_min=30)["key"]
+        staff.set_status(db, key, "active")
+
+        class DeadLLM:
+            def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
+                raise RuntimeError("backend down")
+
+        notified = []
+        notify = lambda headline, body, urgency, person: notified.append(headline)
+        staff.run_due(db, DeadLLM(), tz_name="UTC", notify=notify)
+        staff.run_due(db, DeadLLM(), tz_name="UTC", notify=notify)
+        assert len(notified) == 1, "the cooldown must still apply, or a persistently broken employee spams every tick"
+
+    def test_a_successful_quiet_run_still_does_not_notify(self, db):
+        """Preserves the pre-existing behaviour this fix must not disturb: alert_policy
+        'never' with nothing alert-worthy stays silent on a run that actually delivered."""
+        key = staff.hire(db, "Zeta", "Zeta is a senior specialist with fifteen years of relevant experience.",
+                         cadence="interval", interval_minutes=5, standing_assignment="do the thing",
+                         alert_policy="never")["key"]
+        staff.set_status(db, key, "active")
+
+        class QuietLLM:
+            def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
+                return 'all good\n{"alert": false, "urgency": "low", "headline": "fine"}'
+
+        notified = []
+        staff.run_due(db, QuietLLM(), tz_name="UTC",
+                      notify=lambda headline, body, urgency, person: notified.append(headline))
+        assert notified == []
+
+    def test_run_due_forwards_its_timeout_to_the_assignment(self, db):
+        """Regression for the 900s default that killed real in-progress coding jobs:
+        run_due must pass its own timeout through to assign()/llm.research() rather than
+        silently falling back to some other default."""
+        key = staff.hire(db, "Eta", "Eta is a senior specialist with fifteen years of relevant experience.",
+                         cadence="interval", interval_minutes=5, standing_assignment="do the thing")["key"]
+        staff.set_status(db, key, "active")
+
+        seen = []
+
+        class RecordingLLM:
+            def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
+                seen.append(timeout)
+                return "done"
+
+        staff.run_due(db, RecordingLLM(), tz_name="UTC", timeout=10800)
+        assert seen == [10800]

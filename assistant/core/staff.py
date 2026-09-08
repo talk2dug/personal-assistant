@@ -703,7 +703,7 @@ def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> str:
     return "\n".join(lines)
 
 
-def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> dict:
+def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800) -> dict:
     """Give an employee a piece of work and record what came back.
 
     Every tier but "execute" runs through llm.research(), which carries web search and,
@@ -713,6 +713,12 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> 
     one tier that can act (see the note above CAPABILITY_TIERS) — it runs through
     llm.engineer() instead, with real but narrowly-scoped tools (git, including reading
     the actual repo, and SSH/ops-plan), never the owner's full catalog.
+
+    `timeout` is the ClaudeCLIClient subprocess's hard ceiling (config's
+    staff_assignment_timeout_seconds) — real dev-team/coding assignments can legitimately
+    run much longer than a chat turn, and a real incident showed a too-short default here
+    silently kills an in-progress job via subprocess.TimeoutExpired, losing the work and
+    only ever recording it as a generic failure.
     """
     emp = get_staff(db_path, key)
     if emp is None:
@@ -957,12 +963,18 @@ def _alert_allowed(row, cooldown_min: int) -> bool:
     return datetime.now(timezone.utc) - last >= timedelta(minutes=cooldown_min)
 
 
-def run_due(db_path: str, llm, tz_name: str = "UTC", notify=None) -> list[dict]:
+def run_due(db_path: str, llm, tz_name: str = "UTC", notify=None, timeout: int = 10800) -> list[dict]:
     """Run every employee who is due and on shift. Called by the scheduler.
 
-    `notify(headline, body, urgency, employee)` is invoked only when the employee's own
-    verdict says the owner's stated condition was met and the cooldown has elapsed. The
-    employee never sends anything itself -- it returns a judgement, and this decides.
+    `notify(headline, body, urgency, employee)` is invoked in two cases: the employee's
+    own verdict said the owner's stated condition was met (subject to alert_policy and
+    the per-employee cooldown, as before), OR the run itself failed to deliver at all
+    (crash, timeout, bad output) -- that second case ignores alert_policy entirely and
+    only respects the cooldown, since a run failing to happen is not the kind of thing
+    "never alert me on findings" was meant to silence. Previously a failed/timed-out run
+    never notified regardless of policy -- it only ever showed up in staff_work/the logs
+    -- so a real coding job could die mid-task and the owner would never find out short
+    of checking manually.
     """
     results = []
     for person in due_for_cadence(db_path, tz_name):
@@ -974,14 +986,25 @@ def run_due(db_path: str, llm, tz_name: str = "UTC", notify=None) -> list[dict]:
             if person["alert_condition"]:
                 assignment += build_verdict_instructions(person["alert_condition"])
 
-            outcome = assign(db_path, llm, person["key"], assignment)
+            outcome = assign(db_path, llm, person["key"], assignment, timeout=timeout)
             verdict = parse_verdict(outcome.get("output"))
             alerted = False
+            cooldown = int(person["alert_cooldown_min"] or 30)
 
-            policy = person["alert_policy"] or "never"
-            wants = (policy == "always") or (policy == "on_alert" and verdict["alert"])
-            if wants and notify is not None and outcome.get("ok"):
-                if _alert_allowed(person, int(person["alert_cooldown_min"] or 30)):
+            if not outcome.get("ok"):
+                if notify is not None and _alert_allowed(person, cooldown):
+                    try:
+                        notify(f"{person['title']} run failed",
+                               outcome.get("error") or "no error detail recorded",
+                               "normal", person)
+                        _mark_alerted(db_path, person["key"])
+                        alerted = True
+                    except Exception:
+                        logger.exception("failure-alerting for %s failed", person["key"])
+            else:
+                policy = person["alert_policy"] or "never"
+                wants = (policy == "always") or (policy == "on_alert" and verdict["alert"])
+                if wants and notify is not None and _alert_allowed(person, cooldown):
                     try:
                         notify(verdict["headline"] or f"{person['title']} has something",
                                outcome.get("output") or "", verdict["urgency"], person)

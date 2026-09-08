@@ -70,7 +70,8 @@ class MailClient:
         self.app_password = app_password
         # Configurable rather than hardcoded to junk_filter.DEFAULT_THRESHOLD directly,
         # so a deployment that's getting false positives/negatives can tune it without
-        # a code change (see config.py's mail_junk_score_threshold).
+        # a code change (see config.py's mail_junk_score_threshold). Read by
+        # scan_inbox_for_junk below whenever a call doesn't override it explicitly.
         self.junk_threshold = junk_threshold
 
     def _imap(self) -> imaplib.IMAP4_SSL:
@@ -175,7 +176,7 @@ class MailClient:
         dry_run=True scores without moving anything, useful for tuning the threshold or
         testing from chat before trusting it to act on its own.
         """
-        threshold = junk_filter.DEFAULT_THRESHOLD if threshold is None else threshold
+        threshold = self.junk_threshold if threshold is None else threshold
         conn = self._imap()
         try:
             conn.select(folder, readonly=True)

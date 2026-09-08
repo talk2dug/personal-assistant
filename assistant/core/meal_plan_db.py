@@ -9,7 +9,8 @@ import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timezone
 
-from . import db, finance
+from . import db, finance, kitchen_db
+from .business_db import normalize_lead_name
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meal_plans (
@@ -40,6 +41,31 @@ CREATE TABLE IF NOT EXISTS meal_plan_entries (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(meal_plan_id, plan_date, meal_type)
+);
+
+-- A snapshot of one plan's net shopping needs -- deliberately its own table rather than
+-- reusing kitchen_db.shopping_list_items: that table's CHECK constraint already has real
+-- production rows under it (widening a CHECK on an already-populated table needs a real
+-- rebuild-copy-rename migration, not a source edit -- see this project's own plan doc),
+-- and a meal plan's shopping needs are a different concept anyway from the general
+-- reactive low-stock queue. quantity_needed/quantity_on_hand/quantity_to_buy are all
+-- model-reasoned free text (same convention as shopping_list_items.quantity_hint) rather
+-- than real numbers -- netting "2 cups flour needed" against "half a bag on hand" is a
+-- judgment call, not arithmetic a database should pretend to do.
+CREATE TABLE IF NOT EXISTS meal_plan_shopping_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    meal_plan_id INTEGER NOT NULL REFERENCES meal_plans(id),
+    item TEXT NOT NULL,
+    normalized_item TEXT NOT NULL,
+    quantity_needed TEXT,
+    quantity_on_hand TEXT,
+    quantity_to_buy TEXT,
+    category TEXT CHECK (category IN ('fresh_produce', 'frozen', 'pantry', 'dairy', 'meat', 'other')),
+    kroger_product_id TEXT,
+    on_sale INTEGER,
+    status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'added_to_cart', 'skipped', 'already_have')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -213,3 +239,125 @@ def finalize_meal_plan(db_path: str, owner_user_id: int, meal_plan_id: int) -> b
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- inventory-aware shopping list -------------------------------------------------
+
+def gather_meal_plan_ingredients(db_path: str, owner_user_id: int, meal_plan_id: int) -> dict | None:
+    """Collects every entry's recipe ingredients plus best-guess matching inventory rows
+    for the model to reason quantities from -- applies/writes nothing, same
+    propose-then-confirm split kitchen_db.cook_recipe already uses for the same reason
+    (unit conversion and "how much do I actually still need" are judgment calls, not
+    something this function should guess at). Only entries with a real recipe_id
+    contribute ingredients; a freeform entry ("order pizza", "leftovers") has none to
+    gather. Returns None if the plan doesn't exist/belong to this owner.
+    """
+    plan = get_meal_plan(db_path, owner_user_id, meal_plan_id)
+    if plan is None:
+        return None
+    entries = list_meal_plan_entries(db_path, owner_user_id, meal_plan_id)
+    inventory = kitchen_db.list_inventory(db_path, owner_user_id)
+
+    needed = []
+    for entry in entries:
+        if entry["recipe_id"] is None:
+            continue
+        recipe = kitchen_db.get_recipe(db_path, owner_user_id, entry["recipe_id"])
+        if recipe is None:
+            continue
+        for ing in recipe["ingredients"]:
+            name = (ing.get("name") or "").strip()
+            if not name:
+                continue
+            candidates = kitchen_db._ingredient_candidates(inventory, name)
+            needed.append({
+                "ingredient": ing,
+                "from_meal": {"plan_date": entry["plan_date"], "meal_type": entry["meal_type"], "title": entry["title"]},
+                "inventory_candidates": [
+                    {"item": c["item"], "quantity": c["quantity"], "unit": c["unit"], "status": c["status"]}
+                    for c in candidates
+                ],
+            })
+
+    return {
+        "meal_plan_id": meal_plan_id,
+        "ingredients_needed": needed,
+        "note": (
+            "inventory_candidates are best-guess name matches, not confirmed, and the same "
+            "ingredient may appear once per meal that uses it -- combine repeats yourself "
+            "(e.g. two dinners both using onions) rather than treating them as separate "
+            "needs. An empty inventory_candidates list means nothing on hand plausibly "
+            "matches, so the full amount likely needs buying. Reason out a real "
+            "quantity_to_buy per item given what's already on hand and how many meals use "
+            "it, then call save_meal_plan_shopping_items with your own conclusions."
+        ),
+    }
+
+
+def save_meal_plan_shopping_items(db_path: str, owner_user_id: int, meal_plan_id: int, items: list[dict]) -> dict | None:
+    """Persists the model's reasoned shopping list. Replaces any previously saved list for
+    this plan wholesale rather than merging -- regenerating is a full do-over, since the
+    plan's own entries may have changed meaningfully since the last generation. Returns
+    None if the plan doesn't exist/belong to this owner."""
+    plan = get_meal_plan(db_path, owner_user_id, meal_plan_id)
+    if plan is None:
+        return None
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        conn.execute("DELETE FROM meal_plan_shopping_items WHERE meal_plan_id = ?", (meal_plan_id,))
+        for item in items:
+            name = (item.get("item") or "").strip()
+            if not name:
+                continue
+            conn.execute(
+                """INSERT INTO meal_plan_shopping_items
+                       (meal_plan_id, item, normalized_item, quantity_needed, quantity_on_hand,
+                        quantity_to_buy, category, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)""",
+                (meal_plan_id, name, normalize_lead_name(name), item.get("quantity_needed"),
+                 item.get("quantity_on_hand"), item.get("quantity_to_buy"), item.get("category"), now, now),
+            )
+        conn.commit()
+    return {"meal_plan_id": meal_plan_id, "items": list_meal_plan_shopping_items(db_path, owner_user_id, meal_plan_id)}
+
+
+def list_meal_plan_shopping_items(db_path: str, owner_user_id: int, meal_plan_id: int) -> list[dict]:
+    with closing(_connect(db_path)) as conn:
+        plan = conn.execute(
+            "SELECT id FROM meal_plans WHERE id = ? AND owner_user_id = ?", (meal_plan_id, owner_user_id)
+        ).fetchone()
+        if plan is None:
+            return []
+        return _rows(conn.execute(
+            "SELECT * FROM meal_plan_shopping_items WHERE meal_plan_id = ? ORDER BY category, item",
+            (meal_plan_id,),
+        ))
+
+
+def match_meal_plan_items_to_kroger(db_path: str, owner_user_id: int, meal_plan_id: int, kroger_mcp_client) -> dict | None:
+    """Reuses kroger_recipe.match_ingredients against the saved quantity_to_buy items,
+    fills kroger_product_id/on_sale on each matched row, and returns the proposed matches
+    -- never writes to the cart itself. bulk_add_to_cart (already gated behind the
+    existing pending_actions confirmation) is the actual write, called by the model
+    directly once the owner confirms; no new confirmation gate is introduced here."""
+    from . import kroger_recipe  # local import: avoids a module-load cycle with kitchen_tools
+
+    items = list_meal_plan_shopping_items(db_path, owner_user_id, meal_plan_id)
+    if not items:
+        return {"meal_plan_id": meal_plan_id, "matches": []}
+
+    result = kroger_recipe.match_ingredients(kroger_mcp_client, [i["item"] for i in items])
+    matches = result.get("matches", [])
+
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        for item, match in zip(items, matches):
+            if not match.get("matched"):
+                continue
+            conn.execute(
+                "UPDATE meal_plan_shopping_items SET kroger_product_id = ?, on_sale = ?, updated_at = ? WHERE id = ?",
+                (match.get("product_id"), 1 if match.get("on_sale") else 0, now, item["id"]),
+            )
+        conn.commit()
+
+    return {"meal_plan_id": meal_plan_id, "matches": matches}

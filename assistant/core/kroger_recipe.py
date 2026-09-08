@@ -90,6 +90,7 @@ def match_ingredients(raw_client, ingredients: list[str], location_id: str | Non
             "brand": best.get("brand"),
             "size": size,
             "price": pricing.get("formatted_sale") or pricing.get("formatted_regular"),
+            "on_sale": bool(pricing.get("on_sale")),
         })
 
     return {

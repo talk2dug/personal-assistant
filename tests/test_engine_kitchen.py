@@ -397,6 +397,73 @@ def test_remove_meal_plan_entry_via_chat(db_path, owner_id):
     assert meal_plan_db.list_meal_plan_entries(db_path, owner_id, plan_id) == []
 
 
+def test_meal_plan_shopping_list_flow_via_chat(db_path, owner_id):
+    recipe_id = kitchen_db.create_recipe(
+        db_path, owner_id, "Weeknight Chili", [{"name": "ground beef", "quantity": "1", "unit": "lb"}], ["Brown it."])
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Weeknight Chili", recipe_id=recipe_id)
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "generate_meal_plan_shopping_list", "arguments": {"meal_plan_id": plan_id}}}
+        ]},
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "save_meal_plan_shopping_items", "arguments": {
+                "meal_plan_id": plan_id,
+                "items": [{"item": "ground beef", "quantity_to_buy": "1 lb", "category": "meat"}],
+            }}}
+        ]},
+        {"role": "assistant", "content": "Shopping list is just ground beef, 1 lb."},
+    ])
+    reply = engine.handle_message(db_path, llm, owner_id, "what do I need to buy for this plan", personal=personal)
+    assert reply == "Shopping list is just ground beef, 1 lb."
+    saved = meal_plan_db.list_meal_plan_shopping_items(db_path, owner_id, plan_id)
+    assert saved[0]["item"] == "ground beef"
+
+
+class FakeKrogerClientForDispatch:
+    def call_tool(self, name, arguments):
+        import json
+        payload = {"results": [{"term": "ground beef", "success": True, "data": [{
+            "product_id": "p1", "description": "Ground Beef 80/20", "brand": "Kroger",
+            "item": {"size": "1 lb"},
+            "pricing": {"formatted_regular": "$5.99", "formatted_sale": None, "on_sale": False},
+        }]}]}
+        return {"is_error": False, "content": [json.dumps(payload)]}
+
+
+def test_match_meal_plan_items_to_kroger_via_chat(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.save_meal_plan_shopping_items(db_path, owner_id, plan_id, [{"item": "ground beef"}])
+    personal = engine.PersonalContext(mcp_client=PersonalClient(db_path, owner_id, kroger=FakeKrogerClientForDispatch()))
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "match_meal_plan_items_to_kroger", "arguments": {"meal_plan_id": plan_id}}}
+        ]},
+        {"role": "assistant", "content": "Found ground beef 80/20 for $5.99."},
+    ])
+    reply = engine.handle_message(db_path, llm, owner_id, "match my shopping list to kroger", personal=personal)
+    assert reply == "Found ground beef 80/20 for $5.99."
+
+
+def test_match_meal_plan_items_to_kroger_without_kroger_configured(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.save_meal_plan_shopping_items(db_path, owner_id, plan_id, [{"item": "ground beef"}])
+    personal = make_personal(db_path, owner_id)  # no kroger=
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "match_meal_plan_items_to_kroger", "arguments": {"meal_plan_id": plan_id}}}
+        ]},
+        {"role": "assistant", "content": "Kroger isn't set up, sir."},
+    ])
+    reply = engine.handle_message(db_path, llm, owner_id, "match my shopping list to kroger", personal=personal)
+    assert reply == "Kroger isn't set up, sir."
+
+
 def test_payday_keyword_alone_gates_in_meal_plan_tools(db_path, owner_id):
     personal = make_personal(db_path, owner_id)
     names = {t["function"]["name"] for t in engine.select_tools("when's my next payday", personal=personal)}

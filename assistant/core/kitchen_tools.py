@@ -335,6 +335,56 @@ KITCHEN_GATED_TOOLS = [
             "meal_plan_id": {"type": "integer"},
         }, "required": ["meal_plan_id"]},
     }},
+    {"type": "function", "function": {
+        "name": "generate_meal_plan_shopping_list",
+        "description": (
+            "Gather what a meal plan's recipes actually need, alongside best-guess "
+            "matching inventory rows — decides nothing itself, just gathers data. Look at "
+            "what it returns and reason out how much of each item actually still needs "
+            "buying given what's already on hand (an ingredient used by two different "
+            "meals only needs buying once, combined), then call "
+            "save_meal_plan_shopping_items with your own conclusions. Never skip straight "
+            "to save_meal_plan_shopping_items without calling this first."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "meal_plan_id": {"type": "integer"},
+        }, "required": ["meal_plan_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "save_meal_plan_shopping_items",
+        "description": (
+            "Save your own reasoned shopping list for a plan, after calling "
+            "generate_meal_plan_shopping_list first. Replaces any previously saved list "
+            "for this plan entirely — call it again with the full list any time the plan "
+            "changes, not just the new/changed items."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "meal_plan_id": {"type": "integer"},
+            "items": {
+                "type": "array",
+                "items": {"type": "object", "properties": {
+                    "item": {"type": "string"},
+                    "quantity_needed": {"type": "string", "description": "Free text, e.g. '4 cups total across both dinners'."},
+                    "quantity_on_hand": {"type": "string", "description": "Free text, e.g. 'about 1 cup'."},
+                    "quantity_to_buy": {"type": "string", "description": "Free text, e.g. '3 cups' or '1 bag'."},
+                    "category": {"type": "string", "enum": ["fresh_produce", "frozen", "pantry", "dairy", "meat", "other"]},
+                }, "required": ["item"]},
+            },
+        }, "required": ["meal_plan_id", "items"]},
+    }},
+    {"type": "function", "function": {
+        "name": "match_meal_plan_items_to_kroger",
+        "description": (
+            "Find real Kroger products matching a saved shopping list's items, including "
+            "whether each is currently on sale — this only searches, it does NOT add "
+            "anything to the cart. Read the matches back to him, flag anything unmatched "
+            "or an obvious size mismatch, and only call bulk_add_to_cart yourself after he "
+            "confirms which ones to actually buy."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "meal_plan_id": {"type": "integer"},
+        }, "required": ["meal_plan_id"]},
+    }},
 ]
 
 KITCHEN_TOOLS = KITCHEN_ALWAYS_TOOLS + KITCHEN_GATED_TOOLS
@@ -408,7 +458,14 @@ KITCHEN_SYSTEM_NOTE = (
     "apologize for. Build the plan with start_meal_plan/add_meal_plan_entry/"
     "list_meal_plan/remove_meal_plan_entry as you go, and only call finalize_meal_plan "
     "once he's actually said the plan looks good — don't finalize on your own judgment "
-    "that it's probably done."
+    "that it's probably done. Once finalized, generate_meal_plan_shopping_list gathers "
+    "what the plan's recipes need against what's already on hand (decides nothing "
+    "itself); reason out real quantities to buy from what it returns — combining an "
+    "ingredient used by more than one meal into one line rather than buying it twice — "
+    "and save your conclusions with save_meal_plan_shopping_items. "
+    "match_meal_plan_items_to_kroger then finds real products (and sale status) for that "
+    "saved list; read the matches back to him and only call bulk_add_to_cart yourself "
+    "once he's confirmed which ones to actually buy."
 )
 
 
@@ -545,5 +602,27 @@ def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict, kroge
     if name == "finalize_meal_plan":
         ok = meal_plan_db.finalize_meal_plan(db_path, owner_user_id, arguments["meal_plan_id"])
         return {"ok": ok} if ok else {"error": "meal plan not found"}
+
+    if name == "generate_meal_plan_shopping_list":
+        result = meal_plan_db.gather_meal_plan_ingredients(db_path, owner_user_id, arguments["meal_plan_id"])
+        if result is None:
+            return {"error": "meal plan not found"}
+        return result
+
+    if name == "save_meal_plan_shopping_items":
+        result = meal_plan_db.save_meal_plan_shopping_items(
+            db_path, owner_user_id, arguments["meal_plan_id"], arguments.get("items", []))
+        if result is None:
+            return {"error": "meal plan not found"}
+        return result
+
+    if name == "match_meal_plan_items_to_kroger":
+        if kroger_mcp_client is None:
+            return {"error": "Kroger is not configured"}
+        result = meal_plan_db.match_meal_plan_items_to_kroger(
+            db_path, owner_user_id, arguments["meal_plan_id"], kroger_mcp_client)
+        if result is None:
+            return {"error": "meal plan not found"}
+        return result
 
     return {"error": f"unknown kitchen tool {name}"}

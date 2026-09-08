@@ -47,8 +47,20 @@ def test_match_ingredients_picks_the_first_result_per_term():
     assert result["matches"][0] == {
         "ingredient": "ground beef", "matched": True, "product_id": "p1",
         "description": "Ground Beef 80/20", "brand": "Kroger", "size": "1 lb", "price": "$5.99",
+        "on_sale": False,
     }
     assert result["matches"][1]["product_id"] == "p3"
+
+
+def test_match_ingredients_surfaces_on_sale():
+    payload = {"results": [
+        {"term": "chicken breast", "success": True, "data": [
+            _product("p1", "Chicken Breast", 6.99, "1 lb", on_sale=True, sale_price=4.99),
+        ]},
+    ]}
+    result = match_ingredients(FakeRawClient(payload), ["chicken breast"])
+    assert result["matches"][0]["on_sale"] is True
+    assert result["matches"][0]["price"] == "$4.99"
 
 
 def test_match_ingredients_flags_unmatched_terms():

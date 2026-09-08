@@ -196,6 +196,11 @@ class FakeHTTP:
                 {"number": 42, "title": "My PR", "html_url": "https://github.com/owner/repo/pull/42"},
                 {"number": 43, "title": "Another PR", "html_url": "https://github.com/owner/repo/pull/43"},
             ])
+        if "/files" in path:
+            return FakeResponse(200, [
+                {"filename": "assistant/core/thing.py", "status": "modified",
+                 "additions": 10, "deletions": 2, "changes": 12, "patch": "@@ ... @@"},
+            ])
         return FakeResponse(200, {
             "state": "open", "mergeable": True, "merged": False,
             "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
@@ -239,6 +244,25 @@ def test_list_open_prs_returns_empty_on_error(client):
 
     client._http = ErrorHTTP()
     assert client.list_open_prs() == []
+
+
+def test_get_pr_files_drops_the_patch_text(client):
+    client._http = FakeHTTP()
+    result = client.get_pr_files(42)
+    assert result == [
+        {"filename": "assistant/core/thing.py", "status": "modified",
+         "additions": 10, "deletions": 2, "changes": 12},
+    ]
+
+
+def test_get_pr_files_returns_empty_on_error(client):
+    class ErrorHTTP(FakeHTTP):
+        def get(self, path):
+            self.calls.append(("GET", path, None))
+            return FakeResponse(404, {"message": "not found"})
+
+    client._http = ErrorHTTP()
+    assert client.get_pr_files(42) == []
 
 
 def test_merge_pr_calls_the_github_api(client):

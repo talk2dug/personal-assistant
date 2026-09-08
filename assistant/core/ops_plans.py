@@ -13,6 +13,7 @@ every rollback step runs (also in order) and nothing after that ever executes.
 A sibling of business_db.py/staff.py/personal_db.py -- its own schema, applied to the same
 shared jarvis.db file, same _connect/_now/_rows helper pattern throughout this project.
 """
+import base64
 import json
 import logging
 import sqlite3
@@ -184,6 +185,92 @@ def render_plan_detail(summary: str, steps: list[dict]) -> str:
             sections.append(f"- [{s['host']}] `{s['command']}`{purpose}")
         sections.append("")
     return "\n".join(sections).strip()
+
+
+def build_mcp_install_plan_steps(
+    host: str, name: str, package_spec: str, import_check: str, config_updates: dict,
+    restart_command: str, log_path: str,
+    repo_root: str = r"C:\Users\swayze\Documents\PersonalAssistant",
+    config_path: str = r"C:\Users\swayze\Documents\PersonalAssistant\config.json",
+) -> list[dict]:
+    """A correctly-shaped ops-plan step list for installing a new MCP server/integration
+    on the machine Jarvis itself runs on -- the safe default a systems-engineer employee
+    should reach for instead of freehanding steps from scratch with propose_ops_plan's
+    fully generic interface every time. Encodes three things a naive freehand plan could
+    easily get wrong: isolate the install into its own venv (this codebase's existing
+    .venv-<name> convention -- see .venv-kroger/.venv-vision -- so a bad dependency can
+    never break the main .venv other integrations share), verify against the real
+    "<name>: N tools discovered" log line every existing build_*_context function in
+    setup.py already emits (proof the integration actually came up, not just that pip
+    didn't error), and a real rollback (restore config.json, remove the venv).
+
+    config_updates is merged into config.json via a small generated Python script rather
+    than an inline `python -c "..."` -- config_updates can contain arbitrary strings
+    (URLs, keys) that would be miserable to escape correctly for cmd.exe's quoting rules,
+    so the script's content is base64-encoded into the command that writes it (base64's
+    alphabet needs no shell escaping at all) rather than embedded as a literal argument.
+
+    Returns the steps list (not yet a real plan) -- purely a builder function, so its
+    output is fully unit-testable without an SSH connection; call ops_plans.create_plan
+    with the result to actually propose it.
+    """
+    venv_path = f"{repo_root}\\.venv-{name}"
+    backup_path = f"{config_path}.bak-{name}"
+    merge_script_path = f"{repo_root}\\_ops_plan_merge_{name}.py"
+
+    merge_script = (
+        "import json\n"
+        f"path = {json.dumps(config_path)}\n"
+        "with open(path) as f:\n"
+        "    data = json.load(f)\n"
+        f"data.update({json.dumps(config_updates)})\n"
+        "with open(path, 'w') as f:\n"
+        "    json.dump(data, f, indent=2)\n"
+    )
+    encoded_script = base64.b64encode(merge_script.encode()).decode()
+
+    return [
+        {"phase": "change", "host": host,
+         "purpose": "Back up config.json before touching it",
+         "command": f'powershell -Command "Copy-Item -Path \'{config_path}\' -Destination \'{backup_path}\' -Force"'},
+        {"phase": "change", "host": host,
+         "purpose": f"Create an isolated venv for {name} (never the shared main .venv)",
+         "command": f'python -m venv "{venv_path}"'},
+        {"phase": "change", "host": host,
+         "purpose": f"Install {package_spec} into the new venv",
+         "command": f'"{venv_path}\\Scripts\\pip.exe" install {package_spec}'},
+        {"phase": "test", "host": host,
+         "purpose": "Confirm the package actually installed and imports cleanly, before touching config",
+         "command": f'"{venv_path}\\Scripts\\python.exe" -c "import {import_check}"'},
+        {"phase": "change", "host": host,
+         "purpose": "Write the config-merge helper script",
+         "command": (
+             f'powershell -Command "[IO.File]::WriteAllText(\'{merge_script_path}\', '
+             f"[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_script}')))\""
+         )},
+        {"phase": "change", "host": host,
+         "purpose": "Merge the new config entries into config.json",
+         "command": f'"{venv_path}\\Scripts\\python.exe" "{merge_script_path}"'},
+        {"phase": "change", "host": host,
+         "purpose": "Restart the affected service to pick up the new integration",
+         "command": restart_command},
+        {"phase": "verify", "host": host,
+         "purpose": "Confirm the new integration actually came up in the real startup log, not just that install/config succeeded",
+         "command": (
+             'powershell -Command "Start-Sleep -Seconds 20; '
+             f"if (Select-String -Path '{log_path}' -Pattern '{name}.*discovered' -Quiet) "
+             '{ Write-Output PASS } else { Write-Output FAIL; exit 1 }"'
+         )},
+        {"phase": "rollback", "host": host,
+         "purpose": "Restore the previous config.json",
+         "command": f'powershell -Command "Copy-Item -Path \'{backup_path}\' -Destination \'{config_path}\' -Force"'},
+        {"phase": "rollback", "host": host,
+         "purpose": f"Remove the failed venv for {name}",
+         "command": f'powershell -Command "Remove-Item -Recurse -Force \'{venv_path}\' -ErrorAction SilentlyContinue"'},
+        {"phase": "rollback", "host": host,
+         "purpose": "Restart the service again to restore the previous good state",
+         "command": restart_command},
+    ]
 
 
 def run_plan(db_path: str, plan_id: int, ssh_client) -> dict:

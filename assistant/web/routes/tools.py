@@ -11,7 +11,11 @@ every integration for each turn.
 Crucially, this route dispatches through engine._dispatch_tool_call — the exact same
 function the Ollama path uses. Confirmation gating for locks, SMS, and outbound email
 therefore has ONE implementation, not one per backend: a sensitive call staged here
-lands in the same pending_actions table and is resolved by the same code.
+lands in the same pending_actions table and is resolved by the same code. llm is
+passed through too, purely so a git_merge_pr call arriving here (an execute-tier
+employee's own engineer() run, not a chat turn) can attempt the auto-merge governance
+check (engine._try_auto_merge_pr / git_ops.check_diff_scope) the same way a chat-issued
+merge does -- dev-team merges are exactly the case this exists for.
 
 Auth is a static bearer token (claude_tools_api_key) rather than the session cookie the
 rest of /api/* uses, because the caller is a subprocess, not a browser. Treat that token
@@ -67,7 +71,7 @@ async def call_tool(request: Request):
         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
         letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
         recipe=request.app.state.recipe,
-        employee_key=employee_key,
+        employee_key=employee_key, llm=request.app.state.llm,
     )
     result = await loop.run_in_executor(None, call)
     # _dispatch_tool_call always returns a JSON string, including for its own error

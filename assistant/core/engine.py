@@ -5,11 +5,13 @@ returns the final reply text.
 Transport-agnostic — Telegram (or any future transport) just calls handle_message.
 """
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from . import business_db, db, staff, vision
+from .git_ops import check_diff_scope
 from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
 from . import location_tools
@@ -22,6 +24,8 @@ from .kitchen_tools import (
     KITCHEN_ALWAYS_TOOLS, KITCHEN_SYSTEM_NOTE, KITCHEN_TOOLS, _select_kitchen_gated_tools,
 )
 from .git_tools import GIT_SYSTEM_NOTE
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -1321,6 +1325,7 @@ def _dispatch_tool_call(
     git_ops: "GitOpsContext | None" = None,
     recipe: "RecipeContext | None" = None,
     employee_key: str | None = None,
+    llm=None,
 ) -> str:
     if name == "show_camera":
         camera = vision.find_camera(db_path, arguments.get("location", ""))
@@ -1511,7 +1516,13 @@ def _dispatch_tool_call(
 
     if git_ops is not None and name in git_ops.tool_names:
         if name in git_ops.sensitive_tools:
-            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
+            auto_reason = None
+            if name == "git_merge_pr" and llm is not None:
+                outcome = _try_auto_merge_pr(db_path, git_ops, llm, requesting_user_id, arguments)
+                if outcome["auto_merged"]:
+                    return json.dumps(outcome["result"])
+                auto_reason = outcome["reason"]
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments, note=auto_reason)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1519,6 +1530,7 @@ def _dispatch_tool_call(
                     f"request into main. Describe exactly which PR and what merging it "
                     f"will do (tool: {name}, arguments: {arguments}) and ask the user to "
                     "explicitly confirm yes or no before anything happens."
+                    + (f" (Auto-merge was not applied: {auto_reason})" if auto_reason else "")
                 ),
             })
         try:
@@ -1651,17 +1663,108 @@ def _classify_confirmation(llm, user_text: str) -> str:
     return "unclear"
 
 
-def create_pending_action_and_review(db_path: str, user_id: int, name: str, arguments: dict) -> int:
+def _task_description_for_pr(db_path: str, user_id: int, pr_number: int) -> str | None:
+    """What was this PR actually supposed to do? There's no direct link from a PR
+    number back to the staff_work row that produced it, so this uses the next best
+    thing already on hand: the Review-item created when the PR was opened (git_open_pr's
+    own dispatch branch above stores the PR's title/body there) -- the same artifact a
+    human reviewer would read to judge scope, not just the original vague assignment.
+    None means genuinely nothing is known about this PR's intent, which check_diff_scope's
+    caller treats as its own reason to fail closed rather than guess."""
+    item = business_db.get_review_item_by_ref(db_path, user_id, "git_pull_requests", pr_number)
+    if item is None:
+        return None
+    parts = [item.get("title") or "", item.get("detail") or ""]
+    text = "\n\n".join(p for p in parts if p).strip()
+    return text or None
+
+
+def _try_auto_merge_pr(db_path: str, git_ops: "GitOpsContext", llm, user_id: int, arguments: dict) -> dict:
+    """The auto-merge governance decision for git_merge_pr: green CI AND a clean
+    diff-scope check are both required, or this falls back to exactly today's manual
+    pending_actions gate -- with the specific reason attached instead of a generic
+    prompt, so the owner sees *why* it needs a human this time.
+
+    Fails closed on anything unexpected -- a missing pr_number, a status/diff fetch
+    failing, no recorded task description to judge scope against, or this LLM backend
+    not supporting llm.research -- always falls back to manual approval, never to an
+    unattended merge on a guess. The owner never had to approve auto-merges being turned
+    on in general (that decision was made once, per docs/watchdog-system-design.md's own
+    safety-boundary reasoning); what he still sees per-merge is this reasoning trail.
+
+    No separate push notification is sent from here on purpose: the merge itself flips
+    this PR from open to closed/merged, which scheduler.run_github_watchdog (Phase 3)
+    already polls for and reports through the normal handle_message/notify path within
+    one poll interval -- reusing that rather than building a second notify path for the
+    same event.
+    """
+    pr_number = arguments.get("pr_number")
+    if pr_number is None:
+        return {"auto_merged": False, "reason": "no pr_number given"}
+
+    status = git_ops.mcp_client.get_pr_status(pr_number)
+    if not status.get("ok"):
+        return {"auto_merged": False, "reason": f"could not check PR status: {status.get('error')}"}
+    checks = status.get("checks") or []
+    if not checks or any(c.get("conclusion") != "success" for c in checks):
+        return {"auto_merged": False, "reason": "CI is not 100% green (or has no checks at all)"}
+
+    if not hasattr(llm, "research"):
+        return {"auto_merged": False, "reason": "this LLM backend cannot run the diff-scope judgment"}
+
+    task_description = _task_description_for_pr(db_path, user_id, pr_number)
+    if task_description is None:
+        return {"auto_merged": False,
+                "reason": "no recorded task/PR description to judge the diff's scope against"}
+
+    scope = check_diff_scope(git_ops.mcp_client, llm, pr_number, task_description)
+    if not scope["safe"]:
+        return {"auto_merged": False,
+                "reason": "diff-scope check raised concerns: " + "; ".join(scope["concerns"])}
+
+    result = git_ops.mcp_client.merge_pr(pr_number, arguments.get("merge_method", "squash"))
+    if not result.get("ok"):
+        return {"auto_merged": False, "reason": f"auto-merge attempt failed: {result.get('error')}"}
+
+    logger.info("auto-merged PR #%s: CI green, diff-scope check found no concerns", pr_number)
+    item = business_db.get_review_item_by_ref(db_path, user_id, "git_pull_requests", pr_number)
+    if item is not None:
+        try:
+            business_db.decide_review_item(
+                db_path, user_id, item["id"], "approved",
+                note="Auto-merged: CI was 100% green and the diff-scope check found no concerns.",
+            )
+        except Exception:
+            logger.exception("could not mark PR #%s's review item auto-approved", pr_number)
+
+    return {"auto_merged": True, "result": {
+        **result, "auto_merged": True,
+        "note": "Auto-merged: CI was 100% green and the diff-scope check found no concerns.",
+    }}
+
+
+def create_pending_action_and_review(
+    db_path: str, user_id: int, name: str, arguments: dict, note: str | None = None,
+) -> int:
     """Every sensitive tool call gets both a pending_actions row (the existing chat
     "yes/no" flow) and a linked review_items row -- one choke point, so a Kroger cart
     write, a CCXT trade, a mail release, an HA lock/alarm change, or a PR-merge
     confirmation is exactly as visible on the Review page as anything an employee
-    produces, regardless of which integration raised it."""
+    produces, regardless of which integration raised it.
+
+    note, when given, is a specific reason manual review is needed this time rather than
+    a generic prompt -- e.g. git_merge_pr's auto-merge governance check falling back
+    here because CI wasn't green or the diff-scope check raised a concern. Surfaced on
+    the Review card so the owner sees *why*, not just "flagged"."""
     pending_id = db.create_pending_action(db_path, user_id, name, arguments)
+    summary = f"{name} — {json.dumps(arguments)[:200]}"
+    detail = json.dumps(arguments, indent=2)
+    if note:
+        summary = f"{summary} ({note})"[:500]
+        detail = f"{note}\n\n{detail}"
     business_db.create_review_item(
         db_path, user_id, title=f"Confirm: {name}", kind="other",
-        summary=f"{name} — {json.dumps(arguments)[:200]}",
-        detail=json.dumps(arguments, indent=2), source_agent="pending_action",
+        summary=summary, detail=detail, source_agent="pending_action",
         ref_table="pending_actions", ref_id=pending_id,
     )
     return pending_id
@@ -1841,7 +1944,7 @@ def handle_message(
                 db_path, tz_name, requesting_user_id, fn["name"], fn.get("arguments", {}), era, calendar, phone,
                 mail=mail, obsidian=obsidian, home_assistant=home_assistant, business=business,
                 personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+                letterstream=letterstream, git_ops=git_ops, recipe=recipe, llm=llm,
             )
             messages.append({"role": "tool", "content": result})
 

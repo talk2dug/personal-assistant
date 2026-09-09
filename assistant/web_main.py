@@ -1,4 +1,4 @@
-"""Entrypoint for the web UI (jarvis-web.service) â€” separate process from main.py's
+"""Entrypoint for the web UI (jarvis-web.service) — separate process from main.py's
 Telegram bot, sharing config/db but running independently."""
 import logging
 
@@ -22,35 +22,30 @@ setup_logging("jarvis-web")
 logger = logging.getLogger(__name__)
 
 
-def _seed_vision_config(cfg) -> None:
-    """Cameras and terminal->camera mappings are config-driven, the same way cfg.users
-    seeds the users table below — so day-one coverage (Touch1, laptop1) is a config
-    entry, not a migration. Idempotent (add_camera/set_terminal_camera both upsert), and
-    safe to run here even though the vision worker process (assistant/vision_main.py,
-    under .venv-vision on the GPU machine) does the same seeding itself: this process
-    needs the terminal_cameras mapping for presence gating whether or not that worker has
-    started yet.
-    """
-    vision.init_vision_db(cfg.db_path)
-    for cam in cfg.vision_cameras:
-        vision.add_camera(
-            cfg.db_path, cam["key"], cam["name"], cam["url"],
-            kind=cam.get("kind", "mjpeg"), location=cam.get("location", ""),
-            motion_threshold=cam.get("motion_threshold", 0.012),
-            recordable=cam.get("recordable", True),
-        )
-    for device_id, camera_key in cfg.terminal_cameras.items():
-        vision.set_terminal_camera(cfg.db_path, device_id, camera_key)
+def _seed_cameras(cfg) -> None:
+    """Same seeding as main.py -- add_camera is an upsert, so both processes doing this
+    at startup is harmless (identical to how both already upsert users)."""
+    for cam in cfg.cameras or []:
+        try:
+            vision.add_camera(
+                cfg.db_path, cam["key"], cam["name"], cam["url"],
+                kind=cam.get("kind", "mjpeg"), location=cam.get("location", ""),
+                motion_threshold=cam.get("motion_threshold", 0.012),
+                recordable=cam.get("recordable", True),
+            )
+        except Exception:
+            logger.exception("failed to seed camera %r from config", cam.get("key"))
 
 
 def main() -> None:
     cfg = load_config()
     db.init_db(cfg.db_path)
+    vision.init_vision_db(cfg.db_path)
+    _seed_cameras(cfg)
     # The catalogue is written by scripts/scan_network_media.py, which may never have
     # run on a fresh install — create the tables here so the Media page returns empty
     # results rather than a 500.
     media_scan.init_media_db(cfg.db_path)
-    _seed_vision_config(cfg)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)
 

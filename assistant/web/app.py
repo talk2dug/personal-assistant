@@ -40,6 +40,7 @@ class SPAStaticFiles(StaticFiles):
 
 from .auth import router as auth_router
 from .routes.agents import router as agents_router
+from .routes.cameras import router as cameras_router
 from .routes.chat import router as chat_router
 from .routes.crypto import router as crypto_router
 from .routes.devices import router as devices_router
@@ -99,11 +100,9 @@ def create_app(
     app.include_router(personal_tasks_router)
     app.include_router(grocery_router)
     app.include_router(vision_router)
+    app.include_router(cameras_router)
 
     if static_dir and Path(static_dir).is_dir():
         app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")
 
     return app
-
-
-

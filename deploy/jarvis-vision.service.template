@@ -1,0 +1,28 @@
+# Jarvis vision worker — YOLO11n person detection + insightface face recognition,
+# reading Touch1/laptop1 (day one) and writing into the presence/identity schema in
+# core/vision.py. See scripts/vision_worker.py's own docstring for the full picture.
+#
+# A .template, not a ready-to-use unit, for the same reason jarvis-device.service is one:
+# every field below needs editing for the real host. Unlike jarvis-core.service and
+# jarvis-web.service, this one specifically MUST run on whatever host has the RTX 3060 --
+# that may or may not be the same host those two run on, and its Python interpreter is
+# .venv-vision, never the shared .venv (see requirements-vision.txt at the repo root for
+# why). If that host is Windows rather than Linux, use Task Scheduler / NSSM instead of
+# systemd and keep the same ExecStart command.
+
+[Unit]
+Description=Jarvis vision worker (YOLO11n + insightface on the RTX 3060)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=/CHANGE/ME/jarvis
+ExecStart=/CHANGE/ME/jarvis/.venv-vision/bin/python scripts/vision_worker.py --config config.json
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

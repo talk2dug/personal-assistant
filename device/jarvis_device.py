@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Jarvis voice terminal â€” the client that runs on each Raspberry Pi.
 
 Deliberately thin. It listens for a wake word, records what you say, hands the audio to
@@ -8,8 +8,13 @@ the fourth one is flashing an SD card, and improving the assistant improves all 
 at once without touching a single Pi.
 
 Flow, once per exchange:
-    openWakeWord hears "hey jarvis"  ->  chime  ->  record until you stop talking
-    ->  POST the audio to /api/devices/<id>/turn  ->  play the WAV that comes back
+    openWakeWord hears "hey jarvis"  ->  arbitrate with other terminals  ->  chime
+    ->  record until you stop talking  ->  POST the audio to /api/devices/<id>/turn
+    ->  play the WAV that comes back
+
+The arbitration step (claim_wake, just before the chime) is what keeps two terminals in
+adjacent rooms from both answering the same utterance -- see
+assistant/core/wake_arbitration.py for the server side of it.
 
 Audio is owned entirely by this process. A browser on the same Pi cannot also hold the
 microphone â€” two clients fighting over one capture device is the kind of thing that works
@@ -81,13 +86,6 @@ class Config:
         self.inference_framework: str = data.get("inference_framework", "tflite")
         self.input_device = data.get("input_device")     # None = system default
         self.output_device = data.get("output_device")
-        # Set only for a speaker known to reject Piper's native 22050Hz outright (see
-        # Speaker's docstring) -- skips the doomed first sd.play() attempt at 22050Hz
-        # entirely, rather than discovering the rejection at reply time. On the USB
-        # Composite Device speaker here, that failed attempt wasn't a clean, silent
-        # failure before falling back: it audibly started playing the reply and then
-        # cut off partway through, so every first reply after a restart was truncated.
-        self.output_rate: int | None = data.get("output_rate")
         # Floor only. The real threshold is calibrated against the room â€” a fixed value
         # is wrong the moment the device moves. Measured ambient noise on the first unit
         # was already above the naive 0.012 default, which would have meant it never
@@ -102,6 +100,10 @@ class Config:
         # a Pi with no microphone plugged in yet has no default to fall back to either,
         # and opening a stream against device=None still raises in that case.
         self.has_microphone: bool = True
+        # Whether to ask the server which terminal should actually answer before
+        # committing to a chime/recording -- see assistant/core/wake_arbitration.py. Off
+        # switch for a single-terminal install where there's nothing to arbitrate with.
+        self.wake_arbitration: bool = data.get("wake_arbitration", True)
 
 
 def pick_capture_rate(device) -> int:
@@ -227,12 +229,9 @@ class Speaker:
     So: try the native rate, and on refusal resample to whatever the device does accept.
     """
 
-    def __init__(self, output_device=None, output_rate: int | None = None):
+    def __init__(self, output_device=None):
         self.output_device = output_device
-        # Learned on first refusal and reused from then on -- unless a caller already
-        # knows the device's real rate (Config.output_rate), in which case start there
-        # and skip the doomed native-rate attempt altogether.
-        self._resample_to: float | None = float(output_rate) if output_rate else None
+        self._resample_to: float | None = None    # learned on first refusal, then reused
 
     def _device_rate(self) -> float:
         try:
@@ -374,6 +373,32 @@ class JarvisClient:
 
         threading.Thread(target=beat, name="heartbeat", daemon=True).start()
 
+    def claim_wake(self, score: float, timeout: float = 3.0) -> bool:
+        """Asks the server whether this terminal should actually answer this wake event,
+        or whether another terminal heard it more clearly -- see
+        assistant/core/wake_arbitration.py.
+
+        Fails OPEN: if the server can't be reached or errors, this terminal proceeds as
+        if it won. A missed arbitration must never mean the wake word silently does
+        nothing -- at worst, two terminals answer the same utterance once in a while,
+        which is a far smaller problem than one that doesn't answer at all. This is the
+        opposite failure posture from presence gating on the server side, which fails
+        closed on purpose -- arbitration is about not double-answering, not about
+        keeping anything private.
+        """
+        if not self.cfg.wake_arbitration:
+            return True
+        try:
+            resp = self.http.post(
+                f"{self.cfg.server}/api/devices/{self.cfg.device_id}/wake_claim",
+                json={"score": score}, timeout=timeout,
+            )
+            resp.raise_for_status()
+            return bool(resp.json().get("proceed", True))
+        except Exception as e:
+            log.debug("wake arbitration unreachable (%s) -- proceeding unarbitrated", e)
+            return True
+
     def turn(self, wav_bytes: bytes) -> dict:
         files = {"audio": ("utterance.wav", wav_bytes, "audio/wav")}
         resp = self.http.post(f"{self.cfg.server}/api/devices/{self.cfg.device_id}/turn", files=files)
@@ -458,7 +483,7 @@ def main() -> int:
     cfg = Config(pathlib.Path(args.config))
     resolve_audio_devices(cfg)
     client = JarvisClient(cfg)
-    speaker = Speaker(cfg.output_device, cfg.output_rate)
+    speaker = Speaker(cfg.output_device)
 
     client.wait_for_server()
     client.start_heartbeat()
@@ -554,29 +579,35 @@ def main() -> int:
 
             if top < cfg.wake_threshold:
                 return
-            log.info("wake word detected (%.2f)", top)
+            log.info("wake word detected (%.2f) — arbitrating with other terminals", top)
             # Clear the model's buffers or it re-triggers on the same audio next time.
             wake.reset()
-            utterance = list(preroll)
+            pending_utterance = list(preroll)
             preroll.clear()
-            silence_started = None
-            heard_speech = False
-            speech_frames = 0
-            started_at = time.time()
-            state = "record"
-            # client.report is a blocking HTTP call and safe_chime opens a second audio
-            # stream -- both must run off PortAudio's own callback thread, which is what
-            # is calling handle() right now. Confirmed directly: leaving the chime here
-            # crashed the whole process on a laptop whose single shared audio codec
-            # aborts with an ALSA assertion (PaAlsaStreamComponent_BeginPolling:
-            # `ret == self->nfds`) the instant a second stream opens while this one's
-            # callback is still executing. finish() below already gets this right for
-            # the reply audio; only the wake chime hadn't been moved off-thread too.
-            def _on_wake():
+            # "arbitrating" (not "record") until the server confirms this terminal should
+            # answer -- the audio callback below ignores frames in this state exactly
+            # like it does for "busy", so nothing is lost from a genuine win, and nothing
+            # is recorded needlessly on a loss.
+            state = "arbitrating"
+
+            def _arbitrate(score: float, saved_preroll: list[np.ndarray]) -> None:
+                nonlocal state, utterance, silence_started, started_at, heard_speech, speech_frames
+                proceed = client.claim_wake(score)
+                if not proceed:
+                    log.info("lost wake arbitration — another terminal is closer, going back to sleep")
+                    state = "wake"
+                    return
+                utterance = saved_preroll
+                silence_started = None
+                heard_speech = False
+                speech_frames = 0
+                started_at = time.time()
+                state = "record"
                 client.report("listening")
                 if cfg.chime:
                     speaker.safe_chime(up=True)
-            threading.Thread(target=_on_wake, daemon=True).start()
+
+            threading.Thread(target=_arbitrate, args=(top, pending_utterance), daemon=True).start()
             return
 
         # state == "record"
@@ -652,7 +683,7 @@ def main() -> int:
     def callback(indata, _frames, _time, status):
         if status:
             log.debug("audio status: %s", status)
-        if state == "busy":
+        if state in ("busy", "arbitrating"):
             return
         handle(downsample_to_16k(np.frombuffer(bytes(indata), dtype=np.int16),
                                  cfg.capture_rate))
@@ -673,4 +704,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

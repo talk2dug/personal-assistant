@@ -1,4 +1,4 @@
-﻿"""Loads runtime configuration (bot token, user allowlist, Ollama endpoint) from a JSON
+"""Loads runtime configuration (bot token, user allowlist, Ollama endpoint) from a JSON
 file kept out of source control, so the Telegram token and the two chat_ids never end up
 committed.
 """
@@ -219,6 +219,30 @@ class Config:
     # business_agents_enabled — that switch is about the print business's unattended agents,
     # and nesting this under it would make personal research silently never run by default.
     personal_research_interval_minutes: int = 30
+    # Camera-based presence and identity: YOLO11n person/pet detection (already used by
+    # detector.py) plus InsightFace face matching (assistant/core/face_id.py). Off by
+    # default like every other GPU-dependent integration here -- the detection loop only
+    # ever runs in the core process (main.py), on whichever machine actually has the
+    # RTX 3060, never in the web process (see assistant/web/app.py's own docstring about
+    # running on pi5nas002, not the GPU box).
+    vision_enabled: bool = False
+    # None = auto-detect (cuda:0 if available, else cpu) -- same convention as
+    # detector.Detector's own device parameter.
+    vision_device: str | None = None
+    vision_model_name: str = "yolo11n.pt"
+    vision_face_model_name: str = "buffalo_l"
+    vision_poll_seconds: float = 2.0
+    # Cosine similarity on InsightFace's normalised 512-d embeddings. 0.38 is a
+    # reasonable starting point for buffalo_l but genuinely needs calibrating against
+    # the real cameras and real faces this deployment sees -- flagged for owner testing,
+    # not something to trust blindly out of the box.
+    vision_face_match_threshold: float = 0.38
+    # How many times an unfamiliar face has to be seen before it becomes a Review-page
+    # enrollment request, rather than pestering the owner over one glimpse.
+    vision_unknown_face_ask_after: int = 3
+    # How long an 'identified' sighting on a camera still counts as someone being there,
+    # for both vision.presence_now() and the identity gate in devices.py's /turn.
+    vision_presence_window_seconds: int = 180
 
 
 def load_config(path: str = "config.json") -> Config:
@@ -339,9 +363,12 @@ def load_config(path: str = "config.json") -> Config:
         pipeline_interval_hours=data.get("pipeline_interval_hours", 12),
         business_digest_hour=data.get("business_digest_hour", 8),
         personal_research_interval_minutes=data.get("personal_research_interval_minutes", 30),
+        vision_enabled=data.get("vision_enabled", False),
+        vision_device=data.get("vision_device"),
+        vision_model_name=data.get("vision_model_name", "yolo11n.pt"),
+        vision_face_model_name=data.get("vision_face_model_name", "buffalo_l"),
+        vision_poll_seconds=data.get("vision_poll_seconds", 2.0),
+        vision_face_match_threshold=data.get("vision_face_match_threshold", 0.38),
+        vision_unknown_face_ask_after=data.get("vision_unknown_face_ask_after", 3),
+        vision_presence_window_seconds=data.get("vision_presence_window_seconds", 180),
     )
-
-
-
-
-

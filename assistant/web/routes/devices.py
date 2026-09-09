@@ -12,6 +12,12 @@ each stage completes rather than the client guessing.
 
 Auth is a static device key, not the session cookie: these clients are headless, and the
 kiosk browser showing the orb has nobody to log it in.
+
+Who the assistant is *acting as* on this transport is a separate question from who is
+authenticated as the device. There is no login here at all, which historically meant
+/turn simply assumed whoever was speaking near a terminal was the configured owner and
+handed over every tool -- mail, calendar, finance, the lot. _resolve_speaker below is
+what gates that on camera-based identity once one is actually wired to a terminal.
 """
 import asyncio
 import base64
@@ -59,6 +65,46 @@ def _owner_user_id(request: Request) -> int:
     if owner is None:
         raise HTTPException(500, "owner not found in db")
     return owner["id"]
+
+
+def _resolve_speaker(request: Request, device_id: str) -> tuple[int, bool, str | None]:
+    """Who /turn should act on behalf of, and whether it's safe to hand over
+    personal/sensitive tools right now. Returns (user_id, sensitive_ok, identified_as).
+
+    Every piece of personal/business data in this codebase (personal_db.py,
+    business_db.py, Era, mail, calendar...) is scoped to a single configured owner
+    account, not per-speaker -- there is no separate "partner's own data" to hand
+    someone else. So the only question this gate answers is a binary one: is the owner
+    account confidently the one physically present at this terminal right now?
+
+    Defaults wide open (today's behaviour: always the owner, sensitive_ok=True) in
+    exactly the cases where there is nothing real to gate on, so this cannot silently
+    lock a terminal nobody has configured for vision yet:
+      - vision is disabled entirely (cfg.vision_enabled is False/unset), or
+      - this device has no camera linked to it (vision.camera_for_device).
+
+    Once a camera *is* linked, sensitive_ok only turns on when vision.identify_present
+    shows a currently-identified person whose known_people row is linked to the owner
+    account. Anyone else -- an unresolved face, an identified-but-unlinked household
+    member/guest, or simply nobody in frame -- gets sensitive_ok=False, which the caller
+    uses to strip every context that can read or act on personal/business data.
+    """
+    cfg = request.app.state.cfg
+    owner_id = _owner_user_id(request)
+    if not getattr(cfg, "vision_enabled", False):
+        return owner_id, True, None
+
+    camera = vision.camera_for_device(cfg.db_path, device_id)
+    if camera is None:
+        return owner_id, True, None
+
+    within = getattr(cfg, "vision_presence_window_seconds", 180)
+    present = vision.identify_present(cfg.db_path, camera["key"], within_seconds=within)
+    if present is None:
+        return owner_id, False, None
+    if present.get("linked_user_id") == owner_id:
+        return owner_id, True, present["name"]
+    return owner_id, False, present["name"]
 
 
 def _set_state(device_id: str, **fields) -> dict:
@@ -150,10 +196,15 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
 
     _set_state(device_id, state="thinking", caption=transcript)
 
-    owner_id = _owner_user_id(request)
-    call = functools.partial(
-        handle_message, cfg.db_path, request.app.state.llm, owner_id, transcript,
-        tz_name=cfg.timezone, era=request.app.state.era, calendar=request.app.state.calendar,
+    # Camera-based identity gate: is the owner account confidently the one standing at
+    # this terminal right now? Defaults wide open (see _resolve_speaker's docstring)
+    # when vision is off or nothing is linked, so this changes nothing until a camera is
+    # actually wired to a device.
+    user_id, sensitive_ok, _identified_as = _resolve_speaker(request, device_id)
+
+    call_kwargs = dict(
+        tz_name=cfg.timezone,
+        era=request.app.state.era, calendar=request.app.state.calendar,
         phone=request.app.state.phone, mail=request.app.state.mail,
         obsidian=request.app.state.obsidian, home_assistant=request.app.state.home_assistant,
         business=request.app.state.business, personal=request.app.state.personal,
@@ -161,6 +212,17 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
         letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
         recipe=request.app.state.recipe, local_llm=request.app.state.local_llm,
+    )
+    if not sensitive_ok:
+        # Nobody positively identified as the owner is in front of this camera right now
+        # -- strip every context that can read or act on personal/business/financial
+        # data. What's left is still a working assistant (general conversation on the
+        # base LLM), just not one that will read out a calendar, a balance, or an email
+        # to whoever happens to be standing there.
+        call_kwargs = {k: (v if k == "tz_name" else None) for k, v in call_kwargs.items()}
+
+    call = functools.partial(
+        handle_message, cfg.db_path, request.app.state.llm, user_id, transcript, **call_kwargs,
     )
     try:
         reply = await loop.run_in_executor(None, call)
@@ -183,7 +245,7 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
     # camera has to ride along on that same polled object, not just this response;
     # camera_seq lets Device.jsx notice a *new* one without the server needing to
     # "clear" it afterward (a GET poll shouldn't have side effects).
-    camera = vision.pop_pending_camera_view(cfg.db_path, owner_id)
+    camera = vision.pop_pending_camera_view(cfg.db_path, user_id)
     state_fields = {"state": "speaking", "caption": reply}
     if camera is not None:
         state_fields["camera"] = camera

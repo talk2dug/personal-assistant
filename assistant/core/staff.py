@@ -703,7 +703,7 @@ def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> str:
     return "\n".join(lines)
 
 
-def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> dict:
+def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800) -> dict:
     """Give an employee a piece of work and record what came back.
 
     Every tier but "execute" runs through llm.research(), which carries web search and,
@@ -713,6 +713,12 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 900) -> 
     one tier that can act (see the note above CAPABILITY_TIERS) — it runs through
     llm.engineer() instead, with real but narrowly-scoped tools (git, including reading
     the actual repo, and SSH/ops-plan), never the owner's full catalog.
+
+    `timeout` is the ClaudeCLIClient subprocess's hard ceiling (config's
+    staff_assignment_timeout_seconds) — real dev-team/coding assignments can legitimately
+    run much longer than a chat turn, and a real incident showed a too-short default here
+    silently kills an in-progress job via subprocess.TimeoutExpired, losing the work and
+    only ever recording it as a generic failure.
     """
     emp = get_staff(db_path, key)
     if emp is None:
@@ -957,12 +963,87 @@ def _alert_allowed(row, cooldown_min: int) -> bool:
     return datetime.now(timezone.utc) - last >= timedelta(minutes=cooldown_min)
 
 
-def run_due(db_path: str, llm, tz_name: str = "UTC", notify=None) -> list[dict]:
+def format_alert_text(headline: str, body: str, urgency: str, person: dict) -> str:
+    """The exact text one employee escalation becomes on the owner's phone.
+
+    Shared so the message reads identically regardless of which caller actually delivers
+    it: the synchronous run_due path below, scheduler.py's _staff_alert (used when
+    run_due is called with no work_queue), and work_queue.py's cadence-result handler
+    (used when it is) all format through this one function rather than three copies that
+    could quietly drift apart.
+    """
+    prefix = {"high": "URGENT", "normal": "", "low": "FYI"}.get(urgency, "")
+    title = f"{person['title']}: {headline}".strip()
+    return f"{prefix + ' - ' if prefix else ''}{title}\n\n{(body or '').strip()[:1200]}"
+
+
+def handle_cadence_outcome(db_path: str, person: dict, outcome: dict, notify=None) -> dict:
+    """What to do once one scheduled employee's assignment has actually finished:
+    decide whether it's worth alerting the owner, respecting alert_policy and the
+    per-employee cooldown, then record the verdict either way.
+
+    Called synchronously by run_due today for every due employee in turn; called once,
+    asynchronously, by work_queue.py's worker for a 'cadence' job once staff.assign()
+    (run by the worker, not this function) actually returns. Either way this is the
+    single place that turns an assign() outcome into an alert-or-not decision, so the
+    two paths can never silently diverge on when the owner gets told.
+
+    `notify(headline, body, urgency, employee)` is invoked in two cases: the employee's
+    own verdict said the owner's stated condition was met (subject to alert_policy and
+    the cooldown), OR the run itself failed to deliver at all (crash, timeout, bad
+    output) -- that second case ignores alert_policy entirely and only respects the
+    cooldown, since a run failing to happen is not the kind of thing "never alert me on
+    findings" was meant to silence. A failed/timed-out run that never notified regardless
+    of policy was a real, previously-shipped gap -- a coding job could die mid-task and
+    the owner would never find out short of checking manually.
+    """
+    verdict = parse_verdict(outcome.get("output"))
+    alerted = False
+    cooldown = int(person["alert_cooldown_min"] or 30)
+
+    if not outcome.get("ok"):
+        if notify is not None and _alert_allowed(person, cooldown):
+            try:
+                notify(f"{person['title']} run failed",
+                       outcome.get("error") or "no error detail recorded",
+                       "normal", person)
+                _mark_alerted(db_path, person["key"])
+                alerted = True
+            except Exception:
+                logger.exception("failure-alerting for %s failed", person["key"])
+    else:
+        policy = person["alert_policy"] or "never"
+        wants = (policy == "always") or (policy == "on_alert" and verdict["alert"])
+        if wants and notify is not None and _alert_allowed(person, cooldown):
+            try:
+                notify(verdict["headline"] or f"{person['title']} has something",
+                       outcome.get("output") or "", verdict["urgency"], person)
+                _mark_alerted(db_path, person["key"])
+                alerted = True
+            except Exception:
+                logger.exception("alerting for %s failed", person["key"])
+
+    return {"employee": person["key"], "ok": outcome.get("ok", False),
+            "alert": verdict["alert"], "alerted": alerted, "headline": verdict["headline"]}
+
+
+def run_due(db_path: str, llm, tz_name: str = "UTC", notify=None, timeout: int = 10800,
+            work_queue=None) -> list[dict]:
     """Run every employee who is due and on shift. Called by the scheduler.
 
-    `notify(headline, body, urgency, employee)` is invoked only when the employee's own
-    verdict says the owner's stated condition was met and the cooldown has elapsed. The
-    employee never sends anything itself -- it returns a judgement, and this decides.
+    With work_queue given, each due assignment is handed to it (kind='cadence') and this
+    returns immediately per employee -- staff_cadence's own tick becomes as fast as N
+    enqueues, and the work queue's single worker is what actually calls assign() and,
+    once it returns, handle_cadence_outcome() above. Without one (no queue wired, or a
+    caller -- including every existing test -- that predates it), this falls back to the
+    original synchronous behavior: call assign() and decide on the alert inline, before
+    moving to the next employee. Never silently drops an assignment either way, same
+    fallback reasoning as business_tools.py's assign_work handler.
+
+    A due employee already sitting in the queue (queued or running) is skipped rather
+    than enqueued again -- due_for_cadence has no visibility into the queue, so without
+    this check a job that outlives one 5-minute tick (routine for a real coding
+    assignment) would get re-enqueued on every tick until the first copy finally drains.
     """
     results = []
     for person in due_for_cadence(db_path, tz_name):
@@ -974,25 +1055,20 @@ def run_due(db_path: str, llm, tz_name: str = "UTC", notify=None) -> list[dict]:
             if person["alert_condition"]:
                 assignment += build_verdict_instructions(person["alert_condition"])
 
-            outcome = assign(db_path, llm, person["key"], assignment)
-            verdict = parse_verdict(outcome.get("output"))
-            alerted = False
+            if work_queue is not None:
+                if work_queue.has_pending(person["key"]):
+                    results.append({"employee": person["key"], "ok": None, "alert": None,
+                                    "alerted": False, "headline": None, "queued": False,
+                                    "skipped": "already queued or running"})
+                    continue
+                queue_id = work_queue.submit(person["key"], assignment, kind="cadence")
+                results.append({"employee": person["key"], "ok": None, "alert": None,
+                                "alerted": False, "headline": None, "queued": True,
+                                "queue_id": queue_id})
+                continue
 
-            policy = person["alert_policy"] or "never"
-            wants = (policy == "always") or (policy == "on_alert" and verdict["alert"])
-            if wants and notify is not None and outcome.get("ok"):
-                if _alert_allowed(person, int(person["alert_cooldown_min"] or 30)):
-                    try:
-                        notify(verdict["headline"] or f"{person['title']} has something",
-                               outcome.get("output") or "", verdict["urgency"], person)
-                        _mark_alerted(db_path, person["key"])
-                        alerted = True
-                    except Exception:
-                        logger.exception("alerting for %s failed", person["key"])
-
-            results.append({"employee": person["key"], "ok": outcome.get("ok", False),
-                            "alert": verdict["alert"], "alerted": alerted,
-                            "headline": verdict["headline"]})
+            outcome = assign(db_path, llm, person["key"], assignment, timeout=timeout)
+            results.append(handle_cadence_outcome(db_path, person, outcome, notify))
         except Exception as e:
             logger.exception("employee %s failed to run", person["key"])
             results.append({"employee": person["key"], "ok": False, "alert": False,

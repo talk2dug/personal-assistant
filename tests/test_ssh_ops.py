@@ -83,8 +83,9 @@ def test_password_auth_is_passed_through_when_no_key_configured(monkeypatch):
 class _FakeChannel:
     """Enough of paramiko's Channel surface for run_command to complete against it."""
 
-    def __init__(self, exit_status=0):
+    def __init__(self, exit_status=0, stderr=""):
         self._exit_status = exit_status
+        self._stderr = stderr
         self.get_pty_called = False
         self.exec_command_calls = []
 
@@ -96,6 +97,15 @@ class _FakeChannel:
 
     def recv_ready(self):
         return False
+
+    def recv_stderr_ready(self):
+        if self._stderr:
+            return True
+        return False
+
+    def recv_stderr(self, n):
+        out, self._stderr = self._stderr, ""
+        return out.encode()
 
     def exit_status_ready(self):
         return True
@@ -144,3 +154,30 @@ def test_run_command_reports_the_real_exit_code(monkeypatch):
     result = client.run_command("simrig", "exit 1")
 
     assert result == {"ok": False, "host": "simrig", "command": "exit 1", "exit_code": 1, "output": ""}
+
+
+def test_run_command_surfaces_stderr_in_output(monkeypatch):
+    """A real incident: a failing step against jarvisbox came back with an empty
+    output and no way to tell why, because paramiko keeps stderr on a separate stream
+    from stdout and run_command only ever read stdout. The real error (cmd.exe's "not
+    recognized as an internal or external command", from a PowerShell command sent to a
+    host whose SSH default shell turned out to be cmd.exe) was there the whole time on
+    stderr -- just never read. It must now show up in `output` rather than being
+    silently dropped, since that's the only signal a caller (or Jarvis diagnosing a
+    failed ops-plan step) has to work with."""
+    import paramiko
+
+    fake_channel = _FakeChannel(exit_status=1, stderr="'foo' is not recognized as an internal or external command")
+
+    class FakeTransport:
+        def open_session(self):
+            return fake_channel
+
+    monkeypatch.setattr(paramiko.SSHClient, "connect", lambda self, *a, **k: None)
+    monkeypatch.setattr(paramiko.SSHClient, "get_transport", lambda self: FakeTransport())
+
+    client = SSHOpsClient({"jarvisbox": {"host": "127.0.0.1", "user": "swayze"}})
+    result = client.run_command("jarvisbox", "foo")
+
+    assert result["ok"] is False
+    assert "not recognized as an internal or external command" in result["output"]

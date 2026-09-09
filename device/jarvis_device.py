@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Jarvis voice terminal â€” the client that runs on each Raspberry Pi.
 
 Deliberately thin. It listens for a wake word, records what you say, hands the audio to
@@ -10,6 +10,16 @@ at once without touching a single Pi.
 Flow, once per exchange:
     openWakeWord hears "hey jarvis"  ->  chime  ->  record until you stop talking
     ->  POST the audio to /api/devices/<id>/turn  ->  play the WAV that comes back
+
+One exception to "waits for the wake word": open-mic mode. A background poller
+(JarvisClient.conversation_mode) asks the server every few seconds whether a camera-
+recognised known person is currently in view of this device (assistant/web/routes/
+vision.py's /api/vision/conversation-mode/{device_id}, driven by core/camera_watch.py).
+While that's true, the wake-word branch of the state machine below is simply skipped --
+any frame arriving in state "wake" starts recording immediately, no "hey Jarvis" needed --
+and control returns to that same bypass after each utterance rather than back to
+wake-word gating. The instant presence/identity is lost, so does open-mic; there is no
+latch that keeps it on past whoever triggered it.
 
 Audio is owned entirely by this process. A browser on the same Pi cannot also hold the
 microphone â€” two clients fighting over one capture device is the kind of thing that works
@@ -53,7 +63,9 @@ MAX_UTTERANCE_SEC = 20.0     # hard stop, so a noisy room can't record forever
 # How long to wait for you to actually start talking after the wake word. Without this,
 # the natural pause between "hey Jarvis" and the question counts as silence and the
 # recording ends before you've said anything â€” observed exactly that on the first unit,
-# which sent 1.2s of audio containing only the tail of the wake word.
+# which sent 1.2s of audio containing only the tail of the wake word. Reused as-is for
+# open-mic mode: the "wait for you to actually start talking" problem is identical, just
+# without a wake word to mark when the waiting began.
 START_TIMEOUT_SEC = 6.0
 # The wake word fires while you're still finishing the word "Jarvis", so the frames
 # immediately after it are loud â€” counting those as "you've started speaking" arms the
@@ -63,8 +75,14 @@ WAKE_TAIL_SEC = 0.45
 # arm it either.
 MIN_SPEECH_SEC = 0.25
 # Audio kept from *before* the wake word fires, so a request that runs straight into the
-# wake word ("hey Jarvis what's the weather") doesn't lose its first syllable.
+# wake word ("hey Jarvis what's the weather") doesn't lose its first syllable. Not used
+# in open-mic mode -- there is no trigger moment to keep audio "before", recording just
+# starts on the current frame.
 PREROLL_SEC = 0.5
+# How often to ask the server whether open-mic mode should be on. A camera-driven signal
+# that's a few seconds stale is fine -- someone walking into or out of frame isn't a
+# sub-second event -- and this keeps it to a cheap periodic GET rather than a socket.
+OPEN_MIC_POLL_SEC = 4.0
 
 
 class Config:
@@ -81,13 +99,6 @@ class Config:
         self.inference_framework: str = data.get("inference_framework", "tflite")
         self.input_device = data.get("input_device")     # None = system default
         self.output_device = data.get("output_device")
-        # Set only for a speaker known to reject Piper's native 22050Hz outright (see
-        # Speaker's docstring) -- skips the doomed first sd.play() attempt at 22050Hz
-        # entirely, rather than discovering the rejection at reply time. On the USB
-        # Composite Device speaker here, that failed attempt wasn't a clean, silent
-        # failure before falling back: it audibly started playing the reply and then
-        # cut off partway through, so every first reply after a restart was truncated.
-        self.output_rate: int | None = data.get("output_rate")
         # Floor only. The real threshold is calibrated against the room â€” a fixed value
         # is wrong the moment the device moves. Measured ambient noise on the first unit
         # was already above the naive 0.012 default, which would have meant it never
@@ -227,12 +238,9 @@ class Speaker:
     So: try the native rate, and on refusal resample to whatever the device does accept.
     """
 
-    def __init__(self, output_device=None, output_rate: int | None = None):
+    def __init__(self, output_device=None):
         self.output_device = output_device
-        # Learned on first refusal and reused from then on -- unless a caller already
-        # knows the device's real rate (Config.output_rate), in which case start there
-        # and skip the doomed native-rate attempt altogether.
-        self._resample_to: float | None = float(output_rate) if output_rate else None
+        self._resample_to: float | None = None    # learned on first refusal, then reused
 
     def _device_rate(self) -> float:
         try:
@@ -380,6 +388,17 @@ class JarvisClient:
         resp.raise_for_status()
         return resp.json()
 
+    def conversation_mode(self) -> dict:
+        """Whether this device should be in open-mic mode right now, per the server's
+        camera-driven presence/identity check (assistant/web/routes/vision.py). Raises on
+        failure -- the poller loop below is what makes this non-fatal, same pattern as
+        every other network call here having its own try/except at the call site rather
+        than swallowing errors in the client itself."""
+        resp = self.http.get(
+            f"{self.cfg.server}/api/vision/conversation-mode/{self.cfg.device_id}", timeout=8.0)
+        resp.raise_for_status()
+        return resp.json()
+
     def wait_for_server(self) -> None:
         """A Pi boots faster than the laptop wakes; don't die because the server isn't up
         yet, just wait for it."""
@@ -434,6 +453,36 @@ def calibrate_noise_floor(cfg: Config, seconds: float = 1.5) -> float:
     return threshold
 
 
+def start_open_mic_poller(client: JarvisClient, open_mic: threading.Event, open_mic_person: dict) -> None:
+    """Background thread: keeps open_mic (and who triggered it) in sync with the server's
+    camera-driven presence/identity check. Runs independently of the audio callback --
+    the callback only ever reads open_mic.is_set(), never blocks on the network itself.
+    """
+    def poll():
+        while True:
+            try:
+                result = client.conversation_mode()
+                now_on = bool(result.get("open_mic"))
+                if now_on and not open_mic.is_set():
+                    log.info("open-mic mode ON — %s is in view, listening without a wake word",
+                             result.get("person") or "a recognised person")
+                elif not now_on and open_mic.is_set():
+                    log.info("open-mic mode OFF — back to wake-word listening")
+                open_mic_person["name"] = result.get("person") if now_on else None
+                if now_on:
+                    open_mic.set()
+                else:
+                    open_mic.clear()
+            except Exception as e:
+                # Never fatal, and never flips the mode on a transient failure -- a
+                # dropped poll should leave the terminal exactly as it was, not silently
+                # start listening without a wake word because a request timed out.
+                log.debug("open-mic poll failed (%s); leaving mode unchanged", e)
+            time.sleep(OPEN_MIC_POLL_SEC)
+
+    threading.Thread(target=poll, name="open-mic-poll", daemon=True).start()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Jarvis voice terminal")
     parser.add_argument("--config", default="device.json")
@@ -458,10 +507,18 @@ def main() -> int:
     cfg = Config(pathlib.Path(args.config))
     resolve_audio_devices(cfg)
     client = JarvisClient(cfg)
-    speaker = Speaker(cfg.output_device, cfg.output_rate)
+    speaker = Speaker(cfg.output_device)
 
     client.wait_for_server()
     client.start_heartbeat()
+
+    # Open-mic state, shared between this poller and the audio callback below. A
+    # threading.Event rather than a plain bool: .is_set()/.set()/.clear() are already
+    # atomic, so the audio callback (running on PortAudio's own thread) never needs a
+    # lock just to check it.
+    open_mic = threading.Event()
+    open_mic_person: dict = {"name": None}
+    start_open_mic_poller(client, open_mic, open_mic_person)
 
     # No point loading a wake-word model or opening a capture stream against hardware
     # that doesn't exist yet. Report clearly and wait for a microphone to appear rather
@@ -528,13 +585,39 @@ def main() -> int:
     speech_frames = 0
     near_best = 0.0
     near_at = time.time()
+    # Set when the current "record" state was entered via open-mic rather than a real
+    # wake-word trigger -- read by the two finish() call sites below so open-mic doesn't
+    # chime on every utterance of a continuous conversation.
+    current_is_open_mic = False
 
     def handle(frame: np.ndarray) -> None:
         nonlocal state, utterance, silence_started, started_at, heard_speech, speech_frames
-
-        nonlocal near_best, near_at
+        nonlocal near_best, near_at, current_is_open_mic
 
         if state == "wake":
+            if open_mic.is_set():
+                # Someone the house recognises is in view of this device's camera --
+                # skip the wake word entirely and start listening now. No preroll: there
+                # is no trigger moment to keep audio "before", the current frame is where
+                # listening starts.
+                log.info("open-mic: %s is here, listening without a wake word",
+                         open_mic_person.get("name") or "someone recognised")
+                wake.reset()
+                preroll.clear()
+                utterance = [frame]
+                silence_started = None
+                heard_speech = False
+                speech_frames = 0
+                started_at = time.time()
+                current_is_open_mic = True
+                state = "record"
+
+                def _on_open_mic():
+                    name = open_mic_person.get("name")
+                    client.report("listening", f"Listening ({name})" if name else "Listening")
+                threading.Thread(target=_on_open_mic, daemon=True).start()
+                return
+
             preroll.append(frame)
             scores = wake.predict(frame)
             top = max(scores.values())
@@ -563,6 +646,7 @@ def main() -> int:
             heard_speech = False
             speech_frames = 0
             started_at = time.time()
+            current_is_open_mic = False
             state = "record"
             # client.report is a blocking HTTP call and safe_chime opens a second audio
             # stream -- both must run off PortAudio's own callback thread, which is what
@@ -585,7 +669,9 @@ def main() -> int:
         loud = rms(frame) >= silence_threshold
 
         if loud:
-            # Everything inside the wake-word tail is still the wake word itself.
+            # Everything inside the wake-word tail is still the wake word itself. Not
+            # applicable to an open-mic-triggered utterance (there's no wake word to tail
+            # off), but harmless there too -- WAKE_TAIL_SEC just becomes a no-op window.
             if elapsed >= WAKE_TAIL_SEC:
                 speech_frames += 1
                 if speech_frames * FRAME_MS / 1000 >= MIN_SPEECH_SEC:
@@ -597,13 +683,14 @@ def main() -> int:
                 silence_started = time.time()
 
         if not heard_speech:
-            # Still waiting for you to begin. The gap between the wake word and the
-            # question must not be mistaken for the end of the utterance.
+            # Still waiting for you to begin. The gap between the wake word (or, in
+            # open-mic mode, the moment listening started) and the question must not be
+            # mistaken for the end of the utterance.
             if elapsed < START_TIMEOUT_SEC:
                 return
             log.info("nobody spoke within %.0fs â€” going back to sleep", START_TIMEOUT_SEC)
             state = "busy"
-            threading.Thread(target=finish, args=([], 0.0), daemon=True).start()
+            threading.Thread(target=finish, args=([], 0.0, current_is_open_mic), daemon=True).start()
             return
 
         done = (silence_started is not None and time.time() - silence_started >= SILENCE_HANGOVER_SEC) \
@@ -612,19 +699,22 @@ def main() -> int:
             return
 
         state = "busy"
-        threading.Thread(target=finish, args=(list(utterance), elapsed), daemon=True).start()
+        threading.Thread(target=finish, args=(list(utterance), elapsed, current_is_open_mic), daemon=True).start()
 
-    def finish(frames: list[np.ndarray], elapsed: float) -> None:
+    def finish(frames: list[np.ndarray], elapsed: float, was_open_mic: bool = False) -> None:
         nonlocal state
         try:
             if elapsed < MIN_UTTERANCE_SEC:
                 log.info("utterance too short (%.2fs) â€” ignoring", elapsed)
                 client.report("idle")
                 return
-            if cfg.chime:
+            # No chime for open-mic: a ding on every turn of a continuous conversation is
+            # worse than the thing it's signalling. The wake-word path still gets one --
+            # that's the deliberate "I heard you" cue for an explicit trigger.
+            if cfg.chime and not was_open_mic:
                 speaker.safe_chime(up=False)
             client.report("thinking")
-            log.info("sending %.1fs of audio", elapsed)
+            log.info("sending %.1fs of audio%s", elapsed, " (open-mic)" if was_open_mic else "")
             result = client.turn(to_wav(frames))
 
             if result.get("heard_nothing"):
@@ -644,7 +734,11 @@ def main() -> int:
             client.report("idle")
         finally:
             # Drop anything captured while we were busy, so the reply's own audio and any
-            # chatter during it can't be mistaken for the next wake word.
+            # chatter during it can't be mistaken for the next wake word. state goes back
+            # to "wake" either way -- if open_mic is still set, the very next frame there
+            # re-enters listening immediately (see the top of handle()); if it's been
+            # cleared (the recognised person left, or presence dropped), the terminal
+            # falls straight back to plain wake-word gating with no extra step.
             wake.reset()
             preroll.clear()
             state = "wake"
@@ -673,4 +767,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

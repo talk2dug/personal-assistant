@@ -75,6 +75,56 @@ def test_create_branch_is_idempotent(client):
     assert "already exists" in result["message"]
 
 
+def test_create_branch_checks_out_an_existing_remote_branch_instead_of_forking_fresh(client, bare_remote, tmp_path):
+    # Simulate a PR branch that already has real history on origin -- e.g. one an
+    # earlier run started, or a human pushed. create_branch used to always fork a new
+    # branch of the same name off base_branch here, silently orphaning this content.
+    other = tmp_path / "other_clone"
+    _git(["clone", str(bare_remote), str(other)], tmp_path)
+    _git(["config", "user.email", "other@example.com"], other)
+    _git(["config", "user.name", "Other"], other)
+    _git(["checkout", "-b", "feature/existing"], other)
+    (other / "existing.txt").write_text("real pr content\n")
+    _git(["add", "-A"], other)
+    _git(["commit", "-m", "existing PR work"], other)
+    _git(["push", "origin", "feature/existing"], other)
+
+    result = client.create_branch("feature/existing")
+    assert result["ok"] is True
+    worktree = client.workspace / "feature/existing"
+    assert (worktree / "existing.txt").read_text() == "real pr content\n"
+
+
+def test_create_branch_resyncs_a_stale_leftover_worktree_to_current_origin(client, bare_remote, tmp_path):
+    # First run: the branch is created fresh (doesn't exist on origin yet) and picks up
+    # a local commit that's never pushed -- standing in for an earlier, incomplete or
+    # abandoned employee attempt.
+    client.create_branch("feature/stale")
+    worktree = client.workspace / "feature/stale"
+    (worktree / "stale_local_only.txt").write_text("abandoned attempt\n")
+    _git(["add", "-A"], worktree)
+    _git(["commit", "-m", "abandoned local-only work"], worktree)
+
+    # Meanwhile, real work lands on origin for this same branch name from elsewhere.
+    other = tmp_path / "other_clone2"
+    _git(["clone", str(bare_remote), str(other)], tmp_path)
+    _git(["config", "user.email", "other@example.com"], other)
+    _git(["config", "user.name", "Other"], other)
+    _git(["checkout", "-b", "feature/stale"], other)
+    (other / "real.txt").write_text("real current content\n")
+    _git(["add", "-A"], other)
+    _git(["commit", "-m", "real work"], other)
+    _git(["push", "origin", "feature/stale"], other)
+
+    # A fresh run's create_branch call must resync to the real current origin state,
+    # not silently hand back the stale leftover as if it were current.
+    result = client.create_branch("feature/stale")
+    assert result["ok"] is True
+    assert "reset to current" in result["message"]
+    assert (worktree / "real.txt").exists()
+    assert not (worktree / "stale_local_only.txt").exists()
+
+
 def test_commit_and_push_writes_files_and_pushes_to_the_real_remote(client, bare_remote):
     client.create_branch("feature/two")
     result = client.commit_and_push(

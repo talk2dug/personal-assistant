@@ -146,9 +146,35 @@ class GitOpsClient:
     def create_branch(self, branch_name: str, base_branch: str = "main") -> dict:
         self._ensure_main_clone()
         worktree_dir = self._worktree_dir(branch_name)
+
+        # branch_name may already exist on origin with real history of its own (e.g. an
+        # in-progress PR branch a previous run started, or is continuing). Forking a
+        # fresh branch of the same name off base_branch in that case -- which is what
+        # this used to always do -- silently orphans that existing work, and reusing a
+        # leftover local worktree as-is risks handing back content that's since drifted
+        # from the real remote branch (a prior run's abandoned, never-pushed attempt).
+        # Both cases must defer to the actual current state of origin/branch_name.
+        remote_ref = f"origin/{branch_name}"
+        try:
+            _run_git(["rev-parse", "--verify", remote_ref], cwd=self._main_clone)
+            remote_exists = True
+        except GitOpsError:
+            remote_exists = False
+
         if worktree_dir.exists():
-            return {"ok": True, "branch": branch_name, "message": "branch/worktree already exists"}
+            if not remote_exists:
+                return {"ok": True, "branch": branch_name,
+                        "message": "branch/worktree already exists (local-only, not on origin)"}
+            _run_git(["checkout", branch_name], cwd=worktree_dir)
+            _run_git(["reset", "--hard", remote_ref], cwd=worktree_dir)
+            return {"ok": True, "branch": branch_name,
+                    "message": f"branch/worktree already existed; reset to current {remote_ref}"}
+
         worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+        if remote_exists:
+            _run_git(["worktree", "add", str(worktree_dir), branch_name],
+                      cwd=self._main_clone, token=self.token)
+            return {"ok": True, "branch": branch_name, "message": f"checked out existing branch from {remote_ref}"}
         _run_git(
             ["worktree", "add", str(worktree_dir), "-b", branch_name, f"origin/{base_branch}"],
             cwd=self._main_clone, token=self.token,

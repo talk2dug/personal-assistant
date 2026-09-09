@@ -707,9 +707,12 @@ BUSINESS_TOOLS = [
     {"type": "function", "function": {
         "name": "assign_work",
         "description": (
-            "Give a hired employee a piece of work and get their deliverable back. They can "
-            "search the web and produce text or code; they cannot deploy, publish, send or "
-            "buy anything. This can take a few minutes."
+            "Give a hired employee a piece of work. They can search the web and produce "
+            "text or code; they cannot deploy, publish, send or buy anything. This queues "
+            "the assignment to a background worker and returns immediately -- it does NOT "
+            "wait for the result. The deliverable arrives later as a separate message once "
+            "the employee actually finishes, which for real dev-team work can be well over "
+            "an hour, not 'a few minutes'."
         ),
         "parameters": {"type": "object", "properties": {
             "employee": {"type": "string", "description": "The employee's key, from list_employees."},
@@ -950,12 +953,14 @@ def apply_review_decision(db_path: str, owner: int, item: dict, decision: str, s
 class BusinessClient:
     """Executes the business tools. Same call_tool shape as the other integrations."""
 
-    def __init__(self, db_path: str, owner_user_id: int, llm=None, profile=None, bridge=None, ssh_ops=None):
+    def __init__(self, db_path: str, owner_user_id: int, llm=None, profile=None, bridge=None, ssh_ops=None,
+                 work_queue=None):
         self.db_path = db_path
         self.owner_user_id = owner_user_id
         self.llm = llm
         self.profile = profile
         self.bridge = bridge
+        self.work_queue = work_queue
         # The ops-plan workflow's SSHOpsClient -- held here (not a separate engine.py
         # Context) since proposing/approving a plan is a business-tools concern like
         # hiring, and run_command is deliberately never exposed as its own callable tool
@@ -1410,9 +1415,33 @@ class BusinessClient:
         if name == "assign_work":
             if self.llm is None:
                 return {"ok": False, "error": "no language model is configured"}
-            return staff.assign(db_path, self.llm,
-                                arguments.get("employee", ""),
-                                arguments.get("assignment", ""))
+            employee_key = arguments.get("employee", "")
+            assignment = arguments.get("assignment", "")
+            # Checked here, synchronously, rather than left for the worker to discover:
+            # a bad employee key or a paused/released employee is a mistake in the tool
+            # call itself, and the model needs that back in THIS turn to correct it --
+            # the whole point of queuing is to stop blocking on the LLM call inside
+            # staff.assign(), not to defer validation that costs nothing to do now.
+            emp = staff.get_staff(db_path, employee_key)
+            if emp is None:
+                return {"ok": False, "error": f"no employee with key {employee_key!r}"}
+            if emp["status"] != "active":
+                return {"ok": False, "error": f"{emp['title']} is {emp['status']}, not active"}
+            if self.work_queue is None:
+                # No queue wired up (e.g. a test BusinessClient) -- fall back to the old
+                # synchronous call rather than silently dropping the assignment.
+                return staff.assign(db_path, self.llm, employee_key, assignment)
+            queue_id = self.work_queue.submit(
+                employee_key, assignment, kind="on_demand", owner_user_id=self.owner_user_id)
+            return {
+                "ok": True, "queued": True, "queue_id": queue_id, "employee": emp["title"],
+                "message": (
+                    f"Queued for {emp['title']}. This is handed to a background worker and "
+                    "is NOT done yet -- do not describe a result until a follow-up message "
+                    "with the actual deliverable arrives. Real dev-team work routinely takes "
+                    "well over an hour."
+                ),
+            }
 
         if name == "manage_employee":
             key = arguments.get("employee", "")

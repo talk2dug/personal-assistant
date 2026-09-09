@@ -37,6 +37,7 @@ def start(
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
     github_watchdog_interval_seconds: int = 180,
     local_llm=None, local_llm_keepalive_interval_seconds: int = 600,
+    staff_assignment_timeout_seconds: int = 10800,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -383,31 +384,35 @@ def start(
 
             The employee produced a judgement; this decides it is worth sending and how
             loudly. Nothing an employee writes reaches the phone without passing through
-            here, so an unattended job cannot notify on its own authority.
+            here, so an unattended job cannot notify on its own authority. Formatting is
+            shared with the async work queue's cadence notifier (main.py) via
+            staff.format_alert_text, so the message reads identically either way.
             """
             if owner is None:
                 return
-            prefix = {"high": "URGENT", "normal": "", "low": "FYI"}.get(urgency, "")
-            title = f"{person['title']}: {headline}".strip()
-            text = f"{prefix + ' - ' if prefix else ''}{title}\n\n{(body or '').strip()[:1200]}"
-            notify(owner["telegram_chat_id"], text)
+            notify(owner["telegram_chat_id"], staff.format_alert_text(headline, body, urgency, person))
 
         def _staff_tick():
             """One pass over the roster.
 
             Logs on every tick, including the empty ones: "nobody was due" and "the job
             stopped firing" are indistinguishable from the outside, and telling them
-            apart after the fact is exactly what was needed here.
+            apart after the fact is exactly what was needed here. With business.work_queue
+            wired (the normal case), run_due only enqueues -- see its own docstring for
+            why -- so ok/alert/alerted are None/False here and the real outcome is logged
+            later by the work queue's worker instead.
             """
             due = staff.due_for_cadence(db_path, tz_name)
             if not due:
                 logger.debug("staff tick: nobody due")
                 return
             logger.info("staff tick: running %s", [p["key"] for p in due])
-            results = staff.run_due(db_path, llm, tz_name=tz_name, notify=_staff_alert)
+            results = staff.run_due(db_path, llm, tz_name=tz_name, notify=_staff_alert,
+                                    timeout=staff_assignment_timeout_seconds,
+                                    work_queue=business.work_queue)
             for r in results:
-                logger.info("staff run %s ok=%s alert=%s alerted=%s",
-                            r["employee"], r["ok"], r["alert"], r["alerted"])
+                logger.info("staff run %s queued=%s ok=%s alert=%s alerted=%s",
+                            r["employee"], r.get("queued"), r["ok"], r["alert"], r["alerted"])
 
         scheduler.add_job(
             _guarded("staff_cadence", _staff_tick),

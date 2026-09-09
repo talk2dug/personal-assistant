@@ -1,4 +1,4 @@
-﻿"""Shared startup wiring for anything that needs Era/Calendar context — used by both
+"""Shared startup wiring for anything that needs Era/Calendar context — used by both
 main.py (Telegram) and web_main.py (the web UI), so the two entrypoints don't duplicate
 this logic.
 """
@@ -7,16 +7,18 @@ import os
 import shutil
 from pathlib import Path
 
-from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, paper_trading, personal_db, staff
+from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, paper_trading, personal_db, staff, vision, work_queue
 from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
 from .claude_cli import ClaudeCLIClient
+from .detector import Detector
 from .engine import (
     AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, GitOpsContext,
     HomeAssistantContext, KrogerContext, LetterStreamContext, MailContext, ObsidianContext,
     PersonalContext, PhoneContext, RecipeContext, TicketmasterContext,
 )
+from .face_id import FaceIdentifier
 from .git_ops import GitOpsClient
 from .git_tools import GIT_TOOLS
 from .personal_tools import PersonalClient
@@ -27,6 +29,7 @@ from .mcp_client import MCPClient
 from .mcp_stdio_client import StdioMCPClient
 from .obsidian_client import ObsidianClient
 from .ssh_ops import SSHOpsClient
+from .vision_runtime import VisionRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -160,11 +163,16 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     market_data.init_market_db(cfg.db_path)
     paper_trading.init_paper_db(cfg.db_path)
     ops_plans.init_ops_plans_db(cfg.db_path)
+    work_queue.init_work_queue_db(cfg.db_path)
     # ssh_hosts defaults to {} (no hosts registered) rather than gating on a whole
     # separate enabled flag -- propose_ops_plan already refuses any step targeting an
     # unregistered host, so an empty registry is already a safe, self-explaining no-op.
     ssh_ops = SSHOpsClient(cfg.ssh_hosts) if cfg.ssh_hosts else None
-    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge, ssh_ops=ssh_ops)
+    # Constructed here but only started later, once main.py has a notifier -- see
+    # work_queue.WorkQueue's docstring. BusinessClient only ever calls .submit() on it.
+    queue = work_queue.WorkQueue(cfg.db_path)
+    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge,
+                            ssh_ops=ssh_ops, work_queue=queue)
     scheduled = cfg.business_agents_enabled and hasattr(llm, "research")
     logger.info(
         "Business: %s (%s), agents %s", cfg.business.name, cfg.business.location,
@@ -175,7 +183,7 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
         logger.info("Ops plans: %d SSH host(s) registered (%s)", len(cfg.ssh_hosts), ", ".join(sorted(cfg.ssh_hosts)))
     return BusinessContext(
         mcp_client=client, profile=cfg.business, agents_scheduled=scheduled,
-        has_gpu_bridge=bridge is not None,
+        has_gpu_bridge=bridge is not None, work_queue=queue,
     )
 
 
@@ -196,6 +204,38 @@ def build_git_ops_context(cfg) -> GitOpsContext | None:
     logger.info("Git ops: targeting %s, %d tools, %d gated as sensitive",
                cfg.github_repo, len(GIT_TOOLS), len(GIT_SENSITIVE_TOOLS))
     return GitOpsContext(mcp_client=client, git_tools=GIT_TOOLS, sensitive_tools=GIT_SENSITIVE_TOOLS)
+
+
+def build_vision_context(cfg, owner_user_id: int | None):
+    """Camera-based presence and identity (YOLO11n person detection, InsightFace face
+    matching). The schema is initialised unconditionally — cheap and DB-only — so the
+    Review page's enrollment flow and the /api/vision/* routes work even on a process
+    that never runs detection at all (see web_main.py, which calls vision.init_vision_db
+    directly rather than this function).
+
+    Returns None (schema only, no runtime) when vision is off or there's no owner to
+    attribute Review-page items to. Never starts the background worker itself — the
+    caller (main.py) decides that, same build-vs-start split as build_gpu_bridge,
+    because the detection loop needs local CUDA for the RTX 3060 both detector.py and
+    face_id.py target, and must only ever run in the process actually deployed there.
+    """
+    vision.init_vision_db(cfg.db_path)
+    if not cfg.vision_enabled or owner_user_id is None:
+        return None
+
+    detector = Detector(model_name=cfg.vision_model_name, device=cfg.vision_device)
+    face_identifier = FaceIdentifier(model_name=cfg.vision_face_model_name, device=cfg.vision_device)
+    runtime = VisionRuntime(
+        cfg.db_path, owner_user_id, detector, face_identifier, cfg.generated_media_path,
+        face_match_threshold=cfg.vision_face_match_threshold,
+        unknown_face_ask_after=cfg.vision_unknown_face_ask_after,
+    )
+    logger.info(
+        "Vision: enabled (person model=%s, face model=%s) — both load lazily on the "
+        "first camera pass; %d camera(s) currently registered",
+        cfg.vision_model_name, cfg.vision_face_model_name, len(vision.list_cameras(cfg.db_path)),
+    )
+    return runtime
 
 
 def build_personal_context(

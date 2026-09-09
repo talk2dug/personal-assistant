@@ -20,6 +20,13 @@ personal or financial context is handed to the model at all.
 `/wake_claim` is the other half of the open-mic story: arbitration across terminals so
 only the one the owner is actually speaking near answers a given utterance (see
 assistant/core/wake_arbitration.py).
+
+A kiosk terminal has no persistent connection to hand a result to outside of /turn's own
+response, so anything a tool call stages for it (show_camera's target camera; the kitchen
+screen's display_recipe) has to ride along in the same DEVICE_STATE dict the terminal
+already polls for its on-screen state — see the camera/camera_seq handling below and
+vision.py's pending_camera_views docstring for why a plain function-local variable can't
+carry it across the gap between one /turn call and the next poll.
 """
 import asyncio
 import base64
@@ -31,7 +38,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
-from ...core import db, presence, wake_arbitration
+from ...core import db, presence, vision, wake_arbitration
 from ...core.engine import handle_message
 
 logger = logging.getLogger(__name__)
@@ -93,7 +100,13 @@ async def report_state(device_id: str, request: Request):
 @router.get("/{device_id}")
 async def get_state(device_id: str, request: Request):
     """What the kiosk page polls. Falls back to a sane idle rather than 404ing, so a
-    freshly-booted screen shows the orb instead of an error while its client starts."""
+    freshly-booted screen shows the orb instead of an error while its client starts.
+
+    Whatever's in DEVICE_STATE for this device rides along verbatim -- including
+    camera/camera_seq and recipe/recipe_seq when a tool call staged one for it -- so a
+    field that was never set is simply absent from the response rather than present as
+    null, letting the client tell "nothing to show" apart from "explicitly cleared".
+    """
     _require_device_key(request)
     entry = DEVICE_STATE.get(device_id)
     if entry is None:
@@ -205,6 +218,16 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
         _set_state(device_id, state="idle", caption="")
         raise HTTPException(500, f"assistant failed: {e}")
 
+    # show_camera (engine.py) stages its result keyed by the user this turn ran as,
+    # since that's the only identity a tool call inside handle_message has to hand --
+    # relay it into this device's polled state (with an incrementing seq so the kiosk
+    # can tell a fresh request from a stale one) and hand it back in this same response
+    # too, since the terminal that asked shouldn't have to wait for its own next poll.
+    camera_view = vision.pop_pending_camera_view(cfg.db_path, user_id)
+    if camera_view is not None:
+        next_seq = DEVICE_STATE.get(device_id, {}).get("camera_seq", 0) + 1
+        _set_state(device_id, camera=camera_view, camera_seq=next_seq)
+
     spoken_audio = None
     if speaker is not None and speaker.available() and reply:
         try:
@@ -215,7 +238,7 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
             logger.exception("tts failed for device %s", device_id)
 
     _set_state(device_id, state="speaking", caption=reply)
-    return {"transcript": transcript, "reply": reply, "audio": spoken_audio}
+    return {"transcript": transcript, "reply": reply, "audio": spoken_audio, "camera": camera_view}
 
 
 @router.post("/say")

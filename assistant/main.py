@@ -1,4 +1,4 @@
-﻿"""Entrypoint: wires together the db, LLM client, scheduler, and Telegram transport."""
+"""Entrypoint: wires together the db, LLM client, scheduler, and Telegram transport."""
 import asyncio
 import logging
 
@@ -10,7 +10,7 @@ from .core.setup import (
     build_era_context, build_git_ops_context, build_gpu_bridge, build_notifier,
     build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
     build_local_llm_context, build_mail_context, build_obsidian_context, build_personal_context,
-    build_phone_context, build_recipe_context, build_ticketmaster_context,
+    build_phone_context, build_recipe_context, build_ticketmaster_context, build_vision_context,
 )
 from .transports import telegram_bot
 
@@ -66,6 +66,14 @@ def main() -> None:
     # all background work, so there's exactly one queue draining the GPU.
     if bridge is not None:
         bridge.start_worker()
+
+    # Same reasoning as the GPU bridge: the detection loop needs local CUDA (the RTX
+    # 3060 both detector.py and face_id.py target) and must only ever run in the process
+    # actually deployed on that hardware -- which is this one, per detector.py's own
+    # docstring ("Runs YOLO on the laptop's RTX 3060").
+    vision_runtime = build_vision_context(cfg, owner_row["id"] if owner_row else None)
+    if vision_runtime is not None:
+        vision_runtime.start_worker(poll_seconds=cfg.vision_poll_seconds)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -128,6 +136,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

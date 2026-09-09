@@ -1,9 +1,10 @@
 """The review queue — everything the team has made that needs the owner's decision.
 
 Approving here doesn't just tick a card: when a review item references a pipeline row
-(a product concept, an art brief, a listing, a post), the decision is written through to
-that row as well. Otherwise the office would show an approved design that the Art
-Director still can't see, which is exactly the kind of quietly-wrong state that makes a
+(a product concept, an art brief, a listing, a post, an unfamiliar face) the decision is
+written through to that row as well. Otherwise the office would show an approved design
+that the Art Director still can't see, or a face the owner just named would stay an
+anonymous sighting forever -- exactly the kind of quietly-wrong state that makes a
 dashboard untrustworthy.
 """
 import mimetypes
@@ -12,7 +13,7 @@ import pathlib
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from ...core import business_db, db
+from ...core import business_db, db, vision
 from ...core.business_tools import apply_review_decision
 from ...core.engine import execute_pending_action
 from ..auth import require_user
@@ -92,6 +93,19 @@ async def decide(item_id: int, request: Request):
                 written_through = f"git_pull_requests#{ref_id} -> merge failed: {e}"
         else:
             written_through = f"git_pull_requests#{ref_id} -> left open on GitHub"
+    elif ref_table == "unknown_faces" and ref_id:
+        # The enrollment flow: an unfamiliar face only ever becomes (or gets folded
+        # into) a known person here, after this exact approval. chosen is whichever
+        # review_option the owner picked -- its `body` carries which existing person
+        # was matched, or that this is a brand new enrollment (see vision_runtime.py's
+        # _create_face_review for how the options are built).
+        chosen = next((o for o in item.get("options", []) if o.get("chosen")), None)
+        result = vision.apply_face_review_decision(
+            cfg.db_path, ref_id, decision,
+            chosen.get("body") if chosen else None, body.get("note"),
+        )
+        if result:
+            written_through = result
     else:
         business = request.app.state.business
         ssh_ops = getattr(business.mcp_client, "ssh_ops", None) if business is not None else None

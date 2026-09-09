@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import (
-    agents, business_db, db, github_client, kitchen_db, location, market_data,
+    agents, business_db, db, github_client, kitchen_db, location, mail_triage, market_data,
     personal_agents, personal_db, staff,
 )
 from .engine import handle_message
@@ -31,6 +31,7 @@ def start(
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
     personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
     mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
+    mail_triage_interval_minutes: int = 30, mail_triage_scan_limit: int = 15,
     kroger_sync_interval_seconds: int = 3600,
     task_watchdog_interval_seconds: int = 60,
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
@@ -46,7 +47,9 @@ def start(
     mail is an engine.MailContext; when present it also schedules the autonomous
     junk-flagging pass (mail_junk_scan) regardless of business_agents_enabled -- triaging
     the owner's own inbox isn't a print-business agent, it's core mail hygiene, the same
-    reasoning personal_research_interval_minutes uses below.
+    reasoning personal_research_interval_minutes uses below. mail, together with llm,
+    also schedules mail_triage (see mail_triage.py) -- drafts a reply for messages that
+    need one and leaves it in the review queue; nothing here can send anything.
     kroger, when given alongside personal, schedules kroger_sync -- see
     kitchen_db.sync_kroger_orders's own docstring for the real (narrow) limits of what
     this can actually find: only orders Jarvis's own cart tools built and that were
@@ -138,6 +141,24 @@ def start(
             # remaining interval to elapse before it's worth a first look.
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
         )
+
+    if mail is not None and llm is not None:
+        # Draft-reply generation (see mail_triage.py). Deliberately requires only mail +
+        # a plain .chat()-capable llm, NOT hasattr(llm, "research") like the agents above
+        # -- drafting a reply from a message already in hand needs no web search, so this
+        # runs on the Ollama backend too, not just Claude CLI. It only ever writes to the
+        # email_drafts table and the review queue; nothing here can send anything.
+        owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+        if owner is not None:
+            scheduler.add_job(
+                _guarded_simple(
+                    "mail_triage",
+                    lambda: mail_triage.run_mail_triage_once(
+                        db_path, llm, mail.mcp_client, owner["id"], limit=mail_triage_scan_limit),
+                ),
+                "interval", minutes=mail_triage_interval_minutes, id="mail_triage_agent",
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+            )
 
     if business is not None and llm is not None:
         # The Review-queue staleness watchdog: catches a pending item nobody ever came

@@ -30,7 +30,7 @@
   "mail_sensitive_tools": ["send_email"],
   "obsidian_vault_path": "C:\\PUT_YOUR_VAULT_PATH_HERE",
   "ha_base_url": "http://PUT_YOUR_HOME_ASSISTANT_IP_HERE",
-  "ha_token": "PUT_YOUR_HA_LONG_LIVED_ACCESS_TOKEN_HERE",
+  "ha_token": "PUT_YOUR_HOME_ASSISTANT_LONG_LIVED_ACCESS_TOKEN_HERE",
   "ha_sensitive_domains": ["lock", "cover", "alarm_control_panel"],
   "ha_conversation_api_key": "GENERATE_A_RANDOM_SECRET_HERE",
   "_comment_llm_backend": "'ollama' runs on the local model; 'claude_cli' runs on the Claude Code CLI (and so the user's claude.ai subscription). Switching is this one line.",
@@ -58,6 +58,16 @@
   "_comment_comfy": "ComfyUI on the GPU box for image (Z-Image Turbo) and video (Wan 2.2 TI2V-5B) generation. A separate server from Ollama on the same machine. Omit comfy_host and image/video jobs fail with a clear message instead of running.",
   "comfy_host": "http://192.168.0.139:8188",
   "generated_media_path": "D:\\Jarvis Generated",
+  "_comment_vision": "Room presence & identity: YOLO11n person detection + insightface face recognition, targeting the RTX 3060 on this host. Runs as a separate process (scripts/vision_worker.py) under its own .venv-vision -- see requirements-vision.txt. Day-one camera coverage is Touch1 (the Pi terminal's uStreamer feed) and laptop1 (this host's own webcam, kind 'local', url is the OpenCV device index as a string). Omit 'cameras' and the whole vision side stays inert. device_camera_map controls which camera gates open-mic listening for which voice device -- see device/jarvis_device.py's open-mic poller.",
+  "cameras": [
+    {"key": "touch1", "name": "Touch1", "kind": "mjpeg", "url": "http://PUT_TOUCH1_LAN_IP_HERE:8080", "location": "kitchen", "motion_threshold": 0.012},
+    {"key": "laptop1", "name": "laptop1 webcam", "kind": "local", "url": "0", "location": "office", "motion_threshold": 0.012}
+  ],
+  "device_camera_map": {"touch1": "touch1", "laptop1": "laptop1"},
+  "vision_device": null,
+  "camera_poll_seconds": 1.5,
+  "face_match_threshold": 0.42,
+  "enroll_after_sightings": 3,
   "_comment_business_agents": "Master switch for unattended agent runs. Off means nothing fires on a timer; agents still run on demand from chat.",
   "business_agents_enabled": false,
   "market_scan_interval_hours": 72,
@@ -67,26 +77,6 @@
   "business_digest_hour": 8,
   "_comment_personal_research": "How often the background agent checks for personal errands ('find me a dentist') to research. Not gated behind business_agents_enabled — this runs regardless.",
   "personal_research_interval_minutes": 30,
-  "_comment_device_api_key": "Bearer token the headless voice terminals (device/jarvis_device.py) authenticate with -- they have no session cookie to log in with.",
-  "device_api_key": "GENERATE_A_RANDOM_SECRET_HERE",
-  "_comment_room_presence": "Room Presence, Identity & Open-Mic Conversation. vision_cameras is the day-one camera list (Touch1's uStreamer feed, laptop1's own webcam via OpenCV device index '0'); terminal_cameras says which camera watches the room each voice terminal sits in. A terminal not listed here simply can never confirm anyone's identity -- the safe default, not an error. Add camera/terminal #3 later by adding one entry to each list, no migration needed.",
-  "vision_cameras": [
-    {"key": "touch1_cam", "name": "Touch1 camera", "url": "http://192.168.0.150:8080", "kind": "mjpeg", "location": "kitchen"},
-    {"key": "laptop1_cam", "name": "laptop1 webcam", "url": "0", "kind": "rtsp", "location": "office"}
-  ],
-  "terminal_cameras": {
-    "touch1": "touch1_cam",
-    "laptop1": "laptop1_cam"
-  },
-  "_comment_presence_gating": "How long a camera identification stays 'current', and which known_people.access_level values unlock personal/financial info on an open-mic terminal. Owner-only by default -- widen deliberately, not by accident.",
-  "presence_confirm_window_seconds": 45,
-  "presence_authorized_access_levels": ["owner"],
-  "_comment_wake_arbitration": "How long terminals wait for a rival wake-word claim before deciding they won, and the score margin a rival needs to actually beat them by. See assistant/core/wake_arbitration.py.",
-  "wake_arbitration_window_ms": 400,
-  "wake_arbitration_margin": 0.05,
-  "_comment_vision_model": "YOLO weights + device for the vision worker (assistant/vision_main.py, run under .venv-vision on the machine with the GPU -- laptop1's RTX 3060). device left null autodetects cuda vs cpu.",
-  "vision_model": "yolo11n.pt",
-  "vision_device": null,
   "users": [
     {"telegram_chat_id": "REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID", "display_name": "Dug", "role": "owner", "web_password": "PICK_A_PASSWORD"},
     {"telegram_chat_id": "REPLACE_WITH_GF_TELEGRAM_CHAT_ID", "display_name": "GF", "role": "partner", "web_password": "PICK_A_PASSWORD"}

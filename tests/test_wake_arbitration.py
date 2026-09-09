@@ -14,22 +14,27 @@ def test_solo_claim_always_wins(monkeypatch):
 def test_clearly_louder_rival_wins_and_loser_returns_before_window_closes(monkeypatch):
     monkeypatch.setattr(wake_arbitration, "_claims", {})
     results = {}
+    durations = {}
 
     def run(device_id, score, delay):
         time.sleep(delay)
+        t0 = time.time()
         results[device_id] = wake_arbitration.claim(device_id, score, window_ms=300, margin=0.05)
+        durations[device_id] = time.time() - t0
 
     # jarvisaudio2 reports a much louder score almost immediately after jarvisaudio1;
-    # jarvisaudio1 should lose well before its own 300ms window would otherwise close.
+    # jarvisaudio1 should lose well before its own 300ms window would otherwise close,
+    # even though jarvisaudio2 (the eventual winner) legitimately waits out its own
+    # window before declaring itself the winner.
     t1 = threading.Thread(target=run, args=("jarvisaudio1", 0.4, 0.0))
     t2 = threading.Thread(target=run, args=("jarvisaudio2", 0.95, 0.02))
-    start = time.time()
     t1.start(); t2.start()
-    t1.join(); t2.join()
-    elapsed = time.time() - start
+    t1.join()
+    t2.join()
 
     assert results == {"jarvisaudio1": False, "jarvisaudio2": True}
-    assert elapsed < 0.3, "the quieter terminal should lose fast, not wait out its whole window"
+    assert durations["jarvisaudio1"] < 0.2, \
+        "the quieter terminal should lose fast once a clearly better rival appears, not wait out its whole window"
 
 
 def test_close_scores_within_margin_go_to_the_higher_one_without_flapping(monkeypatch):

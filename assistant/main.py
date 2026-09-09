@@ -87,6 +87,12 @@ def main() -> None:
     # Routed through the user's notification policy: reminders follow the same
     # 'phone when I'm out' preference as anything else Jarvis sends unprompted.
     notify = build_notifier(cfg, telegram_bot.make_notifier(application, loop), home_assistant)
+    # assign_work's queue (see work_queue.WorkQueue) is constructed back in
+    # build_business_context, before notify exists -- started here, now that it does, the
+    # same way the GPU bridge and vision workers below are started separately from where
+    # they're built.
+    if business is not None and business.work_queue is not None:
+        business.work_queue.start_worker(llm, notify=notify, timeout=cfg.staff_assignment_timeout_seconds)
     scheduler.start(
         cfg.db_path, notify, cfg.poll_interval_seconds,
         calendar=calendar, caldav_sync_interval_seconds=cfg.caldav_sync_interval_seconds,

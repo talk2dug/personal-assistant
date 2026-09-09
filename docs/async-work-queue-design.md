@@ -1,5 +1,42 @@
 # Async work queue for employee/agent assignments
 
+## Status (2026-09-09)
+
+Shipped for the on-demand path (§10 steps 2-3, compressed into one change rather than a
+dual-write migration): `assistant/core/work_queue.py` adds a `work_queue` table plus a
+single background worker thread, started in `main.py` once the Telegram notifier exists.
+`assign_work`'s tool handler (`business_tools.py`) now validates the employee
+synchronously (a bad key or a paused employee is the caller's mistake, worth surfacing in
+the same turn) then enqueues and returns immediately; the worker claims the row, runs
+`staff.assign()` exactly as before, and notifies the owner with the deliverable (or the
+failure) as a follow-up message once it actually finishes. Poll interval is 12s, matching
+§7's "10-15s"; per-job timeout reuses the already-shipped `staff_assignment_timeout_seconds`
+knob (see §9's own §1 correction below) rather than a new schema column.
+
+**Deferred, not done**: §8's cadence-tick flip (`run_due` enqueueing instead of calling
+`assign()` directly). The scheduled `staff_cadence` tick still runs synchronously; its
+blocking is already bounded by `max_instances=3`/`misfire_grace_time=300` plus the
+existing per-employee timeout, and it wasn't the path behind the reported incident, so
+folding it into the same queue is left for a follow-up rather than risking the
+alert-policy/cooldown logic in `run_due` in this change. Also not built: the process-group
+kill and stream-json heartbeat instrumentation in §6/§9 (exit_code, heartbeat_at) — real
+value for diagnosing a *hang* specifically, but `staff.assign()`'s own broad try/except
+already turns a timeout into a clean `failed` row today, which is what the owner-facing
+incident actually needed fixed.
+
+**Correction to §1**: the design doc's own read of the numbers was slightly off, not the
+diagnosis. `assign()`'s subprocess timeout was already a separately-configurable
+`staff_assignment_timeout_seconds` (default 10800s) by the time this was implemented, not
+the global `claude_timeout_seconds` (300s) — a same-day fix (commit `8aabc98`) had already
+split them, for the identical reason this doc gives in §1. Both fixes were made in the
+same local session and one was pushed to a stale local `main` that never reached origin;
+recovered and pushed alongside this change. The root cause and its consequence
+("orchestrator dies, the side effect keeps running unwatched") were exactly right —
+`claude_timeout_seconds` (bounding the owner's live chat turn) still fires long before a
+real dev-team assignment finishes, which is precisely what this queue decouples.
+
+---
+
 Why: the synchronous `assign_work` call (and the `staff_cadence` background tick that
 calls the same path) has been observed to time out — specifically the developer
 assignment for the git "checkout existing branch" fix, task 9 on Jarvis Platform

@@ -261,6 +261,10 @@ class BusinessContext:
     # Whether the simrig GPU bridge is wired up. Gates the note that tells Jarvis to
     # reserve the card the moment the owner mentions gaming or racing.
     has_gpu_bridge: bool = False
+    # The async work_queue.WorkQueue behind assign_work (see its docstring) — main.py
+    # starts its worker once the Telegram notifier exists; None only in tests that build
+    # a BusinessContext without going through setup.build_business_context.
+    work_queue: object = None
 
     @property
     def tool_names(self) -> set[str]:

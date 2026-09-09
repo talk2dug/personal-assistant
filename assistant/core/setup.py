@@ -7,7 +7,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, paper_trading, personal_db, staff, vision
+from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, paper_trading, personal_db, staff, vision, work_queue
 from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
@@ -163,11 +163,16 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     market_data.init_market_db(cfg.db_path)
     paper_trading.init_paper_db(cfg.db_path)
     ops_plans.init_ops_plans_db(cfg.db_path)
+    work_queue.init_work_queue_db(cfg.db_path)
     # ssh_hosts defaults to {} (no hosts registered) rather than gating on a whole
     # separate enabled flag -- propose_ops_plan already refuses any step targeting an
     # unregistered host, so an empty registry is already a safe, self-explaining no-op.
     ssh_ops = SSHOpsClient(cfg.ssh_hosts) if cfg.ssh_hosts else None
-    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge, ssh_ops=ssh_ops)
+    # Constructed here but only started later, once main.py has a notifier -- see
+    # work_queue.WorkQueue's docstring. BusinessClient only ever calls .submit() on it.
+    queue = work_queue.WorkQueue(cfg.db_path)
+    client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge,
+                            ssh_ops=ssh_ops, work_queue=queue)
     scheduled = cfg.business_agents_enabled and hasattr(llm, "research")
     logger.info(
         "Business: %s (%s), agents %s", cfg.business.name, cfg.business.location,
@@ -178,7 +183,7 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
         logger.info("Ops plans: %d SSH host(s) registered (%s)", len(cfg.ssh_hosts), ", ".join(sorted(cfg.ssh_hosts)))
     return BusinessContext(
         mcp_client=client, profile=cfg.business, agents_scheduled=scheduled,
-        has_gpu_bridge=bridge is not None,
+        has_gpu_bridge=bridge is not None, work_queue=queue,
     )
 
 

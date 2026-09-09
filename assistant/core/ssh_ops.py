@@ -76,20 +76,33 @@ class SSHOpsClient:
             # to eliminate elsewhere. Streaming output (recv_ready/recv below) works
             # identically without one.
             channel.exec_command(command)
-            chunks = []
+            chunks, err_chunks = [], []
             start = time.time()
             while True:
                 while channel.recv_ready():
                     chunks.append(channel.recv(4096).decode(errors="replace"))
-                if channel.exit_status_ready() and not channel.recv_ready():
+                # A remote shell's error text (e.g. cmd.exe's "not recognized as an
+                # internal or external command") arrives on the stderr stream, which
+                # paramiko keeps separate from stdout unless combined -- a real incident
+                # showed a failing step reporting a blank, uninformative "" output with
+                # no way to tell why, because only stdout was ever read here. Merged into
+                # the same `output` field (labeled) rather than a new field, so every
+                # existing consumer of a step's output sees it automatically.
+                while channel.recv_stderr_ready():
+                    err_chunks.append(channel.recv_stderr(4096).decode(errors="replace"))
+                if (channel.exit_status_ready() and not channel.recv_ready()
+                        and not channel.recv_stderr_ready()):
                     break
                 if time.time() - start > timeout:
                     raise SSHOpsError(f"command timed out after {timeout}s on {host_name!r}: {command!r}")
                 time.sleep(0.1)
             exit_code = channel.recv_exit_status()
+            output = "".join(chunks)
+            if err_chunks:
+                output += ("\n" if output else "") + "[stderr] " + "".join(err_chunks)
             return {
                 "ok": exit_code == 0, "host": host_name, "command": command,
-                "exit_code": exit_code, "output": "".join(chunks),
+                "exit_code": exit_code, "output": output,
             }
         finally:
             client.close()

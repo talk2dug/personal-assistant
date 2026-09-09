@@ -29,6 +29,14 @@ pre-existing `run_due` test) were verified to produce the same alert decisions g
 same inputs. `main.py` builds a `cadence_notify` closure the same shape as `scheduler.py`'s
 `_staff_alert` and passes it to `start_worker` alongside the plain on-demand `notify`.
 
+**Update**: §10 step 5 (split the timeout budget) has since shipped too. `claude_timeout_seconds`
+— which bounds only `converse()`/`chat()`, the owner's own live turn — is now **90s**, down
+from 300s, in `assistant/config.py`'s dataclass default, `load_config`'s fallback,
+`config.json`, and `config.example.json`. `research()`/`engineer()`/`assign()` already
+override the client's timeout per-call with their own much larger budget
+(`staff_assignment_timeout_seconds`, 10800s), so nothing background-facing shares this
+number — it was safe to tighten in isolation. All 925 tests pass unmodified.
+
 Still not built: the process-group kill and stream-json heartbeat instrumentation in §6/§9
 (exit_code, heartbeat_at) — real value for diagnosing a *hang* specifically, but
 `staff.assign()`'s own broad try/except already turns a timeout into a clean `failed` row

@@ -1,21 +1,33 @@
-# Room Presence & Identity: the camera watch loop (assistant/vision_main.py).
+# Jarvis vision worker (scripts/vision_worker.py) -- its own venv (.venv-vision),
+# deliberately isolated from the shared .venv. See core/detector.py's docstring for why:
+# torch/ultralytics/insightface are large, CUDA-specific, and must never become a
+# dependency of jarvis-core.service or jarvis-web.service, which run wherever the
+# assistant itself runs and may not even have a GPU. Only scripts/vision_worker.py loads
+# this environment; it runs on the host with the RTX 3060.
 #
-# Deliberately NOT in requirements.txt or device/requirements.txt -- torch, ultralytics
-# and insightface are real GPU dependencies (see detector.py's own module docstring) that
-# the Telegram bot and web UI processes must never need installed just to answer a chat
-# message. Install this into its own .venv-vision on the machine with the GPU (laptop1's
-# RTX 3060), the same isolation kroger-mcp and simrig's own stack already get for their
-# own reasons.
-#
+# Install (on that host):
 #   python -m venv .venv-vision
 #   .venv-vision\Scripts\pip install -r requirements-vision.txt
-#   .venv-vision\Scripts\python -m assistant.vision_main
+#   .venv-vision\Scripts\pip install torch --index-url https://download.pytorch.org/whl/cu121
 #
-# torch: install the CUDA build matching the box's driver from pytorch.org's own index
-# first (e.g. `pip install torch --index-url https://download.pytorch.org/whl/cu121`)
-# -- the plain PyPI wheel is CPU-only and YOLO11n/InsightFace would silently run on CPU.
+# torch is deliberately NOT pinned here -- the right wheel depends on the installed CUDA
+# driver, which is a per-host fact, not a repo fact (see the kroger-mcp isolation note in
+# core/setup.py for the same reasoning applied to a different dependency conflict).
+# ultralytics and insightface both import torch but do not vendor a specific build of it.
+
+# YOLO11n person/pet detection (core/detector.py).
 ultralytics>=8.3.0
-opencv-python>=4.9.0
+
+# Face detection (RetinaFace) + recognition (ArcFace) bundle, via the 'buffalo_l' model
+# pack (core/face_recognition.py).
 insightface>=0.7.3
+
+# GPU-accelerated inference backend insightface's ONNX models run on.
 onnxruntime-gpu>=1.18.0
-numpy>=1.26,<2
+
+# JPEG decode (vision.py's decode_jpeg), RTSP/local camera capture (vision.py's
+# FrameSource), and thumbnail encoding (camera_watch.py). Headless build: this process
+# never opens a window.
+opencv-python-headless>=4.10.0
+
+numpy<2

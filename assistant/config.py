@@ -17,7 +17,7 @@ class UserConfig:
 
 @dataclass
 class BusinessProfile:
-    """Who the business is and where â€” everything the background agents need that would
+    """Who the business is and where — everything the background agents need that would
     otherwise be hardcoded. The predecessor project (Blue Ridge Custom Co) baked Asheville
     into its market-finder, which made the whole module worthless the moment the business
     moved cities. None of that belongs in code."""
@@ -90,7 +90,7 @@ class Config:
     gpu_max_concurrent: int = 2
     # ComfyUI on simrig, for image and video generation. A separate server from Ollama
     # on the same box, speaking a completely different protocol (queue a graph, poll,
-    # fetch files) â€” hence its own host setting.
+    # fetch files) — hence its own host setting.
     comfy_host: str | None = None
     # Voice devices (the Pi terminals). piper_voice_path enables server-side speech;
     # device_api_key authenticates the headless clients, which have no session cookie.
@@ -115,6 +115,20 @@ class Config:
     # ever diverge (e.g. a device with no camera of its own, watched by a neighbouring
     # one).
     device_camera_map: dict = field(default_factory=lambda: {"touch1": "touch1", "laptop1": "laptop1"})
+    # Room Presence & Identity gating for an unattended voice terminal's /turn (see
+    # core/presence.py) -- how recent a camera confirmation counts, and which
+    # known_people.access_level values unlock personal/financial context. Defaults match
+    # presence.py's own DEFAULT_AUTHORIZED_ACCESS_LEVELS/confirmed_identity default so a
+    # deployment that never sets these gets the same fail-closed behaviour the module
+    # documents.
+    presence_confirm_window_seconds: int = 45
+    presence_authorized_access_levels: list[str] = field(default_factory=lambda: ["owner"])
+    # Cross-terminal wake-word arbitration (core/wake_arbitration.py) -- how long a
+    # terminal waits to see a louder rival claim before proceeding, and the margin a
+    # rival needs to clearly beat it by. Defaults match wake_arbitration.py's own
+    # DEFAULT_WINDOW_MS/DEFAULT_MARGIN.
+    wake_arbitration_window_ms: int = 400
+    wake_arbitration_margin: float = 0.05
     # Shared bearer token Home Assistant's actionable-notification automation sends.
     notification_token: str | None = None
     # SSH login used to sweep the house Pis and Ubuntu boxes for media. One password
@@ -164,7 +178,7 @@ class Config:
     # Master switch for unattended agent runs. Off by default and currently off in the
     # real config: the owner's call is that nothing should fire on a timer until he and
     # Jarvis have worked out sensible cadence and working hours together. Every agent
-    # still runs on demand from chat via run_business_agent â€” this only governs the
+    # still runs on demand from chat via run_business_agent — this only governs the
     # scheduler. The intervals below are what takes effect when it's switched back on.
     business_agents_enabled: bool = False
     # Deliberately unhurried when enabled. These scans each make many web searches billed
@@ -211,7 +225,7 @@ def load_config(path: str = "config.json") -> Config:
         phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
         stt_model_size=data.get("stt_model_size", "small.en"),
         # Matches the phone/Era gating policy: only send_email has real-world consequences
-        # (an email actually leaving the account) â€” read tools (list/search/read) run directly.
+        # (an email actually leaving the account) — read tools (list/search/read) run directly.
         mail_sensitive_tools=data.get("mail_sensitive_tools", ["send_email"]),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
@@ -232,11 +246,11 @@ def load_config(path: str = "config.json") -> Config:
         claude_model=data.get("claude_model", "sonnet"),
         claude_timeout_seconds=data.get("claude_timeout_seconds", 300),
         # Authenticates the MCP bridge subprocess to /api/tools/call. Equivalent to full
-        # owner access â€” anything holding it can invoke every tool Jarvis has.
+        # owner access — anything holding it can invoke every Jarvis tool.
         claude_tools_api_key=data.get("claude_tools_api_key"),
         claude_tools_url=data.get("claude_tools_url", "http://127.0.0.1:8080/api/tools/call"),
         # Omit the "business" block entirely and the whole second-in-command side stays
-        # off â€” no tools offered, no agents scheduled, no digest.
+        # off — no tools offered, no agents scheduled, no digest.
         business=BusinessProfile(**data["business"]) if data.get("business") else None,
         gpu_bridge_enabled=data.get("gpu_bridge_enabled", True),
         gpu_bridge_host=data.get("gpu_bridge_host") or data.get("ollama_host"),
@@ -250,6 +264,10 @@ def load_config(path: str = "config.json") -> Config:
         face_match_threshold=data.get("face_match_threshold", 0.42),
         enroll_after_sightings=data.get("enroll_after_sightings", 3),
         device_camera_map=data.get("device_camera_map", {"touch1": "touch1", "laptop1": "laptop1"}),
+        presence_confirm_window_seconds=data.get("presence_confirm_window_seconds", 45),
+        presence_authorized_access_levels=data.get("presence_authorized_access_levels", ["owner"]),
+        wake_arbitration_window_ms=data.get("wake_arbitration_window_ms", 400),
+        wake_arbitration_margin=data.get("wake_arbitration_margin", 0.05),
         notification_token=data.get("notification_token"),
         livecoinwatch_api_key=data.get("livecoinwatch_api_key"),
         market_poll_seconds=data.get("market_poll_seconds", 60),

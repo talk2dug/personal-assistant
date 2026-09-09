@@ -185,9 +185,15 @@ def init_db(db_path: str) -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Idempotent ALTER TABLE migrations for columns added after the initial
-    CREATE TABLE IF NOT EXISTS — safe to call on every startup, on a fresh or
-    already-populated database."""
+    """Idempotent migrations for schema changes made after the initial CREATE TABLE IF
+    NOT EXISTS — safe to call on every startup, on a fresh or already-populated database.
+
+    Most of these are plain ALTER TABLE ADD COLUMN, which SQLite handles natively. The
+    users.role CHECK constraint is the exception: SQLite has no ALTER TABLE ... ALTER
+    CONSTRAINT, so widening it means rebuilding the table under a temporary name and
+    swapping it in — done carefully enough to preserve every existing row's id, since
+    reminders/conversations/pending_actions/etc. all reference users(id) directly.
+    """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(reminders)")}
     if "caldav_uid" not in existing:
         conn.execute("ALTER TABLE reminders ADD COLUMN caldav_uid TEXT")
@@ -197,6 +203,36 @@ def _migrate(conn: sqlite3.Connection) -> None:
     charge_cols = {row[1] for row in conn.execute("PRAGMA table_info(era_recurring_charge_cache)")}
     if "excluded" not in charge_cols:
         conn.execute("ALTER TABLE era_recurring_charge_cache ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+
+    _migrate_users_role_guest(conn)
+
+
+def _migrate_users_role_guest(conn: sqlite3.Connection) -> None:
+    """Widens users.role to allow 'guest' — the identity-less row presence gating
+    (assistant/core/presence.py) creates for a voice-terminal turn nobody's camera could
+    confirm. Checked against the table's own recorded DDL rather than a version flag in
+    `settings`, so this is correct whether it's a fresh install or an upgrade, and can't
+    drift out of sync with what the table actually enforces.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'"
+    ).fetchone()
+    if row is None or "'guest'" in row[0]:
+        return
+    conn.executescript(
+        """
+        CREATE TABLE users_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_chat_id TEXT UNIQUE NOT NULL,
+            display_name TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('owner', 'partner', 'guest'))
+        );
+        INSERT INTO users_new (id, telegram_chat_id, display_name, role)
+            SELECT id, telegram_chat_id, display_name, role FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+        """
+    )
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -468,6 +504,34 @@ def all_users(db_path: str):
     return [{"id": r[0], "telegram_chat_id": r[1], "display_name": r[2], "role": r[3]} for r in rows]
 
 
+# --- guest users (unauthenticated presence turns) -----------------------------------
+
+def get_or_create_guest_user(db_path: str, guest_key: str, display_name: str) -> int:
+    """A synthetic, identity-less user row for a voice-terminal turn presence gating
+    (assistant/core/presence.py) could not confirm as the owner.
+
+    Giving guests their own row -- rather than routing unconfirmed turns through the
+    owner's real user id with tools merely withheld -- means conversation history
+    (recent_messages is keyed by user_id) and any privately-scoped reads (list_reminders'
+    scope rule) stay isolated from the owner's account by construction. If a future tool
+    call somehow bypassed the context-gating layer, it would still be running as a user
+    with no private data of its own to leak.
+
+    guest_key is the caller's own namespacing (presence.py uses one guest per device_id,
+    e.g. "__device_guest__:touch1") so a guest on one terminal never inherits another
+    terminal's guest history either.
+    """
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO users (telegram_chat_id, display_name, role)
+               VALUES (?, ?, 'guest')
+               ON CONFLICT(telegram_chat_id) DO NOTHING""",
+            (guest_key, display_name),
+        )
+        conn.commit()
+    return get_user_by_chat_id(db_path, guest_key)["id"]
+
+
 # --- reminders -----------------------------------------------------------------
 
 def add_reminder(db_path: str, requesting_user_id: int, text: str, due_at: str, scope: str) -> int:
@@ -641,24 +705,6 @@ def get_pending_action(db_path: str, user_id: int):
                FROM pending_actions WHERE user_id = ? AND status = 'awaiting_confirmation'
                ORDER BY id DESC LIMIT 1""",
             (user_id,),
-        ).fetchone()
-    if row is None:
-        return None
-    return {
-        "id": row[0], "user_id": row[1], "tool_name": row[2],
-        "arguments": json.loads(row[3]), "status": row[4], "created_at": row[5],
-    }
-
-
-def get_pending_action_by_id(db_path: str, action_id: int):
-    """Looks up a specific pending action regardless of whether it's the most recent one
-    for its user -- get_pending_action() only ever returns the latest, so this is what
-    lets the Review page resolve one by id instead of only the newest."""
-    with closing(_connect(db_path)) as conn:
-        row = conn.execute(
-            """SELECT id, user_id, tool_name, arguments, status, created_at
-               FROM pending_actions WHERE id = ?""",
-            (action_id,),
         ).fetchone()
     if row is None:
         return None

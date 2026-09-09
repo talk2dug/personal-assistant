@@ -114,17 +114,20 @@ def test_a_single_unknown_sighting_does_not_yet_trigger_a_review_item(db_path, c
 
 def test_unknown_event_is_only_recorded_once_per_occupancy_session(db_path, camera, tmp_path):
     """Ticking on the same lingering stranger must not spam vision_events -- 'one row per
-    meaningful change', per vision.py's own docstring."""
+    meaningful change', per vision.py's own docstring. tick() carries the previous pass's
+    unknown-face ids forward into _last_unknown_ids before the next _identify call; this
+    simulates that directly since it drives _identify without a full tick()."""
     recognizer = FakeRecognizer()
-    recognizer.queue = [Face([0.0, 1.0, 0.0], (0, 0, 10, 10), 0.9) for _ in range(2)]
+    same_face = Face([0.0, 1.0, 0.0], (0, 0, 10, 10), 0.9)
+    recognizer.queue = [same_face, same_face]
     watcher = _watcher(db_path, camera, tmp_path, recognizer=recognizer)
 
+    _, unknown_id = watcher._identify(_frame(), _person())
+    watcher._last_unknown_ids = {unknown_id}
     watcher._identify(_frame(), _person())
-    watcher._last_unknown_ids = watcher._last_unknown_ids  # unchanged between calls below
-    # Simulate tick() carrying the identity set forward, which is what actually
-    # suppresses the duplicate -- call _identify twice with the same _last_unknown_ids.
-    first_events = vision.recent_events(db_path, kind="unknown_person")
-    assert len(first_events) == 1
+
+    events = vision.recent_events(db_path, kind="unknown_person")
+    assert len(events) == 1
 
 
 def test_no_recognizer_configured_is_a_safe_no_op(db_path, camera, tmp_path):

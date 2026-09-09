@@ -12,6 +12,12 @@ each stage completes rather than the client guessing.
 
 Auth is a static device key, not the session cookie: these clients are headless, and the
 kiosk browser showing the orb has nobody to log it in.
+
+Who the assistant is *acting as* on this transport is a separate question from who is
+authenticated as the device. There is no login here at all, which historically meant
+/turn simply assumed whoever was speaking near a terminal was the configured owner and
+handed over every tool -- mail, calendar, finance, the lot. _resolve_speaker below is
+what gates that on camera-based identity once one is actually wired to a terminal.
 """
 import asyncio
 import base64
@@ -23,7 +29,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
-from ...core import db, kitchen_db, vision
+from ...core import db, vision
 from ...core.engine import handle_message
 
 logger = logging.getLogger(__name__)
@@ -61,24 +67,51 @@ def _owner_user_id(request: Request) -> int:
     return owner["id"]
 
 
+def _resolve_speaker(request: Request, device_id: str) -> tuple[int, bool, str | None]:
+    """Who /turn should act on behalf of, and whether it's safe to hand over
+    personal/sensitive tools right now. Returns (user_id, sensitive_ok, identified_as).
+
+    Every piece of personal/business data in this codebase (personal_db.py,
+    business_db.py, Era, mail, calendar...) is scoped to a single configured owner
+    account, not per-speaker -- there is no separate "partner's own data" to hand
+    someone else. So the only question this gate answers is a binary one: is the owner
+    account confidently the one physically present at this terminal right now?
+
+    Defaults wide open (today's behaviour: always the owner, sensitive_ok=True) in
+    exactly the cases where there is nothing real to gate on, so this cannot silently
+    lock a terminal nobody has configured for vision yet:
+      - vision is disabled entirely (cfg.vision_enabled is False/unset), or
+      - this device has no camera linked to it (vision.camera_for_device).
+
+    Once a camera *is* linked, sensitive_ok only turns on when vision.identify_present
+    shows a currently-identified person whose known_people row is linked to the owner
+    account. Anyone else -- an unresolved face, an identified-but-unlinked household
+    member/guest, or simply nobody in frame -- gets sensitive_ok=False, which the caller
+    uses to strip every context that can read or act on personal/business data.
+    """
+    cfg = request.app.state.cfg
+    owner_id = _owner_user_id(request)
+    if not getattr(cfg, "vision_enabled", False):
+        return owner_id, True, None
+
+    camera = vision.camera_for_device(cfg.db_path, device_id)
+    if camera is None:
+        return owner_id, True, None
+
+    within = getattr(cfg, "vision_presence_window_seconds", 180)
+    present = vision.identify_present(cfg.db_path, camera["key"], within_seconds=within)
+    if present is None:
+        return owner_id, False, None
+    if present.get("linked_user_id") == owner_id:
+        return owner_id, True, present["name"]
+    return owner_id, False, present["name"]
+
+
 def _set_state(device_id: str, **fields) -> dict:
     entry = DEVICE_STATE.setdefault(device_id, {"device_id": device_id, "state": "idle", "caption": ""})
     entry.update(fields)
     entry["updated_at"] = time.time()
     return entry
-
-
-def _apply_pending_recipe_view(device_id: str, db_path: str) -> None:
-    """display_recipe (if called from anywhere in the house) leaves its result here for
-    whichever device_id it targeted -- unlike show_camera's pending_camera_views (keyed
-    by user_id, always the device mid-interaction with whoever's talking), a recipe's
-    target is an explicit argument that can be a *different* device than the one issuing
-    the command, so this has to be checked from both /turn's own-device fast path (the
-    kiosk's own mic, for an immediate same-turn display) and the top of GET /{device_id}
-    (the regular ~700ms poll, for a command issued elsewhere in the house)."""
-    recipe = kitchen_db.pop_pending_recipe_view(db_path, device_id)
-    if recipe is not None:
-        _set_state(device_id, recipe=recipe, recipe_seq=DEVICE_STATE.get(device_id, {}).get("recipe_seq", 0) + 1)
 
 
 @router.post("/{device_id}/state")
@@ -100,8 +133,6 @@ async def get_state(device_id: str, request: Request):
     """What the kiosk page polls. Falls back to a sane idle rather than 404ing, so a
     freshly-booted screen shows the orb instead of an error while its client starts."""
     _require_device_key(request)
-    cfg = request.app.state.cfg
-    _apply_pending_recipe_view(device_id, cfg.db_path)
     entry = DEVICE_STATE.get(device_id)
     if entry is None:
         return {"device_id": device_id, "state": "offline", "caption": "", "online": False}
@@ -150,17 +181,28 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
 
     _set_state(device_id, state="thinking", caption=transcript)
 
-    owner_id = _owner_user_id(request)
-    call = functools.partial(
-        handle_message, cfg.db_path, request.app.state.llm, owner_id, transcript,
-        tz_name=cfg.timezone, era=request.app.state.era, calendar=request.app.state.calendar,
+    user_id, sensitive_ok, _identified_as = _resolve_speaker(request, device_id)
+
+    call_kwargs = dict(
+        tz_name=cfg.timezone,
+        era=request.app.state.era, calendar=request.app.state.calendar,
         phone=request.app.state.phone, mail=request.app.state.mail,
         obsidian=request.app.state.obsidian, home_assistant=request.app.state.home_assistant,
-        business=request.app.state.business, personal=request.app.state.personal,
+        business=request.app.state.business,
         airbnb=request.app.state.airbnb, ticketmaster=request.app.state.ticketmaster,
         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
-        letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
-        recipe=request.app.state.recipe, local_llm=request.app.state.local_llm,
+        letterstream=request.app.state.letterstream,
+    )
+    if not sensitive_ok:
+        # Nobody positively identified as the owner is in front of this camera right now
+        # -- strip every context that can read or act on personal/business/financial
+        # data. What's left is still a working assistant (general conversation on the
+        # base LLM), just not one that will read out a calendar, a balance, or an email
+        # to whoever happens to be standing there.
+        call_kwargs = {k: (v if k == "tz_name" else None) for k, v in call_kwargs.items()}
+
+    call = functools.partial(
+        handle_message, cfg.db_path, request.app.state.llm, user_id, transcript, **call_kwargs,
     )
     try:
         reply = await loop.run_in_executor(None, call)
@@ -177,23 +219,8 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
             # A voice failure must still deliver the answer on screen.
             logger.exception("tts failed for device %s", device_id)
 
-    # show_camera (if this turn called it) leaves its result here rather than
-    # returning it directly through handle_message -- see pending_camera_views in
-    # vision.py. The kiosk screen only ever polls /{device_id} for its state, so the
-    # camera has to ride along on that same polled object, not just this response;
-    # camera_seq lets Device.jsx notice a *new* one without the server needing to
-    # "clear" it afterward (a GET poll shouldn't have side effects).
-    camera = vision.pop_pending_camera_view(cfg.db_path, owner_id)
-    state_fields = {"state": "speaking", "caption": reply}
-    if camera is not None:
-        state_fields["camera"] = camera
-        state_fields["camera_seq"] = DEVICE_STATE.get(device_id, {}).get("camera_seq", 0) + 1
-    _set_state(device_id, **state_fields)
-    # display_recipe's target is this same device_id when asked at the kiosk's own mic --
-    # check it here too (on top of get_state's poll-based check) so that case shows up
-    # within this same turn rather than waiting for the next ~700ms poll.
-    _apply_pending_recipe_view(device_id, cfg.db_path)
-    return {"transcript": transcript, "reply": reply, "audio": spoken_audio, "camera": camera}
+    _set_state(device_id, state="speaking", caption=reply)
+    return {"transcript": transcript, "reply": reply, "audio": spoken_audio}
 
 
 @router.post("/say")

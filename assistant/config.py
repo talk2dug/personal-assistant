@@ -95,6 +95,26 @@ class Config:
     # Voice devices (the Pi terminals). piper_voice_path enables server-side speech;
     # device_api_key authenticates the headless clients, which have no session cookie.
     device_api_key: str | None = None
+    # Room presence & identity: YOLO11n (person detection) + insightface (face
+    # recognition), targeting the RTX 3060 on the same host as the assistant. The heavy
+    # models never load in jarvis-core/jarvis-web's own process -- see
+    # core/detector.py and core/face_recognition.py's docstrings -- this config only
+    # says which cameras exist and how the pipeline should behave; the actual inference
+    # runs in scripts/vision_worker.py, under its own .venv-vision. Each entry in
+    # `cameras` is {key, name, url, kind ('mjpeg'|'rtsp'|'local'), location,
+    # motion_threshold, recordable}. Omit `cameras` (or leave it empty) and the whole
+    # vision side stays inert: no cameras seeded, conversation_mode never returns true.
+    cameras: list[dict] = None
+    vision_device: str | None = None   # e.g. "cuda:0"; None = auto-detect
+    camera_poll_seconds: float = 1.5
+    face_match_threshold: float = 0.42
+    enroll_after_sightings: int = 3
+    # Which voice device's room a camera watches, for open-mic gating -- day one, Touch1
+    # and laptop1 are both their own camera and their own voice terminal, so the map
+    # starts as the identity map. Override in config.json if a device and its camera
+    # ever diverge (e.g. a device with no camera of its own, watched by a neighbouring
+    # one).
+    device_camera_map: dict = field(default_factory=lambda: {"touch1": "touch1", "laptop1": "laptop1"})
     # Shared bearer token Home Assistant's actionable-notification automation sends.
     notification_token: str | None = None
     # SSH login used to sweep the house Pis and Ubuntu boxes for media. One password
@@ -158,35 +178,6 @@ class Config:
     # business_agents_enabled — that switch is about the print business's unattended agents,
     # and nesting this under it would make personal research silently never run by default.
     personal_research_interval_minutes: int = 30
-    # --- Room Presence, Identity & Open-Mic Conversation ---------------------------
-    # How long a camera's identification of someone stays "current" for presence.py's
-    # gating decision. Short enough that stepping out of frame genuinely re-locks
-    # personal/financial info on the next question; long enough that normal head turns
-    # and the gap between a detector tick and the next don't cause spurious re-checks.
-    presence_confirm_window_seconds: int = 45
-    # known_people.access_level values that unlock personal/financial context on an
-    # unauthenticated voice terminal. Owner-only by default -- widen this deliberately,
-    # not by accident, if e.g. a partner should also see the shared calendar via voice.
-    presence_authorized_access_levels: list[str] = field(default_factory=lambda: ["owner"])
-    # Arbitration window/margin for wake_arbitration.claim() -- see that module's
-    # docstring for why these specific defaults.
-    wake_arbitration_window_ms: int = 400
-    wake_arbitration_margin: float = 0.05
-    # YOLO weights + device for the vision worker (assistant/vision_main.py, run under
-    # .venv-vision on the machine with the GPU). device=None autodetects cuda vs cpu.
-    vision_model: str = "yolo11n.pt"
-    vision_device: str | None = None
-    # Day-one camera list: each entry is add_camera()'s arguments (key/name/url/kind/
-    # location/motion_threshold/recordable). Config-driven, the same way cfg.users seeds
-    # the users table at startup, so adding camera #3 later is one more entry here, not a
-    # migration. Seeded by both web_main.py (needs the terminal_cameras mapping for
-    # gating) and vision_main.py (needs the camera rows to actually watch them).
-    vision_cameras: list[dict] = field(default_factory=list)
-    # device_id -> camera_key: which camera watches the room each voice terminal sits in.
-    # Day one this is {"touch1": "touch1_cam", "laptop1": "laptop1_cam"}; a terminal not
-    # listed here simply has no way to confirm anyone's identity, which is the safe
-    # (fail-closed) default rather than an error.
-    terminal_cameras: dict = field(default_factory=dict)
 
 
 def load_config(path: str = "config.json") -> Config:
@@ -253,6 +244,12 @@ def load_config(path: str = "config.json") -> Config:
         gpu_max_concurrent=data.get("gpu_max_concurrent", 2),
         comfy_host=data.get("comfy_host"),
         device_api_key=data.get("device_api_key"),
+        cameras=data.get("cameras"),
+        vision_device=data.get("vision_device"),
+        camera_poll_seconds=data.get("camera_poll_seconds", 1.5),
+        face_match_threshold=data.get("face_match_threshold", 0.42),
+        enroll_after_sightings=data.get("enroll_after_sightings", 3),
+        device_camera_map=data.get("device_camera_map", {"touch1": "touch1", "laptop1": "laptop1"}),
         notification_token=data.get("notification_token"),
         livecoinwatch_api_key=data.get("livecoinwatch_api_key"),
         market_poll_seconds=data.get("market_poll_seconds", 60),
@@ -285,12 +282,4 @@ def load_config(path: str = "config.json") -> Config:
         pipeline_interval_hours=data.get("pipeline_interval_hours", 12),
         business_digest_hour=data.get("business_digest_hour", 8),
         personal_research_interval_minutes=data.get("personal_research_interval_minutes", 30),
-        presence_confirm_window_seconds=data.get("presence_confirm_window_seconds", 45),
-        presence_authorized_access_levels=data.get("presence_authorized_access_levels", ["owner"]),
-        wake_arbitration_window_ms=data.get("wake_arbitration_window_ms", 400),
-        wake_arbitration_margin=data.get("wake_arbitration_margin", 0.05),
-        vision_model=data.get("vision_model", "yolo11n.pt"),
-        vision_device=data.get("vision_device"),
-        vision_cameras=data.get("vision_cameras", []),
-        terminal_cameras=data.get("terminal_cameras", {}),
     )

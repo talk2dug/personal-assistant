@@ -22,12 +22,11 @@ where they came from.
 question for the owner rather than a guess, because a confidently wrong name is worse
 than an honest "I don't know who that is".
 
-That later stage is what this module's identity section (bottom of the file) actually
-turns on: InsightFace-based matching against known_people, an unknown-face dedup/ask
-cadence, and apply_face_review_decision -- the one function that ever creates or grows a
-known person, and it only runs after an owner decision on the Review page (see
-assistant/core/vision_runtime.py for the pipeline that calls into all of this, and
-assistant/web/routes/review.py for the write-through).
+A fourth thing, added alongside the Room Presence & Identity gating work: **a terminal is
+not a camera**. `terminal_cameras` maps a voice terminal's device_id (touch1, laptop1, ...)
+to the camera_key that watches the room it sits in, so presence.py can ask "who does the
+camera near THIS terminal currently see" without vision.py needing to know terminals
+exist at all beyond that one lookup table.
 """
 import json
 import sqlite3
@@ -35,7 +34,7 @@ import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
@@ -107,28 +106,17 @@ CREATE TABLE IF NOT EXISTS unknown_faces (
     last_seen TEXT NOT NULL
 );
 
--- A one-shot signal that show_camera leaves for the web UI to pick up. This has to be a
--- DB row rather than an in-process variable: the agentic (Claude CLI) backend dispatches
--- tool calls from a subprocess via routes/tools.py, not from inside the request handler
--- that will build the chat response, so the only thing both sides share is the database.
--- routes/chat.py pops this right after handle_message returns, so it never outlives the
--- turn that created it.
-CREATE TABLE IF NOT EXISTS pending_camera_views (
-    user_id INTEGER PRIMARY KEY,
-    camera TEXT NOT NULL,
+-- Which camera watches the room a given voice terminal sits in. One row per terminal
+-- that has camera coverage at all -- a terminal absent from this table simply has no
+-- way to confirm anyone's identity, which presence.py treats as "not confirmed" rather
+-- than an error. Day one this is touch1 and laptop1; adding terminal #3 later is one
+-- more INSERT, not a schema change.
+CREATE TABLE IF NOT EXISTS terminal_cameras (
+    device_id TEXT PRIMARY KEY,
+    camera_key TEXT NOT NULL REFERENCES cameras(key),
     created_at TEXT NOT NULL
 );
 """
-
-# Cosine-similarity thresholds and review cadence. These are *defaults* only -- every
-# real deployment should override them via config (assistant/config.py's
-# vision_face_match_threshold etc.) once calibrated against its own cameras and faces.
-# A number picked in the abstract for InsightFace's buffalo_l model is a starting point
-# for owner testing, not a promise that it's right for any particular hallway.
-FACE_MATCH_THRESHOLD = 0.38
-UNKNOWN_FACE_DEDUP_THRESHOLD = 0.55
-UNKNOWN_FACE_ASK_AFTER = 3
-MAX_EMBEDDINGS_PER_PERSON = 8
 
 
 def init_vision_db(db_path: str) -> None:
@@ -141,22 +129,16 @@ def init_vision_db(db_path: str) -> None:
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Idempotent ALTER TABLE migrations for columns added after the initial
-    CREATE TABLE IF NOT EXISTS -- same pattern as db.py's _migrate, safe to call on
-    every startup against a fresh or already-populated database."""
-    people_cols = {row[1] for row in conn.execute("PRAGMA table_info(known_people)")}
-    if "linked_user_id" not in people_cols:
-        # Ties a known face to an actual Jarvis account (owner/partner), so presence can
-        # answer not just "who is this" but "is this someone who should get personal or
-        # business data" -- a known household member who isn't a registered user (a
-        # child, a regular guest) stays NULL here and is treated the same as unknown for
-        # that gate, on purpose.
-        conn.execute("ALTER TABLE known_people ADD COLUMN linked_user_id INTEGER REFERENCES users(id)")
-    camera_cols = {row[1] for row in conn.execute("PRAGMA table_info(cameras)")}
-    if "device_id" not in camera_cols:
-        # Which voice terminal (device/jarvis_device.py's device_id) this camera is
-        # colocated with, if any -- what lets devices.py's /turn gate a terminal's
-        # answers on who is actually standing in front of it.
-        conn.execute("ALTER TABLE cameras ADD COLUMN device_id TEXT")
+    CREATE TABLE IF NOT EXISTS — same discipline as db.py's own _migrate."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(known_people)")}
+    if "access_level" not in cols:
+        # No CHECK constraint on the ALTER itself -- SQLite's ADD COLUMN doesn't reliably
+        # support one, and db.py's own migration history (see its docstring) already
+        # chose "validate in the Python layer instead" for exactly this reason. Enforced
+        # by set_person_access_level below.
+        conn.execute(
+            "ALTER TABLE known_people ADD COLUMN access_level TEXT NOT NULL DEFAULT 'guest'"
+        )
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -167,6 +149,15 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Valid known_people.access_level values -- what presence.py's authorization check reads.
+# 'owner': the account holder(s); 'household': lives here but not automatically trusted
+# with e.g. the crypto account; 'guest': recognised (so Jarvis can greet them by name) but
+# never gets personal/financial information. New enrollments default to 'guest' -- being
+# recognised is not the same as being authorized, and that has to be true even for a
+# familiar face until the owner explicitly says otherwise.
+ACCESS_LEVELS = ("owner", "household", "guest")
 
 
 # --- cameras ------------------------------------------------------------------
@@ -200,53 +191,167 @@ def list_cameras(db_path: str, enabled_only: bool = False) -> list[dict]:
         return [dict(r) for r in conn.execute(sql + " ORDER BY key")]
 
 
-def get_camera(db_path: str, key: str) -> dict | None:
-    """Return one enabled camera by its stable key."""
-    with closing(_connect(db_path)) as conn:
-        row = conn.execute(
-            "SELECT * FROM cameras WHERE key = ? AND enabled = 1", (key,)
-        ).fetchone()
-        return dict(row) if row else None
+# --- terminal <-> camera mapping ------------------------------------------------
 
+def set_terminal_camera(db_path: str, device_id: str, camera_key: str) -> None:
+    """Declares that `camera_key` watches the room voice terminal `device_id` sits in.
 
-def find_camera(db_path: str, location: str) -> dict | None:
-    """Resolve a spoken room name without exposing disabled cameras to chat."""
-    normalized = " ".join(location.lower().split())
-    with closing(_connect(db_path)) as conn:
-        rows = conn.execute(
-            """SELECT * FROM cameras
-               WHERE enabled = 1 AND (lower(key) = ? OR lower(name) = ? OR lower(location) = ?)
-               ORDER BY key""",
-            (normalized, normalized, normalized),
-        ).fetchall()
-        return dict(rows[0]) if rows else None
-
-
-def set_pending_camera_view(db_path: str, user_id: int, camera: dict) -> None:
-    """Leaves show_camera's result for routes/chat.py to deliver in its response --
-    see the pending_camera_views docstring in SCHEMA for why this can't just be a
-    Python variable."""
+    Config-driven at startup (see vision_main.py/web_main.py), the same way cfg.users
+    seeds the users table -- so day-one coverage (touch1, laptop1) is a config entry,
+    and terminal #3 later is one more line there, not a migration.
+    """
     with closing(_connect(db_path)) as conn:
         conn.execute(
-            """INSERT INTO pending_camera_views (user_id, camera, created_at) VALUES (?, ?, ?)
-               ON CONFLICT(user_id) DO UPDATE SET camera = excluded.camera, created_at = excluded.created_at""",
-            (user_id, json.dumps(camera), _now()),
+            """INSERT INTO terminal_cameras (device_id, camera_key, created_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(device_id) DO UPDATE SET camera_key = excluded.camera_key""",
+            (device_id, camera_key, _now()),
         )
         conn.commit()
 
 
-def pop_pending_camera_view(db_path: str, user_id: int) -> dict | None:
-    """Reads and clears in one call -- a camera view should only ever open once per
-    show_camera call, not resurface on the user's next unrelated message."""
+def get_terminal_camera(db_path: str, device_id: str) -> str | None:
     with closing(_connect(db_path)) as conn:
         row = conn.execute(
-            "SELECT camera FROM pending_camera_views WHERE user_id = ?", (user_id,)
+            "SELECT camera_key FROM terminal_cameras WHERE device_id = ?", (device_id,)
         ).fetchone()
-        if row is None:
-            return None
-        conn.execute("DELETE FROM pending_camera_views WHERE user_id = ?", (user_id,))
+        return row["camera_key"] if row else None
+
+
+def list_terminal_cameras(db_path: str) -> list[dict]:
+    with closing(_connect(db_path)) as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM terminal_cameras ORDER BY device_id")]
+
+
+# --- known people (identity enrollment) -----------------------------------------
+
+def enroll_known_person(db_path: str, key: str, name: str, relationship: str | None = None,
+                        access_level: str = "guest", embedding: list | None = None) -> dict:
+    """Creates or updates a known person. Never inferred -- this is the "who is this?"
+    answer, given by the owner, per vision.py's module docstring."""
+    if access_level not in ACCESS_LEVELS:
+        raise ValueError(f"access_level must be one of {ACCESS_LEVELS}")
+    embeddings_json = json.dumps([embedding] if embedding is not None else [])
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO known_people
+                   (key, name, relationship, embeddings, sample_count, access_level,
+                    created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                   name = excluded.name, relationship = excluded.relationship,
+                   updated_at = excluded.updated_at""",
+            (key, name, relationship, embeddings_json, 1 if embedding is not None else 0,
+             access_level, now, now),
+        )
         conn.commit()
-        return json.loads(row["camera"])
+        return dict(conn.execute("SELECT * FROM known_people WHERE key = ?", (key,)).fetchone())
+
+
+def add_face_embedding_sample(db_path: str, key: str, embedding: list, max_samples: int = 12) -> bool:
+    """Appends one more embedding sample for an already-enrolled person.
+
+    Capped rather than unbounded: a face at the door in daylight and the same face
+    indoors at night are the variation multiple samples exist to cover, not every frame
+    a camera has ever seen them in. Oldest sample drops first once the cap is hit, which
+    keeps the set representative of recent appearance (haircuts, glasses) rather than
+    anchored to the day they were enrolled.
+    """
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute("SELECT embeddings FROM known_people WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return False
+        samples = json.loads(row["embeddings"] or "[]")
+        samples.append(embedding)
+        samples = samples[-max_samples:]
+        conn.execute(
+            """UPDATE known_people SET embeddings = ?, sample_count = ?, updated_at = ?
+               WHERE key = ?""",
+            (json.dumps(samples), len(samples), _now(), key),
+        )
+        conn.commit()
+        return True
+
+
+def get_known_person(db_path: str, key: str) -> dict | None:
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute("SELECT * FROM known_people WHERE key = ?", (key,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_known_people(db_path: str) -> list[dict]:
+    with closing(_connect(db_path)) as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM known_people ORDER BY name")]
+
+
+def set_person_access_level(db_path: str, key: str, access_level: str) -> bool:
+    """The owner's explicit call on what a recognised face is allowed to hear -- being
+    enrolled (recognised by name) and being authorized (access_level='owner' or
+    'household') are deliberately different questions; see ACCESS_LEVELS."""
+    if access_level not in ACCESS_LEVELS:
+        raise ValueError(f"access_level must be one of {ACCESS_LEVELS}")
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "UPDATE known_people SET access_level = ?, updated_at = ? WHERE key = ?",
+            (access_level, _now(), key),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_known_person(db_path: str, key: str) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute("DELETE FROM known_people WHERE key = ?", (key,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# --- unknown faces (the "who is this?" queue) -----------------------------------
+
+def record_unknown_face(db_path: str, camera_key: str, embedding: list,
+                        thumbnail_path: str = "") -> int:
+    """Logs a face nobody could match. Always inserts a new row rather than trying to
+    dedupe against previous unknown sightings by embedding similarity here -- that
+    matching judgment belongs in assistant/core/identity.py (the same place that already
+    does it for known_people), not duplicated with a second, looser threshold in here.
+    A management UI can merge/resolve these; see resolve_unknown_face."""
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO unknown_faces (camera_key, embedding, thumbnail_path,
+                                          seen_count, first_seen, last_seen)
+               VALUES (?, ?, ?, 1, ?, ?)""",
+            (camera_key, json.dumps(embedding), thumbnail_path or None, now, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_unknown_faces(db_path: str, unresolved_only: bool = True) -> list[dict]:
+    sql = "SELECT * FROM unknown_faces"
+    if unresolved_only:
+        sql += " WHERE resolved_person_key IS NULL"
+    with closing(_connect(db_path)) as conn:
+        return [dict(r) for r in conn.execute(sql + " ORDER BY last_seen DESC")]
+
+
+def mark_unknown_face_asked(db_path: str, face_id: int) -> None:
+    with closing(_connect(db_path)) as conn:
+        conn.execute("UPDATE unknown_faces SET asked = 1 WHERE id = ?", (face_id,))
+        conn.commit()
+
+
+def resolve_unknown_face(db_path: str, face_id: int, person_key: str) -> None:
+    """The owner answered "who is this?" -- links the sighting to a known person. Does
+    NOT itself add the embedding to known_people; call add_face_embedding_sample with the
+    same embedding if the caller wants this sighting to improve future matching."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            "UPDATE unknown_faces SET resolved_person_key = ? WHERE id = ?",
+            (person_key, face_id),
+        )
+        conn.commit()
 
 
 # --- frame sources ------------------------------------------------------------
@@ -286,12 +391,20 @@ class FrameSource:
     def _rtsp_snapshot(self, timeout: float) -> np.ndarray | None:
         """RTSP needs a decoder; OpenCV is the pragmatic one. Opening a connection per
         frame is wasteful, so real RTSP support should hold the capture open -- this is
-        the honest placeholder until the first RTSP camera actually exists to test on."""
+        the honest placeholder until the first RTSP camera actually exists to test on.
+
+        Also doubles as the path for a *local* camera (a built-in/USB webcam, as on
+        laptop1): cv2.VideoCapture happily accepts an integer device index wherever it
+        accepts an RTSP URL string, so a camera row whose url is "0" opens the laptop's
+        own webcam rather than a network stream. No separate 'kind' was worth adding for
+        that -- OpenCV already treats both the same way.
+        """
         try:
             import cv2
         except ImportError:
             return None
-        cap = cv2.VideoCapture(self.url)
+        source = int(self.url) if str(self.url).lstrip("-").isdigit() else self.url
+        cap = cv2.VideoCapture(source)
         try:
             ok, frame = cap.read()
             return frame[:, :, ::-1].copy() if ok else None      # BGR -> RGB
@@ -391,7 +504,6 @@ def presence_now(db_path: str, within_seconds: int = 120) -> dict:
     Derived from the event log rather than kept as separate mutable state, so it cannot
     drift out of step with what was actually observed.
     """
-    from datetime import timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=within_seconds)).isoformat()
     out: dict[str, dict] = {}
     with closing(_connect(db_path)) as conn:
@@ -416,243 +528,34 @@ def presence_now(db_path: str, within_seconds: int = 120) -> dict:
     return out
 
 
-# =============================================================================
-# Identity: enrollment, matching, and the presence gate other modules use
-# =============================================================================
-#
-# Everything below is what turns "a person" (detector.py's YOLO output) into "which
-# person" (InsightFace embeddings matched against known_people). The one rule that
-# matters: nothing here ever creates or grows a known_people row on its own.
-# apply_face_review_decision is the sole write path into known_people, and it only runs
-# after an owner decision on the Review page (assistant/web/routes/review.py). Detection
-# code (assistant/core/vision_runtime.py) only ever *proposes*, via unknown_faces.
+# --- identity resolution (what presence.py's gating decision reads) -------------
 
-def _cosine(a: list, b: list) -> float:
-    va, vb = np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32)
-    na, nb = float(np.linalg.norm(va)), float(np.linalg.norm(vb))
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    return float(np.dot(va, vb) / (na * nb))
+def identity_on_camera(db_path: str, camera_key: str, within_seconds: int = 45) -> dict | None:
+    """The known_people row for whoever camera_key *currently* shows, or None.
 
+    "Currently" is deliberately about the single most recent relevant event, not "was
+    anyone matching seen at all in the window": keyed off whichever of
+    identified/unknown_person/cleared happened last, so someone identified two minutes
+    ago who has since been replaced by a stranger (or by an empty room, via a 'cleared'
+    event from vision_worker.py) correctly reads as unconfirmed on the very next call,
+    rather than lingering as "identified" until the whole window quietly expires.
 
-def _slugify(name: str) -> str:
-    cleaned = "".join(c if c.isalnum() else " " for c in name.lower())
-    return "-".join(cleaned.split()) or "person"
-
-
-def get_known_people(db_path: str) -> list[dict]:
-    with closing(_connect(db_path)) as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM known_people ORDER BY name")]
-
-
-def get_person_by_key(db_path: str, person_key: str) -> dict | None:
-    with closing(_connect(db_path)) as conn:
-        row = conn.execute("SELECT * FROM known_people WHERE key = ?", (person_key,)).fetchone()
-        return dict(row) if row else None
-
-
-def enroll_person(db_path: str, name: str, embedding: list, relationship: str | None = None,
-                  linked_user_id: int | None = None) -> str:
-    """Creates a new known person from a single face embedding. Called only from
-    apply_face_review_decision -- i.e. only after the owner has approved a 'New person'
-    enrollment on the Review page."""
-    key = _slugify(name)
-    with closing(_connect(db_path)) as conn:
-        if conn.execute("SELECT 1 FROM known_people WHERE key = ?", (key,)).fetchone():
-            key = f"{key}-{int(time.time())}"
-        conn.execute(
-            """INSERT INTO known_people
-                   (key, name, relationship, embeddings, sample_count, linked_user_id,
-                    created_at, updated_at)
-               VALUES (?, ?, ?, ?, 1, ?, ?, ?)""",
-            (key, name, relationship, json.dumps([embedding]), linked_user_id, _now(), _now()),
-        )
-        conn.commit()
-    return key
-
-
-def add_embedding(db_path: str, person_key: str, embedding: list) -> bool:
-    """Adds another look of an already-known person -- what happens when the owner
-    matches an unfamiliar-face review to someone who already exists, so the gallery
-    grows to cover different lighting/angles rather than staying a single snapshot.
-    Oldest embeddings are dropped past MAX_EMBEDDINGS_PER_PERSON."""
-    with closing(_connect(db_path)) as conn:
-        row = conn.execute(
-            "SELECT embeddings, sample_count FROM known_people WHERE key = ?", (person_key,)
-        ).fetchone()
-        if row is None:
-            return False
-        embeddings = json.loads(row["embeddings"] or "[]")
-        embeddings.append(embedding)
-        embeddings = embeddings[-MAX_EMBEDDINGS_PER_PERSON:]
-        conn.execute(
-            "UPDATE known_people SET embeddings = ?, sample_count = ?, updated_at = ? WHERE key = ?",
-            (json.dumps(embeddings), row["sample_count"] + 1, _now(), person_key),
-        )
-        conn.commit()
-        return True
-
-
-def match_embedding(db_path: str, embedding: list, threshold: float = FACE_MATCH_THRESHOLD):
-    """Best known-person match for a face embedding, or None. Returns
-    (person_key, name, score) -- score is cosine similarity, higher is closer. Checked
-    against every stored embedding for every person (a person may have several looks),
-    keeping only the best."""
-    best = None
-    with closing(_connect(db_path)) as conn:
-        for row in conn.execute("SELECT key, name, embeddings FROM known_people"):
-            for stored in json.loads(row["embeddings"] or "[]"):
-                score = _cosine(embedding, stored)
-                if score >= threshold and (best is None or score > best[2]):
-                    best = (row["key"], row["name"], score)
-    return best
-
-
-def upsert_unknown_face(db_path: str, camera_key: str, embedding: list, thumbnail_path: str = "",
-                        dedup_threshold: float = UNKNOWN_FACE_DEDUP_THRESHOLD) -> dict:
-    """Records a face that didn't match anyone known, folding repeat sightings of the
-    same unnamed face into one row (per camera) rather than growing one per frame --
-    seen_count is what later decides whether it's worth asking the owner about at all.
-    Dedup only considers faces not yet resolved to a known person on this camera; once
-    resolved, a face should never accumulate further sightings here."""
-    with closing(_connect(db_path)) as conn:
-        candidates = conn.execute(
-            "SELECT * FROM unknown_faces WHERE camera_key = ? AND resolved_person_key IS NULL",
-            (camera_key,),
-        ).fetchall()
-        best_id, best_score = None, 0.0
-        for row in candidates:
-            score = _cosine(embedding, json.loads(row["embedding"]))
-            if score >= dedup_threshold and score > best_score:
-                best_id, best_score = row["id"], score
-        if best_id is not None:
-            conn.execute(
-                """UPDATE unknown_faces SET seen_count = seen_count + 1, last_seen = ?,
-                       thumbnail_path = COALESCE(?, thumbnail_path) WHERE id = ?""",
-                (_now(), thumbnail_path or None, best_id),
-            )
-            conn.commit()
-            return dict(conn.execute("SELECT * FROM unknown_faces WHERE id = ?", (best_id,)).fetchone())
-        cur = conn.execute(
-            """INSERT INTO unknown_faces (camera_key, embedding, thumbnail_path, first_seen, last_seen)
-                  VALUES (?, ?, ?, ?, ?)""",
-            (camera_key, json.dumps(embedding), thumbnail_path or None, _now(), _now()),
-        )
-        conn.commit()
-        return dict(conn.execute("SELECT * FROM unknown_faces WHERE id = ?", (cur.lastrowid,)).fetchone())
-
-
-def get_unknown_face(db_path: str, face_id: int) -> dict | None:
-    with closing(_connect(db_path)) as conn:
-        row = conn.execute("SELECT * FROM unknown_faces WHERE id = ?", (face_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def mark_unknown_face_asked(db_path: str, face_id: int) -> None:
-    with closing(_connect(db_path)) as conn:
-        conn.execute("UPDATE unknown_faces SET asked = 1 WHERE id = ?", (face_id,))
-        conn.commit()
-
-
-def resolve_unknown_face(db_path: str, face_id: int, person_key: str) -> None:
-    with closing(_connect(db_path)) as conn:
-        conn.execute("UPDATE unknown_faces SET resolved_person_key = ? WHERE id = ?", (person_key, face_id))
-        conn.commit()
-
-
-def unasked_unknown_faces(db_path: str, min_seen: int = UNKNOWN_FACE_ASK_AFTER) -> list[dict]:
-    """Unresolved unfamiliar faces seen often enough to be worth a Review-page item, but
-    not yet turned into one."""
-    with closing(_connect(db_path)) as conn:
-        return [dict(r) for r in conn.execute(
-            """SELECT * FROM unknown_faces WHERE asked = 0 AND resolved_person_key IS NULL
-                  AND seen_count >= ? ORDER BY last_seen""", (min_seen,))]
-
-
-def apply_face_review_decision(db_path: str, face_id: int, decision: str,
-                               chosen_option_body: str | None, note: str | None) -> str | None:
-    """Turns the owner's Review-page decision about an unfamiliar face into the actual
-    known_people write. Returns a short human-readable description of what happened, or
-    None if the face row is gone.
-
-    chosen_option_body is the raw `body` field of whichever review_option the owner
-    picked -- JSON of either {"person_key": ...} (an existing match) or
-    {"new_person": true} (enroll fresh, using `note` as the name). Deliberately not
-    parsed from the option's label text, which is display copy and free to change.
+    Returns None (never raises) for: no camera coverage's worth of events yet, the latest
+    signal being unknown_person or cleared, or a stale identified event that has aged out
+    of within_seconds -- presence.py treats all of these identically, as "not confirmed".
     """
-    face = get_unknown_face(db_path, face_id)
-    if face is None:
-        return None
-
-    if decision != "approved":
-        mark_unknown_face_asked(db_path, face_id)
-        return f"unknown_faces#{face_id} dismissed ({decision})"
-
-    choice = json.loads(chosen_option_body) if chosen_option_body else {}
-    embedding = json.loads(face["embedding"])
-
-    if choice.get("new_person"):
-        name = (note or "").strip()
-        if not name:
-            # No name was supplied -- nothing to enroll under. Leave it unresolved and
-            # NOT marked asked, so the owner can redo the decision with a name in the
-            # note field rather than silently guessing one or losing the request.
-            return (f"unknown_faces#{face_id} not enrolled -- approve again with a name "
-                    "in the note field")
-        person_key = enroll_person(db_path, name, embedding)
-        resolve_unknown_face(db_path, face_id, person_key)
-        mark_unknown_face_asked(db_path, face_id)
-        return f"unknown_faces#{face_id} -> enrolled as new person '{name}' ({person_key})"
-
-    person_key = choice.get("person_key")
-    if person_key and get_person_by_key(db_path, person_key):
-        add_embedding(db_path, person_key, embedding)
-        resolve_unknown_face(db_path, face_id, person_key)
-        mark_unknown_face_asked(db_path, face_id)
-        return f"unknown_faces#{face_id} -> linked to existing person {person_key}"
-
-    mark_unknown_face_asked(db_path, face_id)
-    return f"unknown_faces#{face_id} dismissed (no valid option chosen)"
-
-
-# --- camera <-> device linkage (for the identity gate on a voice terminal) ---------
-
-def set_camera_device(db_path: str, camera_key: str, device_id: str | None) -> None:
-    with closing(_connect(db_path)) as conn:
-        conn.execute("UPDATE cameras SET device_id = ? WHERE key = ?", (device_id, camera_key))
-        conn.commit()
-
-
-def camera_for_device(db_path: str, device_id: str) -> dict | None:
-    with closing(_connect(db_path)) as conn:
-        row = conn.execute(
-            "SELECT * FROM cameras WHERE device_id = ? AND enabled = 1", (device_id,)
-        ).fetchone()
-        return dict(row) if row else None
-
-
-def identify_present(db_path: str, camera_key: str, within_seconds: int = 180) -> dict | None:
-    """The most recently identified known person seen on this camera within the window,
-    or None. None covers every case that must NOT be treated as a known, present person:
-    an empty room, motion with nobody recognised, and an unresolved unfamiliar face --
-    callers gating personal/sensitive info (see devices.py's _resolve_speaker) must
-    default closed on None, never assume it means the owner."""
-    from datetime import timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=within_seconds)).isoformat()
     with closing(_connect(db_path)) as conn:
         row = conn.execute(
-            """SELECT * FROM vision_events WHERE camera_key = ? AND kind = 'identified'
-                  AND at >= ? ORDER BY id DESC LIMIT 1""", (camera_key, cutoff),
+            """SELECT kind, person_key FROM vision_events
+               WHERE camera_key = ? AND at >= ?
+                 AND kind IN ('identified', 'unknown_person', 'cleared')
+               ORDER BY id DESC LIMIT 1""",
+            (camera_key, cutoff),
         ).fetchone()
-        if row is None:
+        if row is None or row["kind"] != "identified" or not row["person_key"]:
             return None
         person = conn.execute(
             "SELECT * FROM known_people WHERE key = ?", (row["person_key"],)
         ).fetchone()
-        if person is None:
-            return None
-        return {
-            "person_key": person["key"], "name": person["name"],
-            "relationship": person["relationship"], "linked_user_id": person["linked_user_id"],
-            "confidence": row["confidence"], "at": row["at"],
-        }
+        return dict(person) if person else None

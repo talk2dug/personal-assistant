@@ -1,4 +1,4 @@
-﻿{
+{
   "server": "http://192.168.0.148:8080",
   "device_id": "touch1",
   "device_name": "Touch1",
@@ -10,6 +10,6 @@
   "vad_margin": 2.5,
   "input_device": null,
   "output_device": null,
-  "output_rate": null,
-  "chime": true
+  "chime": true,
+  "wake_arbitration": true
 }

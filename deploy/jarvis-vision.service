@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis vision worker (camera presence + identity)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jack
+WorkingDirectory=/home/jack/jarvis
+# Separate virtualenv from jarvis-core/jarvis-web on purpose -- see requirements-vision.txt.
+ExecStart=/home/jack/jarvis/.venv-vision/bin/python -m assistant.vision_main
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

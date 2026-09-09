@@ -82,15 +82,15 @@ export const api = {
     request('/api/personal/tasks', { method: 'POST', body: JSON.stringify(task) }),
   updatePersonalTask: (id, patch) =>
     request(`/api/personal/tasks/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
-  // status is optional -- the dashboard's Active Work panel asks for 'requested' only
-  // (still in flight); Tasks.jsx asks for everything so it can show recent findings too.
-  personalResearch: (limit = 10, status) =>
-    request(`/api/personal/research?limit=${limit}${status ? `&status=${status}` : ''}`),
+  personalResearch: (limit = 10) => request(`/api/personal/research?limit=${limit}`),
   requestPersonalResearch: (research) =>
     request('/api/personal/research', { method: 'POST', body: JSON.stringify(research) }),
 
   groceryCart: () => request('/api/grocery/cart'),
   clearGroceryCart: () => request('/api/grocery/cart/clear', { method: 'POST' }),
+  groceryPantry: (status) => request(`/api/grocery/pantry${status ? `?status=${status}` : ''}`),
+  upsertPantryItem: (item) => request('/api/grocery/pantry', { method: 'POST', body: JSON.stringify(item) }),
+  deletePantryItem: (id) => request(`/api/grocery/pantry/${id}`, { method: 'DELETE' }),
   searchGroceryStores: (zipCode) =>
     request(`/api/grocery/stores${zipCode ? `?zip_code=${zipCode}` : ''}`),
   preferredGroceryStore: () => request('/api/grocery/stores/preferred'),
@@ -101,62 +101,16 @@ export const api = {
   confirmRecipe: (items) =>
     request('/api/grocery/recipe/confirm', { method: 'POST', body: JSON.stringify({ items }) }),
 
-  kitchenRecipes: (query) => request(`/api/kitchen/recipes${query ? `?query=${encodeURIComponent(query)}` : ''}`),
-  createRecipe: (recipe) => request('/api/kitchen/recipes', { method: 'POST', body: JSON.stringify(recipe) }),
-  getRecipe: (id) => request(`/api/kitchen/recipes/${id}`),
-  updateRecipe: (id, patch) => request(`/api/kitchen/recipes/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
-  deleteRecipe: (id) => request(`/api/kitchen/recipes/${id}`, { method: 'DELETE' }),
-  // FormData, not JSON — same reasoning as transcribe above.
-  recipeFromPhoto: async (file) => {
-    const form = new FormData()
-    form.append('photo', file, file.name)
-    const res = await fetch('/api/kitchen/recipes/from-photo', { method: 'POST', credentials: 'include', body: form })
-    if (!res.ok) {
-      const body = await res.json().catch(() => null)
-      throw new ApiError(res.status, body)
-    }
-    return res.json()
-  },
-
-  kitchenInventory: (status) => request(`/api/kitchen/inventory${status ? `?status=${status}` : ''}`),
-  upsertInventoryItem: (item) => request('/api/kitchen/inventory', { method: 'POST', body: JSON.stringify(item) }),
-  deleteInventoryItem: (id) => request(`/api/kitchen/inventory/${id}`, { method: 'DELETE' }),
-  // FormData, not JSON — same reasoning as recipeFromPhoto above. `item` is optional: pass
-  // the already-known item name when this is a recount of an existing row.
-  inventoryFromPhoto: async (file, item) => {
-    const form = new FormData()
-    form.append('photo', file, file.name)
-    const qs = item ? `?item=${encodeURIComponent(item)}` : ''
-    const res = await fetch(`/api/kitchen/inventory/from-photo${qs}`, { method: 'POST', credentials: 'include', body: form })
-    if (!res.ok) {
-      const body = await res.json().catch(() => null)
-      throw new ApiError(res.status, body)
-    }
-    return res.json()
-  },
-  recordPurchases: (items, reason) =>
-    request('/api/kitchen/purchases', { method: 'POST', body: JSON.stringify({ items, reason }) }),
-  purchaseFromReceipt: async (file) => {
-    const form = new FormData()
-    form.append('photo', file, file.name)
-    const res = await fetch('/api/kitchen/purchases/from-receipt', { method: 'POST', credentials: 'include', body: form })
-    if (!res.ok) {
-      const body = await res.json().catch(() => null)
-      throw new ApiError(res.status, body)
-    }
-    return res.json()
-  },
-
-  shoppingList: (status = 'pending') => request(`/api/kitchen/shopping-list?status=${status}`),
-  addToShoppingList: (item, quantityHint) =>
-    request('/api/kitchen/shopping-list', { method: 'POST', body: JSON.stringify({ item, quantity_hint: quantityHint }) }),
-  removeFromShoppingList: (item) => request(`/api/kitchen/shopping-list/${encodeURIComponent(item)}`, { method: 'DELETE' }),
-  markShoppingListItemPurchased: (item) =>
-    request(`/api/kitchen/shopping-list/${encodeURIComponent(item)}/purchased`, { method: 'POST' }),
-
   reviewItems: (status = 'pending') => request(`/api/review/items?status=${status}`),
   decideReview: (id, decision) =>
     request(`/api/review/items/${id}/decide`, { method: 'POST', body: JSON.stringify(decision) }),
+
+  visionCameras: () => request('/api/vision/cameras'),
+  addVisionCamera: (camera) => request('/api/vision/cameras', { method: 'POST', body: JSON.stringify(camera) }),
+  visionKnownPeople: () => request('/api/vision/known-people'),
+  visionPresence: () => request('/api/vision/presence'),
+  visionEvents: ({ cameraKey = '', kind = '', limit = 50 } = {}) =>
+    request(`/api/vision/events?camera_key=${cameraKey}&kind=${kind}&limit=${limit}`),
 
   mediaSummary: () => request('/api/media/summary'),
   mediaHosts: () => request('/api/media/hosts'),

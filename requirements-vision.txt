@@ -1,0 +1,22 @@
+# Installed into an isolated .venv-vision, never the shared main .venv -- same reasoning
+# as assistant/core/detector.py's own docstring: these are heavy, CUDA-specific packages
+# the assistant's main runtime must not depend on just to import
+# assistant.core.detector / assistant.core.face_id / assistant.core.vision_runtime.
+# Those modules import torch/ultralytics/insightface lazily, inside the functions that
+# actually need them, so importing them elsewhere (setup.py, tests) never requires this
+# file to be installed.
+#
+# Versions verified against an RTX 3060 (CUDA 12.x driver) in line with detector.py's
+# existing yolo11n.pt usage as of Sept 2026 -- match the torch/onnxruntime-gpu CUDA
+# build to whatever driver is actually on the box before installing.
+ultralytics>=8.3.0
+torch>=2.3.0
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+insightface>=0.7.3
+onnxruntime-gpu>=1.18.0
+
+# InsightFace's ArcFace-family model pack (buffalo_l, ~300MB) downloads automatically on
+# the first FaceAnalysis().prepare() call and is cached under ~/.insightface -- nothing
+# else to install by hand, but the first camera pass after a fresh install will be slow
+# while that download happens.

@@ -4,25 +4,21 @@
 import Agents from './pages/Agents'
 import Chat from './pages/Chat'
 import Crypto from './pages/Crypto'
-import Dashboard from './pages/Dashboard'
 import Finance from './pages/Finance'
 import Media from './pages/Media'
 import Review from './pages/Review'
 import Grocery from './pages/Grocery'
-import Kitchen from './pages/Kitchen'
 import Schedule from './pages/Schedule'
 import Tasks from './pages/Tasks'
+import Vision from './pages/Vision'
 
 export const sections = [
-  // First entry doubles as the default landing route (App.jsx redirects '/' here) --
-  // a dashboard is only really a dashboard if it's what you see first.
-  { path: '/dashboard', label: 'Dashboard', element: Dashboard },
   { path: '/chat', label: 'Chat', element: Chat },
   { path: '/schedule', label: 'Schedule', element: Schedule },
   { path: '/tasks', label: 'Tasks', element: Tasks },
   { path: '/grocery', label: 'Grocery', element: Grocery },
-  { path: '/kitchen', label: 'Kitchen', element: Kitchen },
   { path: '/review', label: 'Review', element: Review },
+  { path: '/vision', label: 'Vision', element: Vision },
   { path: '/media', label: 'Media', element: Media },
   { path: '/finance', label: 'Finance', element: Finance },
   { path: '/crypto', label: 'Crypto', element: Crypto },

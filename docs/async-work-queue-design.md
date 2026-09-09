@@ -13,16 +13,26 @@ failure) as a follow-up message once it actually finishes. Poll interval is 12s,
 §7's "10-15s"; per-job timeout reuses the already-shipped `staff_assignment_timeout_seconds`
 knob (see §9's own §1 correction below) rather than a new schema column.
 
-**Deferred, not done**: §8's cadence-tick flip (`run_due` enqueueing instead of calling
-`assign()` directly). The scheduled `staff_cadence` tick still runs synchronously; its
-blocking is already bounded by `max_instances=3`/`misfire_grace_time=300` plus the
-existing per-employee timeout, and it wasn't the path behind the reported incident, so
-folding it into the same queue is left for a follow-up rather than risking the
-alert-policy/cooldown logic in `run_due` in this change. Also not built: the process-group
-kill and stream-json heartbeat instrumentation in §6/§9 (exit_code, heartbeat_at) — real
-value for diagnosing a *hang* specifically, but `staff.assign()`'s own broad try/except
-already turns a timeout into a clean `failed` row today, which is what the owner-facing
-incident actually needed fixed.
+**Update**: §8's cadence-tick flip has since shipped too. `staff.run_due` now takes an
+optional `work_queue`; when given (the normal case — `scheduler.py`'s `_staff_tick` passes
+`business.work_queue`), each due employee is enqueued as `kind='cadence'` instead of run
+inline, and `run_due` returns immediately per employee rather than blocking the tick.
+`due_for_cadence` has no visibility into the queue, so `run_due` calls `work_queue.
+has_pending(employee_key)` before enqueueing — without it, an assignment that outlives one
+5-minute tick (routine for real dev-team work) would get piled on again every tick until
+the first copy drains. The alert-policy/cooldown decision that used to run inline right
+after `assign()` returned is now `staff.handle_cadence_outcome`, called once by the worker
+after the async job actually finishes, with the identical logic (and identical message
+formatting, via the new shared `staff.format_alert_text`) as before — the two paths
+(work_queue given vs. not, the latter kept as a fallback and still exercised by every
+pre-existing `run_due` test) were verified to produce the same alert decisions given the
+same inputs. `main.py` builds a `cadence_notify` closure the same shape as `scheduler.py`'s
+`_staff_alert` and passes it to `start_worker` alongside the plain on-demand `notify`.
+
+Still not built: the process-group kill and stream-json heartbeat instrumentation in §6/§9
+(exit_code, heartbeat_at) — real value for diagnosing a *hang* specifically, but
+`staff.assign()`'s own broad try/except already turns a timeout into a clean `failed` row
+today, which is what the owner-facing incident actually needed fixed.
 
 **Correction to §1**: the design doc's own read of the numbers was slightly off, not the
 diagnosis. `assign()`'s subprocess timeout was already a separately-configurable

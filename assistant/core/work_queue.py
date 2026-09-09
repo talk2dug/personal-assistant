@@ -85,7 +85,13 @@ class WorkQueue:
         self.db_path = db_path
         self.poll_seconds = poll_seconds
         self.llm = None
+        # notify(chat_id, text) -- delivers an on_demand job's result. cadence_notify
+        # (headline, body, urgency, employee) -- passed straight through to
+        # staff.handle_cadence_outcome for a 'cadence' job, same shape run_due's
+        # synchronous path has always used, so alert_policy/cooldown behave identically
+        # regardless of which path actually ran the assignment.
         self.notify = None
+        self.cadence_notify = None
         self.timeout = 10800
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
@@ -118,6 +124,17 @@ class WorkQueue:
         params.append(limit)
         with closing(_connect(self.db_path)) as conn:
             return [dict(r) for r in conn.execute(query, params)]
+
+    def has_pending(self, employee_key: str) -> bool:
+        """Whether this employee already has a job sitting in the queue or being worked
+        -- run_due uses this to skip re-enqueueing someone whose last cadence assignment
+        hasn't drained yet (see run_due's own docstring for why that matters)."""
+        with closing(_connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM work_queue WHERE employee_key = ? AND status IN ('queued', 'running') LIMIT 1",
+                (employee_key,),
+            ).fetchone()
+            return row is not None
 
     # -- worker ------------------------------------------------------------------
 
@@ -178,6 +195,18 @@ class WorkQueue:
             )
             conn.commit()
 
+        if item["kind"] == "cadence":
+            # Same alert_policy/cooldown decision run_due's synchronous path has always
+            # made -- just made here, once, after the async assignment actually finishes,
+            # instead of inline right after a blocking assign() call. A released employee
+            # still has a real staff row (get_staff doesn't filter by status) and gets
+            # alerted on normally, e.g. "run failed" for the now-inactive assignment; emp
+            # is only None if the row itself is gone, which nothing in the current API
+            # does -- defensive, not a reachable case today.
+            if emp is not None:
+                staff.handle_cadence_outcome(self.db_path, emp, outcome, self.cadence_notify)
+            return
+
         body = outcome.get("output") if ok else (outcome.get("error") or "no error detail recorded")
         self._notify_owner(item, title, ok, body or "")
 
@@ -204,10 +233,10 @@ class WorkQueue:
                     conn.commit()
             processed += 1
 
-    def start_worker(self, llm, notify=None, timeout: int = 10800) -> None:
+    def start_worker(self, llm, notify=None, cadence_notify=None, timeout: int = 10800) -> None:
         if self._worker and self._worker.is_alive():
             return
-        self.llm, self.notify, self.timeout = llm, notify, timeout
+        self.llm, self.notify, self.cadence_notify, self.timeout = llm, notify, cadence_notify, timeout
 
         def _loop():
             while not self._stop.wait(self.poll_seconds):

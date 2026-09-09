@@ -3,7 +3,7 @@ import asyncio
 import logging
 
 from .config import load_config
-from .core import business_db, db, github_client, vision
+from .core import business_db, db, github_client, staff, vision
 from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
@@ -92,7 +92,19 @@ def main() -> None:
     # same way the GPU bridge and vision workers below are started separately from where
     # they're built.
     if business is not None and business.work_queue is not None:
-        business.work_queue.start_worker(llm, notify=notify, timeout=cfg.staff_assignment_timeout_seconds)
+        def _cadence_notify(headline: str, body: str, urgency: str, person: dict) -> None:
+            """Delivers a scheduled ('cadence') job's alert once the work queue's worker
+            finishes it -- same formatting and owner-resolution as scheduler.py's
+            _staff_alert, since staff_cadence's own tick now only enqueues (see
+            staff.run_due's docstring) and this is what actually notifies once the real
+            outcome is known."""
+            if owner_row is None:
+                return
+            notify(owner_row["telegram_chat_id"], staff.format_alert_text(headline, body, urgency, person))
+
+        business.work_queue.start_worker(
+            llm, notify=notify, cadence_notify=_cadence_notify,
+            timeout=cfg.staff_assignment_timeout_seconds)
     scheduler.start(
         cfg.db_path, notify, cfg.poll_interval_seconds,
         calendar=calendar, caldav_sync_interval_seconds=cfg.caldav_sync_interval_seconds,

@@ -15,7 +15,7 @@ here.
 """
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS business_projects (
@@ -215,7 +215,11 @@ CREATE TABLE IF NOT EXISTS review_items (
         CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled')),
     decision_note TEXT,
     created_at TEXT NOT NULL,
-    decided_at TEXT
+    decided_at TEXT,
+    -- Set once the staleness watchdog (scheduler.py's run_review_watchdog) has nudged the
+    -- owner that this item is still waiting on a decision, so a slow poll interval can't
+    -- notify the same item twice. Same nullable-marker pattern as reminders.sent_at.
+    watchdog_notified_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_review_status ON review_items(status, created_at);
 
@@ -253,6 +257,11 @@ def init_business_db(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        # Idempotent migration, same pattern as staff.py/db.py: CREATE TABLE IF NOT EXISTS
+        # won't add a column to a table that already exists from an earlier version.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(review_items)")}
+        if "watchdog_notified_at" not in cols:
+            conn.execute("ALTER TABLE review_items ADD COLUMN watchdog_notified_at TEXT")
         conn.commit()
 
 
@@ -984,6 +993,31 @@ def count_pending_reviews(db_path: str, owner_user_id: int) -> int:
             "SELECT COUNT(*) AS n FROM review_items WHERE owner_user_id = ? AND status = 'pending'",
             (owner_user_id,),
         ).fetchone()["n"]
+
+
+def stale_review_items(db_path: str, hours: float = 2.0, as_of: str | None = None):
+    """Pending Review items that have sat without a decision for longer than `hours`
+    and haven't already been flagged to the owner -- the watchdog's way of catching
+    "he never came back to this" instead of only ever showing what's currently pending
+    to whoever happens to open the Review page.
+    """
+    cutoff = (
+        datetime.fromisoformat(as_of) if as_of
+        else datetime.now(timezone.utc)
+    ) - timedelta(hours=hours)
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(
+            "SELECT * FROM review_items WHERE status = 'pending' AND watchdog_notified_at IS NULL"
+            " AND created_at <= ? ORDER BY created_at",
+            (cutoff.isoformat(),),
+        ))
+
+
+def mark_review_item_watchdog_notified(db_path: str, item_id: int) -> None:
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            "UPDATE review_items SET watchdog_notified_at = ? WHERE id = ?", (_now(), item_id))
+        conn.commit()
 
 
 # --- agent runs --------------------------------------------------------------

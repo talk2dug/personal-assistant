@@ -9,6 +9,7 @@ import Finance from './pages/Finance'
 import Media from './pages/Media'
 import Review from './pages/Review'
 import Grocery from './pages/Grocery'
+import Kitchen from './pages/Kitchen'
 import Schedule from './pages/Schedule'
 import Tasks from './pages/Tasks'
 
@@ -20,6 +21,7 @@ export const sections = [
   { path: '/schedule', label: 'Schedule', element: Schedule },
   { path: '/tasks', label: 'Tasks', element: Tasks },
   { path: '/grocery', label: 'Grocery', element: Grocery },
+  { path: '/kitchen', label: 'Kitchen', element: Kitchen },
   { path: '/review', label: 'Review', element: Review },
   { path: '/media', label: 'Media', element: Media },
   { path: '/finance', label: 'Finance', element: Finance },

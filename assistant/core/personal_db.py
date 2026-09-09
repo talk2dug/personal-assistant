@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS personal_tasks (
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'doing', 'done', 'dropped')),
     priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high')),
     due_at TEXT,
+    -- Set once the due-date watchdog (scheduler.py's run_task_watchdog) has notified the
+    -- owner this task is due, so a slow poll interval can't notify the same task twice.
+    -- Same nullable-marker pattern as reminders.sent_at.
+    notified_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -70,6 +74,11 @@ def init_personal_db(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        # Idempotent migration, same pattern as staff.py/db.py: CREATE TABLE IF NOT EXISTS
+        # won't add a column to a table that already exists from an earlier version.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(personal_tasks)")}
+        if "notified_at" not in cols:
+            conn.execute("ALTER TABLE personal_tasks ADD COLUMN notified_at TEXT")
         conn.commit()
 
 
@@ -171,6 +180,10 @@ def update_task(db_path: str, owner_user_id: int, task_id: int, **fields) -> boo
     }
     if not allowed:
         return False
+    # A due_at edit means any earlier due-date notification is stale -- without this, a
+    # task rescheduled after it already fired once would silently never notify again.
+    if "due_at" in allowed:
+        allowed["notified_at"] = None
     sets = ", ".join(f"{k} = ?" for k in allowed)
     with closing(_connect(db_path)) as conn:
         cur = conn.execute(
@@ -179,6 +192,28 @@ def update_task(db_path: str, owner_user_id: int, task_id: int, **fields) -> boo
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def due_tasks(db_path: str, as_of: str | None = None):
+    """Open/doing tasks whose due_at has arrived and haven't been notified yet.
+
+    Same shape as db.due_reminders(): a nullable *_at marker column the watchdog polls
+    against and stamps, so a slow tick can't double-fire and a restart naturally catches
+    anything overdue on its next pass rather than losing it.
+    """
+    as_of = as_of or _now()
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(
+            "SELECT * FROM personal_tasks WHERE notified_at IS NULL AND due_at IS NOT NULL"
+            " AND due_at <= ? AND status IN ('open', 'doing')",
+            (as_of,),
+        ))
+
+
+def mark_task_notified(db_path: str, task_id: int) -> None:
+    with closing(_connect(db_path)) as conn:
+        conn.execute("UPDATE personal_tasks SET notified_at = ? WHERE id = ?", (_now(), task_id))
+        conn.commit()
 
 
 # --- research (delegated errands) --------------------------------------------
@@ -229,24 +264,10 @@ def list_research(db_path: str, owner_user_id: int, limit: int = 10, status: str
         return _rows(conn.execute(query, params))
 
 
-# --- pantry --------------------------------------------------------------------
-
-def upsert_pantry_item(db_path: str, owner_user_id: int, item: str, status: str = "have", notes: str | None = None) -> int:
-    with closing(_connect(db_path)) as conn:
-        conn.execute(
-            """INSERT INTO pantry_items (owner_user_id, item, status, notes, updated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(owner_user_id, item) DO UPDATE SET
-                 status = excluded.status,
-                 notes = COALESCE(excluded.notes, pantry_items.notes),
-                 updated_at = excluded.updated_at""",
-            (owner_user_id, item, status, notes, _now()),
-        )
-        conn.commit()
-        return conn.execute(
-            "SELECT id FROM pantry_items WHERE owner_user_id = ? AND item = ?", (owner_user_id, item)
-        ).fetchone()[0]
-
+# --- pantry ----------------------------------------------------------------------
+# Retired in favor of kitchen_db.py's quantity-tracked kitchen_inventory (see
+# kitchen_db.migrate_pantry_to_inventory) -- list_pantry survives only as that
+# migration's one-time read of whatever this table still holds.
 
 def list_pantry(db_path: str, owner_user_id: int, status: str | None = None):
     query = "SELECT * FROM pantry_items WHERE owner_user_id = ?"
@@ -257,11 +278,3 @@ def list_pantry(db_path: str, owner_user_id: int, status: str | None = None):
     query += " ORDER BY CASE status WHEN 'out' THEN 0 WHEN 'low' THEN 1 ELSE 2 END, item"
     with closing(_connect(db_path)) as conn:
         return _rows(conn.execute(query, params))
-
-
-def delete_pantry_item(db_path: str, owner_user_id: int, item_id: int) -> bool:
-    with closing(_connect(db_path)) as conn:
-        cur = conn.execute(
-            "DELETE FROM pantry_items WHERE id = ? AND owner_user_id = ?", (item_id, owner_user_id))
-        conn.commit()
-        return cur.rowcount > 0

@@ -42,6 +42,7 @@ export default function Device() {
   const [device, setDevice] = useState({ state: 'offline', caption: '' })
   const [cameraView, setCameraView] = useState(null)
   const [cameraFeedBroken, setCameraFeedBroken] = useState(false)
+  const [recipeView, setRecipeView] = useState(null)
   const stateRef = useRef('offline')
   const canvasRef = useRef(null)
   const ampRef = useRef(new Float32Array(BAR_COUNT))
@@ -49,6 +50,7 @@ export default function Device() {
   const t0Ref = useRef(performance.now())
   const lastCameraSeqRef = useRef(0)
   const cameraTimerRef = useRef(null)
+  const lastRecipeSeqRef = useRef(0)
 
   const closeCameraView = () => {
     clearTimeout(cameraTimerRef.current)
@@ -74,6 +76,13 @@ export default function Device() {
             setCameraView(d.camera)
             clearTimeout(cameraTimerRef.current)
             cameraTimerRef.current = setTimeout(() => setCameraView(null), CAMERA_VIEW_MS)
+          }
+          // Same recipe_seq trick as camera_seq above -- no auto-close timer here,
+          // though: cooking takes longer than a 20s glance, so this stays up until
+          // tapped away.
+          if (d.recipe_seq && d.recipe_seq !== lastRecipeSeqRef.current) {
+            lastRecipeSeqRef.current = d.recipe_seq
+            setRecipeView(d.recipe)
           }
         }
       } catch {
@@ -202,6 +211,30 @@ export default function Device() {
             />
           )}
           <div className="device-camera-label">{(cameraView.location || cameraView.name || '').toUpperCase()}</div>
+        </div>
+      )}
+
+      {recipeView && (
+        <div className="device-recipe-view" onClick={() => setRecipeView(null)}>
+          <h2 className="device-recipe-title">{recipeView.title}</h2>
+          {recipeView.servings ? <div className="device-recipe-servings">{recipeView.servings} servings</div> : null}
+          <div className="device-recipe-columns">
+            <div className="device-recipe-ingredients">
+              <h4>Ingredients</h4>
+              <ul>
+                {recipeView.ingredients.map((ing, i) => (
+                  <li key={i}>{[ing.quantity, ing.unit, ing.name].filter(Boolean).join(' ')}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="device-recipe-steps">
+              <h4>Steps</h4>
+              <ol>
+                {recipeView.steps.map((step, i) => <li key={i}>{step}</li>)}
+              </ol>
+            </div>
+          </div>
+          <div className="device-recipe-dismiss-hint">Tap anywhere to dismiss</div>
         </div>
       )}
     </div>

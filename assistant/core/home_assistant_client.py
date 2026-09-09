@@ -328,10 +328,14 @@ class HomeAssistantClient:
         return {"home": home, "people": people, "device_trackers": trackers,
                 "tracking_available": bool(known_people or known_trackers)}
 
-    def call_service(self, domain: str, service: str, entity_id: str | None = None,
+    def call_service(self, domain: str, service: str, entity_id: str | list[str] | None = None,
                      data: dict | None = None) -> dict:
         # entity_id is omitted when absent: several domains (notify, script with no
-        # target, tts) reject a payload that carries one.
+        # target, tts) reject a payload that carries one. A list acts on every entity
+        # in ONE real HA service call -- HA's own REST API already accepts entity_id as
+        # either a string or a list, so this needed no change beyond the type hint;
+        # the actual fix is the tool schema advertising it (engine.py's call_service
+        # description), so the model reaches for one call instead of one per entity.
         payload = {**(data or {})}
         if entity_id:
             payload["entity_id"] = entity_id

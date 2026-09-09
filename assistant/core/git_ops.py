@@ -22,6 +22,7 @@ supplies -- same "credentials never reach conversation history" principle as CCX
 credential-injecting wrapper.
 """
 import base64
+import json
 import subprocess
 from pathlib import Path
 
@@ -203,6 +204,36 @@ class GitOpsClient:
             "checks": [{"name": c["name"], "status": c["status"], "conclusion": c["conclusion"]} for c in checks],
         }
 
+    def get_pr_files(self, pr_number: int) -> list[dict]:
+        """A PR's file-level diff stats -- what check_diff_scope's heuristic and LLM
+        judgment both work from. Deliberately drops GitHub's own `patch` text (the
+        actual line-by-line diff): file name, status, and +/- counts are what scope
+        drift looks like, and dropping patch keeps this cheap regardless of how large a
+        change actually is.
+        """
+        resp = self._http.get(f"/repos/{self.repo}/pulls/{pr_number}/files?per_page=100")
+        if resp.status_code >= 400:
+            return []
+        return [
+            {"filename": f["filename"], "status": f["status"],
+             "additions": f.get("additions", 0), "deletions": f.get("deletions", 0),
+             "changes": f.get("changes", 0)}
+            for f in resp.json()
+        ]
+
+    def list_open_prs(self) -> list[dict]:
+        """Every currently-open PR, for github_client.py's watchdog poll to diff against
+        what it last saw. Not exposed as a chat tool -- internal to the watchdog, same as
+        _run_git is internal to the tools built on top of it. The query string is
+        embedded in the path rather than passed as a separate params= kwarg so this
+        works against the same minimal fake HTTP client (get(path) only) the rest of
+        this module's tests already use.
+        """
+        resp = self._http.get(f"/repos/{self.repo}/pulls?state=open&per_page=100")
+        if resp.status_code >= 400:
+            return []
+        return [{"number": p["number"], "title": p["title"], "url": p["html_url"]} for p in resp.json()]
+
     def merge_pr(self, pr_number: int, merge_method: str = "squash") -> dict:
         resp = self._http.put(f"/repos/{self.repo}/pulls/{pr_number}/merge", json={"merge_method": merge_method})
         if resp.status_code >= 400:
@@ -234,3 +265,108 @@ class GitOpsClient:
             return {"error": f"unknown git tool {name}"}
         except GitOpsError as e:
             return {"ok": False, "error": str(e)}
+
+
+# -- diff-scope safety check ------------------------------------------------------
+#
+# The automated substitute for what manual PR review has actually been catching --
+# not a hypothetical: three separate real instances of `main` silently losing
+# already-shipped code happened in one day (a stale-branch merge, a "clean" rebase with
+# no conflict markers, and a well-intentioned "restoration" PR that quietly rebuilt two
+# files as a simpler, broken reimplementation), none of them caught by green CI. This
+# is the signal that caught all three after the fact -- large deletions relative to a
+# task's stated scope -- built into a check that runs *before* a merge instead of after
+# one, feeding Phase 5's auto-merge governance. Fails closed throughout: anything that
+# can't be fetched or judged counts as unsafe, never as a silent pass.
+
+SCOPE_JUDGMENT_INSTRUCTIONS = """You are reviewing a pull request's file-level diff for SCOPE, not code quality: does the set of changed files, and the shape of each change, plausibly match ONLY what the task below asked for? You are not judging whether the code is good -- only whether something outside the task's stated scope appears to have been touched, simplified, or removed.
+
+Task assigned:
+{task}
+
+Files changed:
+{file_list}
+
+Reply with exactly one line of JSON and nothing else, in this form:
+{{"safe": true or false, "concerns": ["short concern", ...]}}
+
+Set safe to false if: a file looks unrelated to the task; a large deletion appears in a file the task never asked you to touch; the pattern looks like a rewrite/simplification of something that was probably already working rather than the task's own change; or you are genuinely unsure. An empty concerns list only when safe is true."""
+
+
+def _heuristic_concerns(files: list[dict]) -> list[str]:
+    """Cheap, model-free red flags -- exactly the tell that caught all three real
+    incidents referenced above: deletions heavily outweighing additions, or a file
+    disappearing entirely."""
+    concerns = []
+    for f in files:
+        name = f.get("filename", "?")
+        additions = f.get("additions", 0) or 0
+        deletions = f.get("deletions", 0) or 0
+        if f.get("status") == "removed":
+            concerns.append(f"{name} was deleted entirely ({deletions} line(s))")
+        elif deletions >= 10 and deletions > additions * 2:
+            concerns.append(
+                f"{name}: {deletions} deletions vs {additions} additions -- "
+                "large net removal relative to what was added")
+    return concerns
+
+
+def _parse_scope_verdict(output: str | None) -> dict:
+    """Same tolerant trailing-JSON-line extraction as staff.parse_verdict, but fails
+    closed toward UNSAFE where that one fails closed toward no-alert: an unparseable or
+    missing judgment must fall back to manual review, never silently pass a diff as
+    clean just because the model's output didn't parse."""
+    if not output:
+        return {"safe": False, "concerns": ["scope judgment produced no output"]}
+    for line in reversed([l.strip().strip("`") for l in output.strip().splitlines()]):
+        if not line.startswith("{") or not line.endswith("}"):
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if "safe" in data:
+            concerns = data.get("concerns") or []
+            if not isinstance(concerns, list):
+                concerns = [str(concerns)]
+            return {"safe": bool(data["safe"]), "concerns": [str(c) for c in concerns]}
+    return {"safe": False, "concerns": ["scope judgment could not be parsed"]}
+
+
+def _llm_scope_judgment(llm, task_description: str, files: list[dict], timeout: int = 120) -> dict:
+    file_list = "\n".join(
+        f"- {f.get('filename')} ({f.get('status')}): +{f.get('additions', 0)}/-{f.get('deletions', 0)}"
+        for f in files
+    ) or "(no files changed)"
+    prompt = SCOPE_JUDGMENT_INSTRUCTIONS.format(task=task_description, file_list=file_list)
+    try:
+        output = llm.research(prompt, system_prompt="You are a careful, conservative code reviewer.",
+                               timeout=timeout)
+    except Exception as e:
+        return {"safe": False, "concerns": [f"scope judgment call failed: {type(e).__name__}: {e}"]}
+    return _parse_scope_verdict(output)
+
+
+def check_diff_scope(git_ops_client, llm, pr_number: int, task_description: str, timeout: int = 120) -> dict:
+    """Does PR #pr_number's actual diff plausibly match what it was assigned to do?
+
+    Two independent signals, combined -- either one raising a concern is enough to call
+    this unsafe: a cheap heuristic needing no model call, and an LLM judgment of whether
+    the real file list/shape matches the stated task (same "gather candidates, let the
+    model decide" pattern used everywhere else in this codebase for fuzzy judgment,
+    rather than a hardcoded rule that can't account for a task that genuinely does need
+    a large deletion). Returns concrete, readable concerns, not just a bool, so a
+    fallback to manual review can tell the owner why, not just "flagged".
+    """
+    files = git_ops_client.get_pr_files(pr_number)
+    if not files:
+        # Could genuinely mean "no files changed" or "the fetch failed" -- either way,
+        # nothing to safely judge, so this cannot pass as safe.
+        return {"safe": False, "concerns": [f"could not fetch a file diff for PR #{pr_number}"], "files": []}
+
+    concerns = list(_heuristic_concerns(files))
+    judgment = _llm_scope_judgment(llm, task_description, files, timeout=timeout)
+    if not judgment["safe"]:
+        concerns.extend(c for c in judgment["concerns"] if c not in concerns)
+
+    return {"safe": not concerns, "concerns": concerns, "files": files}

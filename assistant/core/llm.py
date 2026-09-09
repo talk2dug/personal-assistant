@@ -3,8 +3,12 @@ import ollama
 
 
 class LLMClient:
-    def __init__(self, host: str, model: str):
-        self._client = ollama.Client(host=host)
+    def __init__(self, host: str, model: str, timeout: float | None = None):
+        # timeout matters most for local_fast_path.py's use: it needs to fail fast (and
+        # fall back to the main backend) rather than hang if the local model is
+        # unreachable or a cold-start reload takes too long, since the whole point of
+        # that fast path is to never be worse than the normal path it stands in front of.
+        self._client = ollama.Client(host=host, timeout=timeout)
         self.model = model
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None, think: bool = False) -> dict:

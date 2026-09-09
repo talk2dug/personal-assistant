@@ -1,4 +1,4 @@
-"""Loads runtime configuration (bot token, user allowlist, Ollama endpoint) from a JSON
+﻿"""Loads runtime configuration (bot token, user allowlist, Ollama endpoint) from a JSON
 file kept out of source control, so the Telegram token and the two chat_ids never end up
 committed.
 """
@@ -17,7 +17,7 @@ class UserConfig:
 
 @dataclass
 class BusinessProfile:
-    """Who the business is and where â€” everything the background agents need that would
+    """Who the business is and where — everything the background agents need that would
     otherwise be hardcoded. The predecessor project (Blue Ridge Custom Co) baked Asheville
     into its market-finder, which made the whole module worthless the moment the business
     moved cities. None of that belongs in code."""
@@ -46,6 +46,11 @@ class Config:
     era_api_key: str | None = None
     era_mcp_url: str = "https://context.era.app/mcp"
     era_sensitive_tools: list[str] = None
+    # Recipe API: remote Streamable HTTP MCP server, same shape as Era, bearer-key auth.
+    # Read-only/generative (search, filter, lookups, plus generate_recipe) -- nothing here
+    # needs sensitive_tools, see RecipeContext's docstring in engine.py.
+    recipe_api_key: str | None = None
+    recipe_mcp_url: str = "https://recipe-api.com/api/mcp"
     apple_id: str | None = None
     apple_app_password: str | None = None
     caldav_url: str = "https://caldav.icloud.com"
@@ -65,6 +70,39 @@ class Config:
     # real-world false-positive/negative rates only show up once real mail is flowing.
     mail_junk_scan_interval_seconds: int = 900
     mail_junk_score_threshold: float = 4.0
+    # How often kitchen_db.sync_kroger_orders runs (see scheduler.py's kroger_sync job).
+    # No documented Kroger rate limit exists anywhere in kroger-mcp or its API docs, so
+    # this mirrors Era's real-world default rather than inventing a number.
+    kroger_sync_interval_seconds: int = 3600
+    # Watchdog polling (see scheduler.py's run_task_watchdog/run_review_watchdog and
+    # docs/watchdog-system-design.md). Tasks poll fast since it's a cheap mechanical
+    # check; Review staleness polls slower since the threshold itself is hours, not
+    # seconds -- there's no value in checking every minute for something that only
+    # matters after review_watchdog_stale_hours have passed.
+    task_watchdog_interval_seconds: int = 60
+    review_watchdog_interval_seconds: int = 900
+    review_watchdog_stale_hours: float = 2.0
+    # 2-5 minutes is GitHub-poll-latency territory per docs/watchdog-system-design.md --
+    # far under GitHub's 5,000 req/hr authenticated rate limit at this scale.
+    github_watchdog_interval_seconds: int = 180
+    # The local-first fast path (assistant/core/local_fast_path.py): tries a local
+    # Ollama model before ever reaching the cloud backend for simple, well-scoped
+    # requests (Home Assistant commands today). Deliberately separate from
+    # ollama_host/ollama_model (used only when llm_backend == "ollama", and shared with
+    # the GPU bridge's own host) -- the owner's actual plan is a second, dedicated local
+    # LLM box that eventually becomes Jarvis's main backend, and this fast path is where
+    # that migration's rough edges (tool-calling reliability, keeping a model warm) get
+    # worked out on a narrow, low-stakes slice of traffic first. None/unset means the
+    # fast path is disabled and every request behaves exactly as it does today.
+    local_llm_host: str | None = None
+    local_llm_model: str = "gemma4:12b-it-q4_K_M"
+    local_llm_timeout_seconds: float = 20.0
+    # How often to ping the local model with a trivial message to keep it resident in
+    # VRAM -- Ollama's own keep_alive only resets on each real use, so a quiet period
+    # (or another job on the same GPU claiming its memory) can let it fall out, and the
+    # very first request after that pays a real ~10s reload cost instead of the
+    # sub-second warm response the fast path exists to provide.
+    local_llm_keepalive_interval_seconds: int = 600
     obsidian_vault_path: str | None = None
     ha_base_url: str | None = None
     ha_token: str | None = None
@@ -96,7 +134,7 @@ class Config:
     gpu_max_concurrent: int = 2
     # ComfyUI on simrig, for image and video generation. A separate server from Ollama
     # on the same box, speaking a completely different protocol (queue a graph, poll,
-    # fetch files) â€” hence its own host setting.
+    # fetch files) — hence its own host setting.
     comfy_host: str | None = None
     # Voice devices (the Pi terminals). piper_voice_path enables server-side speech;
     # device_api_key authenticates the headless clients, which have no session cookie.
@@ -142,15 +180,32 @@ class Config:
     letterstream_from_city: str | None = None
     letterstream_from_state: str | None = None
     letterstream_from_zip: str | None = None
+    # Dev-team agents: git branch/push/PR tools (Phase 1) and later the ops-plan/SSH
+    # workflow both need a repo to target and a token to act on the owner's behalf.
+    # Fine-grained PAT scoped to just this one repo, Contents + Pull requests read/write.
+    github_repo: str | None = None
+    github_pat: str | None = None
+    # Where the local working clone (and one git-worktree checkout per branch) lives.
+    # Kept outside the app's own repo tree so an employee's workspace is never itself
+    # a nested repo Jarvis's own git history would need to account for.
+    git_workspace_path: str = "../jarvis-git-workspace"
+    git_author_name: str = "Jarvis"
+    git_author_email: str = "jarvis@localhost"
     scan_ssh_password: str | None = None
     scan_ssh_users: list[str] = field(default_factory=lambda: ["pi", "jack"])
     scan_subnet: str = "192.168.0"
+    # Named registry of hosts the ops-plan workflow (assistant/core/ssh_ops.py) may
+    # target: {name: {"host", "user", "key_path"?, "password"?}}. The employee/model only
+    # ever refers to a host by its short name here -- the real address and credential are
+    # injected server-side, same principle as every other credential-injecting wrapper in
+    # this codebase (CCXT, git_ops), never a tool argument the model could leak or forge.
+    ssh_hosts: dict = field(default_factory=dict)
     piper_voice_path: str | None = None
     generated_media_path: str = "generated"
     # Master switch for unattended agent runs. Off by default and currently off in the
     # real config: the owner's call is that nothing should fire on a timer until he and
     # Jarvis have worked out sensible cadence and working hours together. Every agent
-    # still runs on demand from chat via run_business_agent â€” this only governs the
+    # still runs on demand from chat via run_business_agent — this only governs the
     # scheduler. The intervals below are what takes effect when it's switched back on.
     business_agents_enabled: bool = False
     # Deliberately unhurried when enabled. These scans each make many web searches billed
@@ -180,6 +235,8 @@ def load_config(path: str = "config.json") -> Config:
         era_api_key=data.get("era_api_key"),
         era_mcp_url=data.get("era_mcp_url", "https://context.era.app/mcp"),
         era_sensitive_tools=data.get("era_sensitive_tools", []),
+        recipe_api_key=data.get("recipe_api_key"),
+        recipe_mcp_url=data.get("recipe_mcp_url", "https://recipe-api.com/api/mcp"),
         apple_id=data.get("apple_id"),
         apple_app_password=data.get("apple_app_password"),
         caldav_url=data.get("caldav_url", "https://caldav.icloud.com"),
@@ -197,13 +254,22 @@ def load_config(path: str = "config.json") -> Config:
         phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
         stt_model_size=data.get("stt_model_size", "small.en"),
         # Matches the phone/Era gating policy: only send_email has real-world consequences
-        # (an email actually leaving the account) â€” read tools (list/search/read) run directly.
+        # (an email actually leaving the account) — read tools (list/search/read) run directly.
         mail_sensitive_tools=data.get("mail_sensitive_tools", ["send_email"]),
         # Junk-flagging (move to Junk folder) is deliberately NOT in mail_sensitive_tools:
         # it's reversible (nothing is deleted) and the whole point of "autonomous" triage
         # is that it doesn't wait on a chat confirmation for every scan.
         mail_junk_scan_interval_seconds=data.get("mail_junk_scan_interval_seconds", 900),
         mail_junk_score_threshold=data.get("mail_junk_score_threshold", 4.0),
+        kroger_sync_interval_seconds=data.get("kroger_sync_interval_seconds", 3600),
+        task_watchdog_interval_seconds=data.get("task_watchdog_interval_seconds", 60),
+        review_watchdog_interval_seconds=data.get("review_watchdog_interval_seconds", 900),
+        review_watchdog_stale_hours=data.get("review_watchdog_stale_hours", 2.0),
+        github_watchdog_interval_seconds=data.get("github_watchdog_interval_seconds", 180),
+        local_llm_host=data.get("local_llm_host"),
+        local_llm_model=data.get("local_llm_model", "gemma4:12b-it-q4_K_M"),
+        local_llm_timeout_seconds=data.get("local_llm_timeout_seconds", 20.0),
+        local_llm_keepalive_interval_seconds=data.get("local_llm_keepalive_interval_seconds", 600),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
         ha_token=data.get("ha_token"),
@@ -223,11 +289,11 @@ def load_config(path: str = "config.json") -> Config:
         claude_model=data.get("claude_model", "sonnet"),
         claude_timeout_seconds=data.get("claude_timeout_seconds", 300),
         # Authenticates the MCP bridge subprocess to /api/tools/call. Equivalent to full
-        # owner access â€” anything holding it can invoke every tool Jarvis has.
+        # owner access — anything holding it can invoke every tool Jarvis has.
         claude_tools_api_key=data.get("claude_tools_api_key"),
         claude_tools_url=data.get("claude_tools_url", "http://127.0.0.1:8080/api/tools/call"),
         # Omit the "business" block entirely and the whole second-in-command side stays
-        # off â€” no tools offered, no agents scheduled, no digest.
+        # off — no tools offered, no agents scheduled, no digest.
         business=BusinessProfile(**data["business"]) if data.get("business") else None,
         gpu_bridge_enabled=data.get("gpu_bridge_enabled", True),
         gpu_bridge_host=data.get("gpu_bridge_host") or data.get("ollama_host"),
@@ -255,9 +321,15 @@ def load_config(path: str = "config.json") -> Config:
         letterstream_from_city=data.get("letterstream_from_city"),
         letterstream_from_state=data.get("letterstream_from_state"),
         letterstream_from_zip=data.get("letterstream_from_zip"),
+        github_repo=data.get("github_repo"),
+        github_pat=data.get("github_pat"),
+        git_workspace_path=data.get("git_workspace_path", "../jarvis-git-workspace"),
+        git_author_name=data.get("git_author_name", "Jarvis"),
+        git_author_email=data.get("git_author_email", "jarvis@localhost"),
         scan_ssh_password=data.get("scan_ssh_password"),
         scan_ssh_users=data.get("scan_ssh_users", ["pi", "jack"]),
         scan_subnet=data.get("scan_subnet", "192.168.0"),
+        ssh_hosts=data.get("ssh_hosts", {}),
         piper_voice_path=data.get("piper_voice_path"),
         generated_media_path=data.get("generated_media_path", "generated"),
         business_agents_enabled=data.get("business_agents_enabled", False),
@@ -268,3 +340,8 @@ def load_config(path: str = "config.json") -> Config:
         business_digest_hour=data.get("business_digest_hour", 8),
         personal_research_interval_minutes=data.get("personal_research_interval_minutes", 30),
     )
+
+
+
+
+

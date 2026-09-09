@@ -79,6 +79,27 @@ def test_call_service_posts_entity_and_data(client, monkeypatch):
     assert result["ok"] is True
 
 
+def test_call_service_accepts_a_list_of_entities_in_one_real_call(client, monkeypatch):
+    """The actual fix for 'turn off the lights' meaning several lights: one HA service
+    call targeting every entity, not one call per light. HA's own REST API already
+    accepts entity_id as a list -- this just confirms the client passes it through
+    untouched rather than only ever forwarding a single string."""
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse(200, [])
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    result = client.call_service("light", "turn_off", ["light.living_room", "light.kitchen"])
+
+    assert captured["json"] == {"entity_id": ["light.living_room", "light.kitchen"]}
+    assert result["ok"] is True
+    assert result["entity_id"] == ["light.living_room", "light.kitchen"]
+
+
 def test_call_tool_dispatches_by_name(client, monkeypatch):
     monkeypatch.setattr(httpx, "get", lambda url, headers=None, timeout=None: FakeResponse(200, []))
     assert client.call_tool("list_entities", {})["entities"] == []

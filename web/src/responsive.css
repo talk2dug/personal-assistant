@@ -1,0 +1,421 @@
+/* ============================================================================
+ * Responsive pass — mobile & tablet breakpoints
+ * ============================================================================
+ * Loaded after index.css (see main.jsx). Everything in here is additive: layout,
+ * sizing, wrapping and tap-target rules only. No colors, fonts, or backgrounds are
+ * introduced, so the existing dark theme carries through unchanged.
+ *
+ * Two tiers:
+ *   900px — tablet / narrow laptop: nav collapses, multi-column grids go to one
+ *           column, headers wrap instead of clipping.
+ *   640px — phone (an iPhone in portrait is ~390-430px): everything from the 900px
+ *           tier still applies, plus tap targets, input sizing, the dock/modal, and
+ *           text wrapping.
+ *
+ * A few rules below use an extra ancestor class (e.g. ".app-main .foo" instead of
+ * ".foo") purely to win specificity ties against whatever index.css already declares
+ * for that class, since that file was too large for the tooling available to this
+ * change to read back in full and confirm exact selectors. Where that wasn't enough
+ * on its own, the property is marked !important — in every case the property being
+ * forced is a layout property (grid-template-columns, display, width), never a color
+ * or font. See the PR description for the full list and the reasoning.
+ * ========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * 900px tier — tablet
+ * ------------------------------------------------------------------------- */
+@media (max-width: 900px) {
+  /* Prevent any single wide element from forcing the whole page to scroll
+     sideways — a safety net, not a substitute for fixing the individual cases below. */
+  html, body, #root, .app-shell {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  /* --- Top nav: collapse into a hamburger -------------------------------- */
+  .app-nav {
+    flex-wrap: wrap;
+    row-gap: 0;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .nav-hamburger {
+    display: inline-flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 4px;
+    width: 44px;
+    height: 44px;
+    margin-left: auto;
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+  }
+  .nav-hamburger span {
+    display: block;
+    width: 22px;
+    height: 2px;
+    background: currentColor;
+    border-radius: 1px;
+    transition: transform 0.2s ease, opacity 0.2s ease;
+  }
+  .app-nav.nav-open .nav-hamburger span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+  .app-nav.nav-open .nav-hamburger span:nth-child(2) { opacity: 0; }
+  .app-nav.nav-open .nav-hamburger span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+  /* Every other direct child of .app-nav (the section links, the spacer, the Jarvis
+     status pill, the username, sign-out) is hidden until the menu is opened, then
+     each becomes a full-width row so the panel reads as a simple vertical list. */
+  .app-nav > a,
+  .app-nav > .nav-spacer,
+  .app-nav > .nav-jarvis,
+  .app-nav > .nav-user,
+  .app-nav > .nav-logout {
+    display: none;
+  }
+  .app-nav.nav-open > a,
+  .app-nav.nav-open > .nav-user,
+  .app-nav.nav-open > .nav-logout,
+  .app-nav.nav-open > .nav-jarvis {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 44px;
+  }
+  .app-nav.nav-open > .nav-spacer {
+    display: none; /* only meaningful in the desktop flex row; irrelevant once stacked */
+  }
+
+  /* --- Page headers: wrap instead of clipping ---------------------------- */
+  .media-header,
+  .office-header,
+  .review-header,
+  .crypto-page-header,
+  .finance-page > section > h3,
+  .reminders-header,
+  .tasks-header,
+  .goals-header,
+  .spending-header,
+  .recurring-header,
+  .review-tabs,
+  .media-controls,
+  .media-bulk,
+  .media-tabs,
+  .cart-item-row,
+  .store-result-row,
+  .reminder-row,
+  .goal-row,
+  .recurring-row,
+  .recurring-row-right,
+  .project-group-header,
+  .calendar-nav,
+  .weather-details {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  /* --- Multi-column grids -> single column -------------------------------- */
+  .app-main .finance-lower,
+  .app-main .office-panels,
+  .app-main .crypto-employee-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .app-main .review-body {
+    flex-direction: column;
+  }
+  /* The pending-items stack becomes a horizontally-scrollable row of cards above
+     the big preview, rather than a tall sidebar eating the whole screen. */
+  .app-main .review-stack {
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    gap: 8px;
+  }
+  .app-main .review-stack .review-card {
+    flex: 0 0 auto;
+    min-width: 220px;
+  }
+  .app-main .review-main {
+    width: 100%;
+  }
+
+  /* --- Data tables: contained horizontal scroll, not a page-wide one ------ */
+  .media-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+  .app-main .crypto-positions {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+
+  /* --- The Office: canvas already sizes itself to window width in JS (see
+     Agents.jsx's fit() effect); this just guarantees CSS never lets it overflow
+     regardless of the floor the JS scale calculation lands on. */
+  .office-stage {
+    overflow-x: auto;
+    width: 100%;
+  }
+  .office-canvas {
+    max-width: 100%;
+    height: auto;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 640px tier — phone (iPhone-width viewports land here)
+ * ------------------------------------------------------------------------- */
+@media (max-width: 640px) {
+  .app-main {
+    padding: 12px !important;
+    box-sizing: border-box;
+  }
+
+  /* --- Tap targets: ~44px minimum on every interactive element ------------ */
+  .app-nav a,
+  .app-nav button,
+  .app-main button,
+  .app-main a,
+  .login-card button,
+  .chat-input-row button,
+  .jarvis-dock-chat,
+  .jarvis-dock-orb {
+    min-height: 44px;
+    min-width: 44px;
+    box-sizing: border-box;
+  }
+  /* Small inline icon buttons (remove/delete ✕ controls) keep their compact look but
+     still get a comfortably tappable hit area via padding rather than forced size. */
+  .pantry-chip-remove,
+  .goal-delete,
+  .reminder-delete,
+  .task-drop,
+  .chat-modal-close {
+    min-height: 44px;
+    min-width: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* --- Inputs: full width, 16px so iOS Safari doesn't zoom in on focus ---- */
+  .app-main input,
+  .app-main select,
+  .app-main textarea,
+  .login-card input {
+    font-size: 16px;
+    min-height: 44px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .chat-input-row input {
+    font-size: 16px;
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+
+  /* --- Forms: stack fields instead of a cramped row ----------------------- */
+  .app-main form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .app-main form > * {
+    width: 100%;
+    box-sizing: border-box;
+  }
+  /* A few form rows are intentionally two short fields side by side (e.g. amount +
+     expense/income) — those keep wrapping flex instead of a hard stack. */
+  .recurring-form-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .recurring-form-row > * {
+    width: auto;
+    flex: 1 1 120px;
+  }
+  .task-form-actions,
+  .recipe-review-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+  }
+  .task-form-actions > button,
+  .recipe-review-actions > button {
+    width: auto;
+    flex: 1 1 auto;
+  }
+
+  /* --- Remaining grids collapse fully to one column ----------------------- */
+  .app-main .balance-cards,
+  .app-main .crypto-book-grid,
+  .app-main .pantry-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* --- Login ---------------------------------------------------------------*/
+  .login-card {
+    width: 92vw;
+    max-width: 360px;
+    box-sizing: border-box;
+  }
+
+  /* --- The orb / chat page -------------------------------------------------*/
+  .orb-canvas-wrap {
+    width: min(78vw, 300px);
+    height: min(78vw, 300px);
+    max-width: 100%;
+  }
+  .orb-header {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chat-toolbar,
+  .orb-toolbar {
+    flex-wrap: wrap;
+  }
+  .toolbar-btn {
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+
+  /* --- JarvisDock: stay usable, stay out of the way of page content ------- */
+  .jarvis-dock {
+    width: calc(100% - 16px);
+    max-width: calc(100% - 16px);
+    box-sizing: border-box;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    gap: 8px;
+  }
+  .jarvis-dock-orb {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    flex-shrink: 0;
+  }
+  .jarvis-dock-body {
+    min-width: 0; /* allow the caption to actually shrink/ellipsize instead of overflowing */
+    flex: 1 1 auto;
+  }
+  .jarvis-dock-state {
+    font-size: 11px;
+  }
+  .jarvis-dock-caption {
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+  }
+  .jarvis-dock-chat {
+    flex-shrink: 0;
+    padding: 0 14px;
+  }
+  /* Leave enough clearance below the last bit of page content that the fixed dock
+     never sits on top of it. */
+  .app-main {
+    padding-bottom: 92px !important;
+  }
+
+  /* --- Chat modal: near-fullscreen sheet rather than a small centered box - */
+  .chat-modal {
+    width: 94vw;
+    max-width: 94vw;
+    height: 82vh;
+    max-height: 82vh;
+    box-sizing: border-box;
+  }
+  .chat-modal-header {
+    flex-wrap: wrap;
+  }
+  .chat-input-row {
+    flex-wrap: wrap;
+  }
+  .chat-input-row input {
+    flex: 1 1 100%;
+  }
+
+  /* --- Text: wrap long values instead of clipping or forcing scroll ------- */
+  .task-text,
+  .review-card-title,
+  .review-card-meta,
+  .media-path,
+  .media-origin,
+  .crypto-trade-reason,
+  .reminder-text,
+  .goal-name,
+  .goal-meta,
+  .project-name,
+  .project-goal,
+  .research-topic,
+  .research-question,
+  .research-findings,
+  .staff-detail,
+  .recurring-desc,
+  .recurring-meta,
+  .chat-bubble,
+  .store-address,
+  .card-label {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  /* --- Rows that pair a label/name with a value or action: allow wrapping -- */
+  .task-row,
+  .goal-row,
+  .reminder-row,
+  .recurring-row,
+  .cart-item-row,
+  .store-result-row,
+  .research-row-header,
+  .category-row-top,
+  .crypto-book-headline,
+  .crypto-employee-header,
+  .staff-row,
+  .queue-row,
+  .gpu-chip,
+  .weather-now,
+  .device-top {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  /* --- Calendar: keep the 7-day grid (it's the point of the widget) but shrink
+     it down to fit and let day contents wrap instead of overflowing the cell. */
+  .calendar-cell {
+    padding: 2px;
+    font-size: 10px;
+  }
+  .calendar-item {
+    font-size: 9px;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+  .calendar-daynum {
+    font-size: 10px;
+  }
+
+  /* --- Office (Agents.jsx) header -------------------------------------------*/
+  .office-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .gpu-chip {
+    width: 100%;
+  }
+}

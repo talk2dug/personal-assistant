@@ -55,6 +55,30 @@ OPS_PLAN_TOOLS = [
         }, "required": ["summary", "steps"]},
     }},
     {"type": "function", "function": {
+        "name": "propose_mcp_install_plan",
+        "description": (
+            "Propose installing a new MCP server / integration on a host, using the "
+            "safe, correctly-shaped template instead of freehanding propose_ops_plan's "
+            "fully generic steps yourself. Builds an isolated venv for it (never the "
+            "shared main .venv), installs the package, verifies it actually imports, "
+            "merges the given config entries into config.json (after backing it up), "
+            "restarts the affected service, and verifies the new integration actually "
+            "appears in the real startup log -- plus a real rollback (restore config, "
+            "remove the venv, restart again) if any of that fails. Same one-approval-"
+            "for-the-whole-plan flow as propose_ops_plan -- nothing runs until the owner "
+            "approves it on the Review page."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "host": {"type": "string", "description": "A registered host name, not a raw address."},
+            "name": {"type": "string", "description": "Short identifier for this integration, e.g. 'weather'. Used for the venv folder name (.venv-<name>) and matched against the startup log line."},
+            "package_spec": {"type": "string", "description": "What pip should install, e.g. 'some-mcp-package==1.2.0'."},
+            "import_check": {"type": "string", "description": "The Python module name to import as a smoke test that the install actually worked, e.g. 'some_mcp_package'."},
+            "config_updates": {"type": "object", "description": "Key/value pairs to merge into config.json, e.g. {\"weather_api_key\": \"...\"}."},
+            "restart_command": {"type": "string", "description": "The exact command that restarts the affected service on that host."},
+            "log_path": {"type": "string", "description": "Full path to the log file the verify step should check for '<name>...discovered'."},
+        }, "required": ["host", "name", "package_spec", "import_check", "config_updates", "restart_command", "log_path"]},
+    }},
+    {"type": "function", "function": {
         "name": "list_ssh_hosts",
         "description": (
             "The real, current list of registered SSH hosts a plan can target. There is "
@@ -1149,6 +1173,38 @@ class BusinessClient:
             item_id = business_db.create_review_item(
                 db_path, owner, f"Ops plan: {arguments['summary'][:60]}", "other",
                 summary=arguments["summary"], detail=detail, source_agent="ops-plan",
+                ref_table="ops_plans", ref_id=plan_id, priority="normal",
+            )
+            ops_plans.set_review_item_id(db_path, plan_id, item_id)
+            return {
+                "ok": True, "plan_id": plan_id, "review_item_id": item_id,
+                "message": (
+                    "On the Review page now, awaiting the owner's approval for the whole "
+                    "plan. Nothing runs until he approves it there or in chat — tell him "
+                    "it's waiting, do not claim any of it has happened yet."
+                ),
+            }
+
+        if name == "propose_mcp_install_plan":
+            host = arguments.get("host")
+            if self.ssh_ops is not None and host not in set(self.ssh_ops.list_hosts()):
+                return {"ok": False, "error": (
+                    f"unknown host {host!r}; registered hosts: "
+                    f"{', '.join(sorted(self.ssh_ops.list_hosts())) or '(none configured)'}")}
+            steps = ops_plans.build_mcp_install_plan_steps(
+                host=host, name=arguments["name"], package_spec=arguments["package_spec"],
+                import_check=arguments["import_check"], config_updates=arguments["config_updates"],
+                restart_command=arguments["restart_command"], log_path=arguments["log_path"],
+            )
+            summary = f"Install the {arguments['name']} MCP server/integration on {host}"
+            try:
+                plan_id = ops_plans.create_plan(db_path, owner, summary, steps)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            detail = ops_plans.render_plan_detail(summary, ops_plans.get_plan(db_path, plan_id)["steps"])
+            item_id = business_db.create_review_item(
+                db_path, owner, f"Ops plan: {summary[:60]}", "other",
+                summary=summary, detail=detail, source_agent="ops-plan",
                 ref_table="ops_plans", ref_id=plan_id, priority="normal",
             )
             ops_plans.set_review_item_id(db_path, plan_id, item_id)

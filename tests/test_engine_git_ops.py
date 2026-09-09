@@ -24,10 +24,26 @@ def owner_id(db_path):
 class FakeGitOpsClient:
     def __init__(self):
         self.calls = []
+        # No checks at all -- _try_auto_merge_pr's own real-code default for "CI is not
+        # 100% green" -- so these confirmation-gate tests exercise the pre-existing
+        # fall-back-to-manual path exactly as before Phase 5 added auto-merge, without
+        # needing every test in this file to know about the new governance check.
+        # See test_engine_auto_merge.py for the auto-merge path itself.
+        self._pr_status = {"ok": True, "state": "open", "mergeable": True, "merged": False, "checks": []}
 
     def call_tool(self, name, arguments):
         self.calls.append((name, arguments))
         return {"ok": True}
+
+    def get_pr_status(self, pr_number):
+        return self._pr_status
+
+    def get_pr_files(self, pr_number):
+        return []
+
+    def merge_pr(self, pr_number, merge_method="squash"):
+        self.calls.append(("merge_pr_direct", {"pr_number": pr_number, "merge_method": merge_method}))
+        return {"ok": True, "merged": True}
 
 
 class FakeLLM:

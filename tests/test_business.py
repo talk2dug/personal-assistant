@@ -521,6 +521,51 @@ def test_propose_ops_plan_works_without_ssh_ops_configured(db_path):
     assert result["ok"] is True
 
 
+def _mcp_install_args(**overrides):
+    args = dict(
+        host="simrig", name="weather", package_spec="some-weather-mcp==1.0.0",
+        import_check="some_weather_mcp", config_updates={"weather_api_key": "abc123"},
+        restart_command="Restart-Service JarvisCore", log_path=r"C:\jarvis\logs\jarvis-core.log",
+    )
+    args.update(overrides)
+    return args
+
+
+def test_propose_mcp_install_plan_creates_a_well_formed_plan_and_review_item(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps())
+
+    result = client.call_tool("propose_mcp_install_plan", _mcp_install_args())
+
+    assert result["ok"] is True
+    plan = ops_plans.get_plan(db_path, result["plan_id"])
+    assert plan["status"] == "proposed"
+    assert {"change", "test", "verify", "rollback"}.issubset({s["phase"] for s in plan["steps"]})
+    review_item = business_db.list_review_items(db_path, 1, status="pending")[0]
+    assert review_item["ref_table"] == "ops_plans" and review_item["ref_id"] == result["plan_id"]
+    assert "weather" in review_item["title"]
+
+
+def test_propose_mcp_install_plan_rejects_an_unregistered_host(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps(hosts=["simrig"]))
+
+    result = client.call_tool("propose_mcp_install_plan", _mcp_install_args(host="some-random-box"))
+
+    assert result["ok"] is False
+    assert "some-random-box" in result["error"]
+    assert ops_plans.list_plans(db_path, 1) == []
+
+
+def test_propose_mcp_install_plan_works_without_ssh_ops_configured(db_path):
+    ops_plans.init_ops_plans_db(db_path)
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=None)
+
+    result = client.call_tool("propose_mcp_install_plan", _mcp_install_args())
+
+    assert result["ok"] is True
+
+
 def test_list_and_get_ops_plan_status(db_path):
     ops_plans.init_ops_plans_db(db_path)
     client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps())

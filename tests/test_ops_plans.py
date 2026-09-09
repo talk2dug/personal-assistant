@@ -4,6 +4,8 @@ successful run never touches rollback at all. This is the piece that has to be r
 the owner's whole reason for asking for a plan instead of per-command confirmation was
 "what happens if it fails," and that has to actually happen, not just be documented.
 """
+import base64
+
 import pytest
 
 from assistant.core import ops_plans
@@ -191,3 +193,79 @@ class TestRunPlanFailurePath:
     def test_an_unknown_plan_id_fails_cleanly(self, db):
         result = ops_plans.run_plan(db, 999, FakeSSHClient())
         assert result == {"ok": False, "error": "no such plan 999"}
+
+
+class TestBuildMcpInstallPlanSteps:
+    """build_mcp_install_plan_steps is the safe template a systems-engineer employee
+    should reach for instead of freehanding propose_ops_plan's fully generic steps --
+    these check its output is well-formed (a real plan validate_steps would accept) and
+    that the generated config-merge script actually says what it claims to."""
+
+    def _steps(self, **overrides):
+        kwargs = dict(
+            host="jarvisbox", name="weather", package_spec="some-weather-mcp==1.0.0",
+            import_check="some_weather_mcp", config_updates={"weather_api_key": "abc123"},
+            restart_command="Restart-Service JarvisCore",
+            log_path=r"C:\jarvis\logs\jarvis-core.log",
+        )
+        kwargs.update(overrides)
+        return ops_plans.build_mcp_install_plan_steps(**kwargs)
+
+    def test_produces_a_plan_that_passes_validate_steps(self):
+        ops_plans.validate_steps(self._steps())  # raises on anything malformed
+
+    def test_every_step_targets_the_given_host(self):
+        steps = self._steps(host="jarvisbox")
+        assert all(s["host"] == "jarvisbox" for s in steps)
+
+    def test_has_at_least_one_step_per_phase(self):
+        steps = self._steps()
+        phases_present = {s["phase"] for s in steps}
+        assert phases_present == {"change", "test", "verify", "rollback"}
+
+    def test_installs_into_an_isolated_dot_venv_name_not_the_shared_venv(self):
+        steps = self._steps(name="weather")
+        install_step = next(s for s in steps if "pip.exe" in s["command"])
+        assert ".venv-weather" in install_step["command"]
+        assert install_step["command"].count(".venv-weather") >= 1
+
+    def test_import_check_runs_before_any_config_is_touched(self):
+        steps = self._steps(import_check="some_weather_mcp")
+        commands = [s["command"] for s in steps]
+        import_index = next(i for i, c in enumerate(commands) if "import some_weather_mcp" in c)
+        config_merge_index = next(i for i, c in enumerate(commands) if "_ops_plan_merge_" in c and "python.exe" in c)
+        assert import_index < config_merge_index
+
+    def test_config_merge_script_actually_contains_the_given_updates(self):
+        steps = self._steps(config_updates={"weather_api_key": "abc123", "weather_poll_seconds": 300})
+        write_step = next(s for s in steps if "WriteAllText" in s["command"])
+        # Pull the base64 payload out of the generated PowerShell command and decode it,
+        # the same way the real remote step would -- proves the round trip actually
+        # carries the real config values, not just that *a* script gets written.
+        encoded = write_step["command"].split("FromBase64String('")[1].split("')")[0]
+        script = base64.b64decode(encoded).decode()
+        assert "weather_api_key" in script
+        assert "abc123" in script
+        assert "weather_poll_seconds" in script
+        assert "300" in script
+
+    def test_verify_step_checks_for_the_names_own_discovery_log_line(self):
+        steps = self._steps(name="weather", log_path=r"C:\jarvis\logs\jarvis-core.log")
+        verify_step = next(s for s in steps if s["phase"] == "verify")
+        assert "weather.*discovered" in verify_step["command"]
+        assert r"C:\jarvis\logs\jarvis-core.log" in verify_step["command"]
+
+    def test_rollback_restores_config_and_removes_the_venv(self):
+        steps = self._steps(name="weather")
+        rollback_commands = " ".join(s["command"] for s in steps if s["phase"] == "rollback")
+        assert "config.json.bak-weather" in rollback_commands
+        assert ".venv-weather" in rollback_commands
+        assert "Restart-Service JarvisCore" in rollback_commands
+
+    def test_restart_command_is_used_for_both_the_change_and_rollback_restart(self):
+        steps = self._steps(restart_command="Restart-Service JarvisCore")
+        restart_uses = [s for s in steps if s["command"] == "Restart-Service JarvisCore"]
+        assert len(restart_uses) == 2  # once mid-plan, once during rollback
+        change_restart = next(s for s in restart_uses if s["phase"] == "change")
+        rollback_restart = next(s for s in restart_uses if s["phase"] == "rollback")
+        assert change_restart is not rollback_restart

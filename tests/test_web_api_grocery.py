@@ -1,6 +1,7 @@
-"""Covers /api/grocery: pantry status board (backed by personal_db), and the
-Kroger-backed shadow cart / store picker / recipe propose-confirm flow (backed by a
-fake KrogerContext so no real Kroger account is needed for these tests).
+"""Covers /api/grocery: the Kroger-backed shadow cart / store picker / recipe
+propose-confirm flow (backed by a fake KrogerContext so no real Kroger account is
+needed for these tests). Kitchen inventory (formerly this module's pantry board) has
+its own test module, test_web_api_kitchen.py.
 """
 import asyncio
 import json
@@ -85,49 +86,12 @@ def _client(cfg, kroger=None):
 
 def test_requires_login(cfg):
     client = _client(cfg)
-    assert client.get("/api/grocery/pantry").status_code == 401
+    assert client.get("/api/grocery/cart").status_code == 401
 
 
 def test_partner_is_refused_owner_only_grocery_data(cfg):
     client = _login(_client(cfg), "partnerpass")
-    assert client.get("/api/grocery/pantry").status_code == 403
-
-
-def test_pantry_upsert_and_list(cfg):
-    client = _login(_client(cfg))
-    resp = client.post("/api/grocery/pantry", json={"item": "milk", "status": "low"})
-    assert resp.status_code == 200
-    item_id = resp.json()["item_id"]
-
-    listed = client.get("/api/grocery/pantry").json()
-    assert len(listed) == 1
-    assert listed[0]["item"] == "milk" and listed[0]["status"] == "low"
-
-    # Re-upserting the same item updates status in place rather than duplicating it.
-    client.post("/api/grocery/pantry", json={"item": "milk", "status": "out"})
-    listed = client.get("/api/grocery/pantry").json()
-    assert len(listed) == 1 and listed[0]["status"] == "out"
-
-    assert client.delete(f"/api/grocery/pantry/{item_id}").status_code == 200
-    assert client.get("/api/grocery/pantry").json() == []
-
-
-def test_pantry_filters_by_status(cfg):
-    client = _login(_client(cfg))
-    client.post("/api/grocery/pantry", json={"item": "eggs", "status": "have"})
-    client.post("/api/grocery/pantry", json={"item": "flour", "status": "out"})
-    out_only = client.get("/api/grocery/pantry?status=out").json()
-    assert len(out_only) == 1 and out_only[0]["item"] == "flour"
-
-
-def test_pantry_requires_item(cfg):
-    client = _login(_client(cfg))
-    assert client.post("/api/grocery/pantry", json={"status": "have"}).status_code == 400
-
-
-def test_pantry_rejects_bad_status(cfg):
-    client = _login(_client(cfg))
-    assert client.post("/api/grocery/pantry", json={"item": "milk", "status": "sortof"}).status_code == 400
+    assert client.get("/api/grocery/cart").status_code == 403
 
 
 def test_kroger_routes_503_when_not_configured(cfg):

@@ -78,3 +78,69 @@ def test_password_auth_is_passed_through_when_no_key_configured(monkeypatch):
 
     assert captured["kwargs"]["password"] == "secret"
     assert "key_filename" not in captured["kwargs"]
+
+
+class _FakeChannel:
+    """Enough of paramiko's Channel surface for run_command to complete against it."""
+
+    def __init__(self, exit_status=0):
+        self._exit_status = exit_status
+        self.get_pty_called = False
+        self.exec_command_calls = []
+
+    def get_pty(self):
+        self.get_pty_called = True
+
+    def exec_command(self, command):
+        self.exec_command_calls.append(command)
+
+    def recv_ready(self):
+        return False
+
+    def exit_status_ready(self):
+        return True
+
+    def recv_exit_status(self):
+        return self._exit_status
+
+
+def test_run_command_never_requests_a_pty(monkeypatch):
+    """A real, live regression test found that Windows OpenSSH Server silently reports
+    exit code 0 for every command run over a PTY channel, regardless of what the command
+    actually returned -- confirmed against a real host (a plain `exit 1` read back as
+    success). Since ops_plans.run_plan's whole change/test/verify/rollback model depends
+    on a trustworthy exit code, get_pty() must never be called here again."""
+    import paramiko
+
+    fake_channel = _FakeChannel(exit_status=0)
+
+    class FakeTransport:
+        def open_session(self):
+            return fake_channel
+
+    monkeypatch.setattr(paramiko.SSHClient, "connect", lambda self, *a, **k: None)
+    monkeypatch.setattr(paramiko.SSHClient, "get_transport", lambda self: FakeTransport())
+
+    client = SSHOpsClient({"simrig": {"host": "simrig.local", "user": "jack"}})
+    client.run_command("simrig", "echo hi")
+
+    assert fake_channel.get_pty_called is False
+    assert fake_channel.exec_command_calls == ["echo hi"]
+
+
+def test_run_command_reports_the_real_exit_code(monkeypatch):
+    import paramiko
+
+    fake_channel = _FakeChannel(exit_status=1)
+
+    class FakeTransport:
+        def open_session(self):
+            return fake_channel
+
+    monkeypatch.setattr(paramiko.SSHClient, "connect", lambda self, *a, **k: None)
+    monkeypatch.setattr(paramiko.SSHClient, "get_transport", lambda self: FakeTransport())
+
+    client = SSHOpsClient({"simrig": {"host": "simrig.local", "user": "jack"}})
+    result = client.run_command("simrig", "exit 1")
+
+    assert result == {"ok": False, "host": "simrig", "command": "exit 1", "exit_code": 1, "output": ""}

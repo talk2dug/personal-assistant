@@ -5,11 +5,13 @@ returns the final reply text.
 Transport-agnostic — Telegram (or any future transport) just calls handle_message.
 """
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from . import business_db, db, staff, vision
+from .git_ops import check_diff_scope
 from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
 from . import location_tools
@@ -18,7 +20,12 @@ from .business_tools import (
     GPU_BRIDGE_NOTE,
 )
 from .personal_tools import PERSONAL_SYSTEM_NOTE, PERSONAL_TOOLS
+from .kitchen_tools import (
+    KITCHEN_ALWAYS_TOOLS, KITCHEN_SYSTEM_NOTE, KITCHEN_TOOLS, _select_kitchen_gated_tools,
+)
 from .git_tools import GIT_SYSTEM_NOTE
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -272,7 +279,7 @@ class PersonalContext:
 
     @property
     def tool_names(self) -> set[str]:
-        return {t["function"]["name"] for t in PERSONAL_TOOLS}
+        return {t["function"]["name"] for t in PERSONAL_TOOLS} | {t["function"]["name"] for t in KITCHEN_TOOLS}
 
 
 @dataclass
@@ -411,7 +418,10 @@ KROGER_CATEGORY_KEYWORDS = {
     "shopping": ["kroger", "grocery", "groceries", "product", "cart", "shopping list"],
     "store": ["store hours", "nearest store", "store location", "which kroger"],
     "auth": ["authenticate", "authorize", "log into kroger", "connect my kroger", "kroger account"],
-    "recipe": ["make", "cook", "cooking", "recipe", "dinner", "ingredients", "bake", "baking"],
+    "recipe": [
+        "make", "cook", "cooking", "recipe", "dinner", "ingredients", "bake", "baking",
+        "meal plan", "meal planning", "plan meals", "pay period", "payday",
+    ],
 }
 
 # Search/store lookup covers most grocery questions without the model needing to guess
@@ -823,17 +833,31 @@ HOME_ASSISTANT_TOOLS = [
         "function": {
             "name": "call_service",
             "description": (
-                "Call a Home Assistant service to control a device, e.g. domain='light', "
-                "service='turn_on', entity_id='light.living_room'. Locking/unlocking doors, "
-                "opening/closing garage doors or gates, and arming/disarming the alarm are sensitive "
-                "and stage for the user's explicit confirmation before they execute."
+                "Call a Home Assistant service to control one or more devices, e.g. domain='light', "
+                "service='turn_on', entity_id='light.living_room'. "
+                "IMPORTANT -- if the same service applies to more than one entity (e.g. 'turn off the "
+                "lights' meaning several lights, or any request naming/implying multiple devices), you "
+                "MUST call this tool exactly ONCE with entity_id as a list of every target, e.g. "
+                "entity_id=['light.living_room', 'light.kitchen']. Do NOT call this tool once per "
+                "device -- each call is a slow real round trip, and HA natively supports acting on a "
+                "list of entities in a single call, so calling it repeatedly for one user request is "
+                "always wrong, never just a style choice. "
+                "Locking/unlocking doors, opening/closing garage doors or gates, and arming/disarming "
+                "the alarm are sensitive and stage for the user's explicit confirmation before they "
+                "execute."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "domain": {"type": "string", "description": "Service domain, e.g. 'light', 'lock', 'climate'."},
                     "service": {"type": "string", "description": "Service name, e.g. 'turn_on', 'unlock', 'set_temperature'."},
-                    "entity_id": {"type": "string", "description": "Target entity id."},
+                    "entity_id": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}},
+                        ],
+                        "description": "Target entity id, or a list of entity ids to act on all of them in one call.",
+                    },
                     "data": {"type": "object", "description": "Extra service data, e.g. {'temperature': 72}."},
                 },
                 "required": ["domain", "service", "entity_id"],
@@ -1006,7 +1030,7 @@ SYSTEM_PROMPT = (
     "opens a video window in the user's Jarvis web session; you never see or describe the footage "
     "yourself, just confirm it's open or report that no camera is registered for that room. "
     "list_cameras shows what's registered, and add_camera registers a new one from a stream URL."
-    "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{web_note}"
+    "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{kitchen_note}{web_note}"
     "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}{recipe_note}"
 )
 
@@ -1190,6 +1214,7 @@ def build_system_prompt(
             gpu_note=GPU_BRIDGE_NOTE if getattr(business, "has_gpu_bridge", False) else "",
         ) if business is not None else "",
         personal_note=PERSONAL_SYSTEM_NOTE if personal is not None else "",
+        kitchen_note=KITCHEN_SYSTEM_NOTE if personal is not None else "",
         # Only the Claude CLI backend has web search; Ollama has no such capability, and
         # promising one it doesn't have is exactly how fabrication starts.
         web_note=WEB_SEARCH_SYSTEM_NOTE if web_search else "",
@@ -1237,6 +1262,7 @@ def select_tools(
             + (HOME_ASSISTANT_TOOLS + LOCATION_TOOLS if home_assistant is not None else [])
             + (BUSINESS_TOOLS if business is not None else [])
             + (PERSONAL_TOOLS if personal is not None else [])
+            + (KITCHEN_TOOLS if personal is not None else [])
             + (airbnb.airbnb_tools if airbnb is not None else [])
             + (ticketmaster.ticketmaster_tools if ticketmaster is not None else [])
             + (kroger.kroger_tools if kroger is not None else [])
@@ -1269,6 +1295,13 @@ def select_tools(
         # Personal tools aren't keyword-gated either — proactively capturing a personal
         # to-do or project only works if the tools are there on every turn.
         + (PERSONAL_TOOLS if personal is not None else [])
+        # Unlike PERSONAL_TOOLS, kitchen tools ARE split: save_recipe is capture-shaped
+        # (always-on, same reasoning as PERSONAL_TOOLS itself), but recipe lookup/editing
+        # is keyword-gated -- PERSONAL_TOOLS is already 21 schemas, and adding the kitchen
+        # feature's full catalog on top unconditionally would reintroduce the tool-count-
+        # overload problem this codebase has already hit and fixed twice (Era, Kroger).
+        + (KITCHEN_ALWAYS_TOOLS if personal is not None else [])
+        + (_select_kitchen_gated_tools(user_text) if personal is not None else [])
         + (_select_airbnb_tools(airbnb, user_text) if airbnb is not None else [])
         + (_select_ticketmaster_tools(ticketmaster, user_text) if ticketmaster is not None else [])
         + (_select_kroger_tools(kroger, user_text) if kroger is not None else [])
@@ -1306,6 +1339,7 @@ def _dispatch_tool_call(
     git_ops: "GitOpsContext | None" = None,
     recipe: "RecipeContext | None" = None,
     employee_key: str | None = None,
+    llm=None,
 ) -> str:
     if name == "show_camera":
         camera = vision.find_camera(db_path, arguments.get("location", ""))
@@ -1496,7 +1530,13 @@ def _dispatch_tool_call(
 
     if git_ops is not None and name in git_ops.tool_names:
         if name in git_ops.sensitive_tools:
-            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
+            auto_reason = None
+            if name == "git_merge_pr" and llm is not None:
+                outcome = _try_auto_merge_pr(db_path, git_ops, llm, requesting_user_id, arguments)
+                if outcome["auto_merged"]:
+                    return json.dumps(outcome["result"])
+                auto_reason = outcome["reason"]
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments, note=auto_reason)
             return json.dumps({
                 "status": "awaiting_confirmation",
                 "message": (
@@ -1504,6 +1544,7 @@ def _dispatch_tool_call(
                     f"request into main. Describe exactly which PR and what merging it "
                     f"will do (tool: {name}, arguments: {arguments}) and ask the user to "
                     "explicitly confirm yes or no before anything happens."
+                    + (f" (Auto-merge was not applied: {auto_reason})" if auto_reason else "")
                 ),
             })
         try:
@@ -1636,17 +1677,108 @@ def _classify_confirmation(llm, user_text: str) -> str:
     return "unclear"
 
 
-def create_pending_action_and_review(db_path: str, user_id: int, name: str, arguments: dict) -> int:
+def _task_description_for_pr(db_path: str, user_id: int, pr_number: int) -> str | None:
+    """What was this PR actually supposed to do? There's no direct link from a PR
+    number back to the staff_work row that produced it, so this uses the next best
+    thing already on hand: the Review-item created when the PR was opened (git_open_pr's
+    own dispatch branch above stores the PR's title/body there) -- the same artifact a
+    human reviewer would read to judge scope, not just the original vague assignment.
+    None means genuinely nothing is known about this PR's intent, which check_diff_scope's
+    caller treats as its own reason to fail closed rather than guess."""
+    item = business_db.get_review_item_by_ref(db_path, user_id, "git_pull_requests", pr_number)
+    if item is None:
+        return None
+    parts = [item.get("title") or "", item.get("detail") or ""]
+    text = "\n\n".join(p for p in parts if p).strip()
+    return text or None
+
+
+def _try_auto_merge_pr(db_path: str, git_ops: "GitOpsContext", llm, user_id: int, arguments: dict) -> dict:
+    """The auto-merge governance decision for git_merge_pr: green CI AND a clean
+    diff-scope check are both required, or this falls back to exactly today's manual
+    pending_actions gate -- with the specific reason attached instead of a generic
+    prompt, so the owner sees *why* it needs a human this time.
+
+    Fails closed on anything unexpected -- a missing pr_number, a status/diff fetch
+    failing, no recorded task description to judge scope against, or this LLM backend
+    not supporting llm.research -- always falls back to manual approval, never to an
+    unattended merge on a guess. The owner never had to approve auto-merges being turned
+    on in general (that decision was made once, per docs/watchdog-system-design.md's own
+    safety-boundary reasoning); what he still sees per-merge is this reasoning trail.
+
+    No separate push notification is sent from here on purpose: the merge itself flips
+    this PR from open to closed/merged, which scheduler.run_github_watchdog (Phase 3)
+    already polls for and reports through the normal handle_message/notify path within
+    one poll interval -- reusing that rather than building a second notify path for the
+    same event.
+    """
+    pr_number = arguments.get("pr_number")
+    if pr_number is None:
+        return {"auto_merged": False, "reason": "no pr_number given"}
+
+    status = git_ops.mcp_client.get_pr_status(pr_number)
+    if not status.get("ok"):
+        return {"auto_merged": False, "reason": f"could not check PR status: {status.get('error')}"}
+    checks = status.get("checks") or []
+    if not checks or any(c.get("conclusion") != "success" for c in checks):
+        return {"auto_merged": False, "reason": "CI is not 100% green (or has no checks at all)"}
+
+    if not hasattr(llm, "research"):
+        return {"auto_merged": False, "reason": "this LLM backend cannot run the diff-scope judgment"}
+
+    task_description = _task_description_for_pr(db_path, user_id, pr_number)
+    if task_description is None:
+        return {"auto_merged": False,
+                "reason": "no recorded task/PR description to judge the diff's scope against"}
+
+    scope = check_diff_scope(git_ops.mcp_client, llm, pr_number, task_description)
+    if not scope["safe"]:
+        return {"auto_merged": False,
+                "reason": "diff-scope check raised concerns: " + "; ".join(scope["concerns"])}
+
+    result = git_ops.mcp_client.merge_pr(pr_number, arguments.get("merge_method", "squash"))
+    if not result.get("ok"):
+        return {"auto_merged": False, "reason": f"auto-merge attempt failed: {result.get('error')}"}
+
+    logger.info("auto-merged PR #%s: CI green, diff-scope check found no concerns", pr_number)
+    item = business_db.get_review_item_by_ref(db_path, user_id, "git_pull_requests", pr_number)
+    if item is not None:
+        try:
+            business_db.decide_review_item(
+                db_path, user_id, item["id"], "approved",
+                note="Auto-merged: CI was 100% green and the diff-scope check found no concerns.",
+            )
+        except Exception:
+            logger.exception("could not mark PR #%s's review item auto-approved", pr_number)
+
+    return {"auto_merged": True, "result": {
+        **result, "auto_merged": True,
+        "note": "Auto-merged: CI was 100% green and the diff-scope check found no concerns.",
+    }}
+
+
+def create_pending_action_and_review(
+    db_path: str, user_id: int, name: str, arguments: dict, note: str | None = None,
+) -> int:
     """Every sensitive tool call gets both a pending_actions row (the existing chat
     "yes/no" flow) and a linked review_items row -- one choke point, so a Kroger cart
     write, a CCXT trade, a mail release, an HA lock/alarm change, or a PR-merge
     confirmation is exactly as visible on the Review page as anything an employee
-    produces, regardless of which integration raised it."""
+    produces, regardless of which integration raised it.
+
+    note, when given, is a specific reason manual review is needed this time rather than
+    a generic prompt -- e.g. git_merge_pr's auto-merge governance check falling back
+    here because CI wasn't green or the diff-scope check raised a concern. Surfaced on
+    the Review card so the owner sees *why*, not just "flagged"."""
     pending_id = db.create_pending_action(db_path, user_id, name, arguments)
+    summary = f"{name} — {json.dumps(arguments)[:200]}"
+    detail = json.dumps(arguments, indent=2)
+    if note:
+        summary = f"{summary} ({note})"[:500]
+        detail = f"{note}\n\n{detail}"
     business_db.create_review_item(
         db_path, user_id, title=f"Confirm: {name}", kind="other",
-        summary=f"{name} — {json.dumps(arguments)[:200]}",
-        detail=json.dumps(arguments, indent=2), source_agent="pending_action",
+        summary=summary, detail=detail, source_agent="pending_action",
         ref_table="pending_actions", ref_id=pending_id,
     )
     return pending_id
@@ -1737,12 +1869,18 @@ def handle_message(
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
     recipe: "RecipeContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
+    local_llm=None,
 ) -> str:
     """Runs one user turn through the LLM (with tool-calling), persists the
     conversation, and returns the reply text. image_bytes (a JPEG snapshot from the
     web UI's on-demand camera capture) is attached only to this turn's outgoing
     message, never persisted — gemma4 is multimodal, so it's just another field on
-    the user message ollama sends, not a separate code path."""
+    the user message ollama sends, not a separate code path.
+
+    local_llm (set only when config.local_llm_host is configured) is tried first for
+    simple Home-Assistant-flavored requests via local_fast_path.py, before this ever
+    reaches the main backend -- see that module's own docstring for why. None means the
+    fast path is disabled and this behaves exactly as it always has."""
     if (era is not None or phone is not None or mail is not None or home_assistant is not None
             or kroger is not None or ccxt is not None or letterstream is not None or git_ops is not None):
         pending = db.get_pending_action(db_path, requesting_user_id)
@@ -1750,6 +1888,15 @@ def handle_message(
             return _resolve_pending_action(
                 db_path, llm, era, phone, mail, home_assistant, pending, user_text,
                 kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops)
+
+    if local_llm is not None and home_assistant is not None and image_bytes is None:
+        from . import local_fast_path
+        fast_reply = local_fast_path.try_home_assistant_fast_path(
+            local_llm, home_assistant, db_path, requesting_user_id, user_text, tz_name=tz_name)
+        if fast_reply is not None:
+            db.add_message(db_path, requesting_user_id, "user", user_text)
+            db.add_message(db_path, requesting_user_id, "assistant", fast_reply)
+            return fast_reply
 
     db.add_message(db_path, requesting_user_id, "user", user_text)
 
@@ -1826,7 +1973,7 @@ def handle_message(
                 db_path, tz_name, requesting_user_id, fn["name"], fn.get("arguments", {}), era, calendar, phone,
                 mail=mail, obsidian=obsidian, home_assistant=home_assistant, business=business,
                 personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+                letterstream=letterstream, git_ops=git_ops, recipe=recipe, llm=llm,
             )
             messages.append({"role": "tool", "content": result})
 

@@ -103,7 +103,7 @@ def test_unconfirmed_terminal_strips_sensitive_context_and_runs_as_guest(client,
 def test_confirmed_owner_on_camera_gets_real_context_and_real_user_id(client, cfg, monkeypatch):
     vision.add_camera(cfg.db_path, "touch1_cam", "Touch1 camera", "http://touch1/snapshot")
     vision.set_terminal_camera(cfg.db_path, "touch1", "touch1_cam")
-    vision.enroll_known_person(cfg.db_path, "dug", "Dug", access_level="owner")
+    vision.enroll_known_person(cfg.db_path, "Dug", [1.0, 0.0, 0.0], access_level="owner")
     vision.record_event(cfg.db_path, "touch1_cam", "identified", person_key="dug", label="Dug")
 
     captured = {}
@@ -129,7 +129,7 @@ def test_a_terminal_with_no_camera_never_gets_sensitive_context_even_if_owner_en
     """jarvisaudio1 has no camera assigned at all -- day-one coverage is touch1/laptop1
     only, and an audio-only terminal must stay fail-closed regardless of what's enrolled
     elsewhere in the house."""
-    vision.enroll_known_person(cfg.db_path, "dug", "Dug", access_level="owner")
+    vision.enroll_known_person(cfg.db_path, "Dug", [1.0, 0.0, 0.0], access_level="owner")
 
     captured = {}
 

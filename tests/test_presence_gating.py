@@ -16,7 +16,7 @@ def _confirm_owner_on_camera(db_path, device_id="touch1", camera_key="touch1_cam
                              access_level="owner"):
     vision.add_camera(db_path, camera_key, "cam", "http://x/snapshot")
     vision.set_terminal_camera(db_path, device_id, camera_key)
-    vision.enroll_known_person(db_path, "dug", "Dug", access_level=access_level)
+    vision.enroll_known_person(db_path, "Dug", [1.0, 0.0, 0.0], access_level=access_level)
     vision.record_event(db_path, camera_key, "identified", person_key="dug", label="Dug")
 
 

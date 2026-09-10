@@ -24,6 +24,13 @@ run from core/camera_watch.py — this module owns the schema and the plain-data
 over it, not the models). An unknown face becomes a question for the owner, surfaced on
 the Review page, rather than a guess — see enroll_known_person / upsert_unknown_face
 below. A confidently wrong name is worse than an honest "I don't know who that is".
+
+On top of that, this module is also the storage layer Room Presence & Identity gating
+(core/presence.py) and the open-mic conversation-mode endpoint (routes/vision.py) read:
+which camera watches which voice terminal (terminal_cameras), who that camera currently
+and recently confirms (identity_on_camera), and what access that person is allowed
+(known_people.access_level) -- see presence.py's own docstring for why that decision
+fails closed.
 """
 import json
 import re
@@ -88,6 +95,13 @@ CREATE TABLE IF NOT EXISTS known_people (
     -- policy is per-person, not global.
     recording_preference TEXT NOT NULL DEFAULT 'inherit'
         CHECK (recording_preference IN ('inherit', 'never', 'always')),
+    -- What an unattended voice terminal is allowed to tell this person once camera
+    -- confirms them -- see core/presence.py. Deliberately separate from `relationship`
+    -- (a warm, descriptive label for the household) rather than overloading it: access
+    -- is a security decision with a small, closed set of values, and defaulting new
+    -- enrollees to anything above 'household' would be the wrong default to get wrong.
+    access_level TEXT NOT NULL DEFAULT 'household'
+        CHECK (access_level IN ('owner', 'household', 'guest')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -104,6 +118,28 @@ CREATE TABLE IF NOT EXISTS unknown_faces (
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL
 );
+
+-- Which camera watches which voice terminal's room, for open-mic gating -- day one this
+-- mirrors config.py's device_camera_map (Touch1 the terminal is Touch1 the camera), but
+-- lives in the db rather than only in config so the owner can repoint it (a terminal
+-- moved to a different room, a camera added later than its terminal) without a restart,
+-- the same reasoning add_camera's web-UI path already applies to the camera list itself.
+CREATE TABLE IF NOT EXISTS terminal_cameras (
+    device_id TEXT PRIMARY KEY,
+    camera_key TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- The one-shot handoff for the "show me the kitchen" chat tool: engine.py can't return
+-- a live video stream in reply text, so show_camera stages which camera to open here and
+-- the web UI (routes/chat.py's caller) pops it right after the reply comes back. Keyed
+-- by user rather than a single global slot so two people asking for different cameras in
+-- the same few seconds can't steal each other's window.
+CREATE TABLE IF NOT EXISTS pending_camera_views (
+    user_id INTEGER PRIMARY KEY,
+    view_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -111,7 +147,19 @@ def init_vision_db(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent ALTER TABLE for anyone who already created known_people before
+    access_level existed -- same pattern as db.py's own _migrate, safe on a fresh or
+    already-populated database."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(known_people)")}
+    if "access_level" not in cols:
+        conn.execute(
+            "ALTER TABLE known_people ADD COLUMN access_level TEXT NOT NULL DEFAULT 'household'"
+        )
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -153,6 +201,31 @@ def list_cameras(db_path: str, enabled_only: bool = False) -> list[dict]:
         sql += " WHERE enabled = 1"
     with closing(_connect(db_path)) as conn:
         return [dict(r) for r in conn.execute(sql + " ORDER BY key")]
+
+
+def get_camera(db_path: str, key: str) -> dict | None:
+    """One camera by its exact key -- what routes/cameras.py's stream proxy resolves
+    before it will open an upstream connection."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute("SELECT * FROM cameras WHERE key = ?", (key,)).fetchone()
+    return dict(row) if row else None
+
+
+def find_camera(db_path: str, query: str) -> dict | None:
+    """Resolves a spoken/typed camera reference to one camera row, for the show_camera /
+    list_cameras chat tools. People ask for a camera by room ("show me the kitchen"),
+    not by its internal key, so location is checked first, then the camera's display
+    name, then falling back to the key itself."""
+    if not query:
+        return None
+    with closing(_connect(db_path)) as conn:
+        for column in ("location", "name", "key"):
+            row = conn.execute(
+                f"SELECT * FROM cameras WHERE {column} = ? COLLATE NOCASE", (query,)
+            ).fetchone()
+            if row:
+                return dict(row)
+    return None
 
 
 # --- frame sources ------------------------------------------------------------
@@ -369,6 +442,14 @@ def slugify_person_key(name: str) -> str:
     return key or "person"
 
 
+# Access levels an unattended voice terminal's confirmed speaker can hold -- see
+# core/presence.py's DEFAULT_AUTHORIZED_ACCESS_LEVELS for how these gate personal/
+# financial context. A closed set on purpose: this is a security decision, not a
+# descriptive label like `relationship`, so a typo must fail loudly (ValueError) rather
+# than silently create a new, never-authorized level.
+KNOWN_ACCESS_LEVELS = ("owner", "household", "guest")
+
+
 def list_known_people(db_path: str) -> list[dict]:
     with closing(_connect(db_path)) as conn:
         rows = [dict(r) for r in conn.execute("SELECT * FROM known_people ORDER BY name")]
@@ -397,7 +478,8 @@ MAX_EMBEDDINGS_PER_PERSON = 8
 
 
 def enroll_known_person(db_path: str, name: str, embedding: list[float],
-                        relationship: str = "household", key: str | None = None) -> str:
+                        relationship: str = "household", key: str | None = None,
+                        access_level: str | None = None) -> str:
     """Registers a new known identity from one face embedding -- the enrollment step the
     owner triggers by approving an 'unrecognised face' review item and typing a name into
     its note field. Returns the person's key.
@@ -406,21 +488,46 @@ def enroll_known_person(db_path: str, name: str, embedding: list[float],
     separately approved before this one's threshold was reached), the embedding is added
     to that person instead of raising: two sightings of the same real person merging is
     the correct outcome, not an error.
+
+    access_level defaults to the column's own safe default ('household') for a brand new
+    person and is left untouched on a re-enrollment unless explicitly passed -- approving
+    a second sighting of someone already enrolled must never silently reset a
+    previously-granted 'owner' access back down.
     """
+    if access_level is not None and access_level not in KNOWN_ACCESS_LEVELS:
+        raise ValueError(f"access_level must be one of {KNOWN_ACCESS_LEVELS}")
     key = key or slugify_person_key(name)
     if get_known_person(db_path, key) is not None:
         add_person_embedding(db_path, key, embedding)
+        if access_level is not None:
+            set_person_access_level(db_path, key, access_level)
         return key
     now = _now()
     with closing(_connect(db_path)) as conn:
         conn.execute(
-            """INSERT INTO known_people (key, name, relationship, embeddings, sample_count,
-                                        created_at, updated_at)
-               VALUES (?, ?, ?, ?, 1, ?, ?)""",
-            (key, name, relationship, json.dumps([_l2_normalize(embedding)]), now, now),
+            """INSERT INTO known_people
+                   (key, name, relationship, embeddings, sample_count, access_level,
+                    created_at, updated_at)
+               VALUES (?, ?, ?, ?, 1, COALESCE(?, 'household'), ?, ?)""",
+            (key, name, relationship, json.dumps([_l2_normalize(embedding)]), access_level, now, now),
         )
         conn.commit()
     return key
+
+
+def set_person_access_level(db_path: str, key: str, access_level: str) -> bool:
+    """Changes what a known person is allowed to hear on an unattended voice terminal --
+    the owner's own explicit call (there is no tool or agent path that sets this on its
+    own), same reasoning as recording_preference being per-person policy, not inferred."""
+    if access_level not in KNOWN_ACCESS_LEVELS:
+        raise ValueError(f"access_level must be one of {KNOWN_ACCESS_LEVELS}")
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "UPDATE known_people SET access_level = ?, updated_at = ? WHERE key = ?",
+            (access_level, _now(), key),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def add_person_embedding(db_path: str, key: str, embedding: list[float]) -> bool:
@@ -565,3 +672,89 @@ def known_people_present(db_path: str, within_seconds: int = 120) -> list[dict]:
         {"key": k, "name": people[k]["name"], "relationship": people[k]["relationship"]}
         for k in keys if k in people
     ]
+
+
+def identity_on_camera(db_path: str, camera_key: str, within_seconds: int = 45) -> dict | None:
+    """The single query core/presence.py's gating decision reads: who, if anyone, is
+    *currently* confirmed in front of this camera.
+
+    Looks at only the most recent relevant event, not "was there an 'identified' event
+    in the window" -- a 'cleared' or 'unknown_person' event newer than the last
+    'identified' one means the confirmed person has since left frame or been replaced by
+    someone the house doesn't recognise, and presence must not keep trusting a stale
+    identification just because it's technically still inside the time window. This is
+    what makes 'confirmation is per-turn, not per-session' (presence.py's own docstring)
+    actually true rather than aspirational.
+    """
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=within_seconds)).isoformat()
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            """SELECT kind, person_key FROM vision_events
+               WHERE camera_key = ? AND at >= ?
+                 AND kind IN ('identified', 'unknown_person', 'cleared', 'person', 'pet')
+               ORDER BY id DESC LIMIT 1""",
+            (camera_key, cutoff),
+        ).fetchone()
+    if row is None or row["kind"] != "identified" or not row["person_key"]:
+        return None
+    person = get_known_person(db_path, row["person_key"])
+    if person is None:
+        return None
+    return {
+        "key": person["key"], "name": person["name"],
+        "access_level": person["access_level"], "relationship": person["relationship"],
+    }
+
+
+# --- terminal <-> camera mapping (which room a voice terminal's turn is gated by) ----
+
+def set_terminal_camera(db_path: str, device_id: str, camera_key: str) -> None:
+    """Assigns (or reassigns) which camera watches device_id's room. An upsert: a
+    terminal moved to a different room, or a camera added after its terminal already
+    exists, is a re-point rather than a conflict."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO terminal_cameras (device_id, camera_key, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(device_id) DO UPDATE SET
+                   camera_key = excluded.camera_key, updated_at = excluded.updated_at""",
+            (device_id, camera_key, _now()),
+        )
+        conn.commit()
+
+
+def get_terminal_camera(db_path: str, device_id: str) -> str | None:
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT camera_key FROM terminal_cameras WHERE device_id = ?", (device_id,)
+        ).fetchone()
+    return row["camera_key"] if row else None
+
+
+# --- pending camera view (one-shot handoff to the web UI's "show me X" window) ------
+
+def set_pending_camera_view(db_path: str, user_id: int, view: dict) -> None:
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO pending_camera_views (user_id, view_json, created_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   view_json = excluded.view_json, created_at = excluded.created_at""",
+            (user_id, json.dumps(view), _now()),
+        )
+        conn.commit()
+
+
+def pop_pending_camera_view(db_path: str, user_id: int) -> dict | None:
+    """One-shot: returns the staged view (if any) and clears it, so a slow poller can't
+    pop the same 'show me the kitchen' window open twice."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT view_json FROM pending_camera_views WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM pending_camera_views WHERE user_id = ?", (user_id,))
+        conn.commit()
+    return json.loads(row["view_json"])

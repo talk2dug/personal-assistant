@@ -1,7 +1,8 @@
 """core/vision.py: cameras, the motion-gated event log, and the identity layer on top of
-it -- known_people matching, unknown_faces dedup, and the asked/resolved lifecycle that
-gates an enrollment question. No GPU/ML dependency here: everything is plain sqlite plus
-numpy vector math on hand-written embeddings.
+it -- known_people matching, unknown_faces dedup, the asked/resolved lifecycle that
+gates an enrollment question, and the terminal-camera/identity_on_camera queries Room
+Presence & Identity gating (core/presence.py) reads. No GPU/ML dependency here:
+everything is plain sqlite plus numpy vector math on hand-written embeddings.
 """
 import pytest
 
@@ -33,6 +34,31 @@ def test_add_camera_is_an_upsert(db_path):
     vision.add_camera(db_path, "touch1", "Touch1", "http://new")
     cams = vision.list_cameras(db_path)
     assert len(cams) == 1 and cams[0]["url"] == "http://new"
+
+
+def test_get_camera_returns_none_when_missing(db_path):
+    assert vision.get_camera(db_path, "nope") is None
+
+
+def test_get_camera_returns_the_row(db_path):
+    vision.add_camera(db_path, "kitchen", "Kitchen", "http://x", location="kitchen")
+    assert vision.get_camera(db_path, "kitchen")["name"] == "Kitchen"
+
+
+def test_find_camera_matches_by_location(db_path):
+    vision.add_camera(db_path, "kitchen", "Kitchen", "http://x", location="kitchen")
+    found = vision.find_camera(db_path, "kitchen")
+    assert found is not None and found["key"] == "kitchen"
+
+
+def test_find_camera_falls_back_to_name_then_key(db_path):
+    vision.add_camera(db_path, "cam1", "Front Porch", "http://x")
+    assert vision.find_camera(db_path, "Front Porch")["key"] == "cam1"
+    assert vision.find_camera(db_path, "cam1")["key"] == "cam1"
+
+
+def test_find_camera_with_no_match_returns_none(db_path):
+    assert vision.find_camera(db_path, "attic") is None
 
 
 # --- cosine similarity -----------------------------------------------------------------
@@ -87,6 +113,47 @@ def test_embeddings_are_capped_per_person(db_path):
 
 def test_slugify_is_stable_across_case_and_spacing():
     assert vision.slugify_person_key("Dug") == vision.slugify_person_key(" dug ")
+
+
+# --- access_level (Room Presence & Identity) --------------------------------------------
+
+def test_enroll_defaults_access_level_to_household(db_path):
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0))
+    assert vision.get_known_person(db_path, "dug")["access_level"] == "household"
+
+
+def test_enroll_accepts_an_explicit_access_level(db_path):
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0), access_level="owner")
+    assert vision.get_known_person(db_path, "dug")["access_level"] == "owner"
+
+
+def test_enroll_rejects_an_invalid_access_level(db_path):
+    with pytest.raises(ValueError):
+        vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0), access_level="superuser")
+
+
+def test_re_enrolling_without_access_level_does_not_reset_it(db_path):
+    """Approving a second sighting of someone already enrolled must not silently reset a
+    previously-granted 'owner' access back down to the default."""
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0, 0.0), access_level="owner")
+    vision.enroll_known_person(db_path, "Dug", _vec(0.9, 0.1, 0.0))
+    assert vision.get_known_person(db_path, "dug")["access_level"] == "owner"
+
+
+def test_set_person_access_level(db_path):
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0))
+    assert vision.set_person_access_level(db_path, "dug", "owner") is True
+    assert vision.get_known_person(db_path, "dug")["access_level"] == "owner"
+
+
+def test_set_access_level_for_missing_person_returns_false(db_path):
+    assert vision.set_person_access_level(db_path, "nobody", "owner") is False
+
+
+def test_set_access_level_rejects_an_invalid_value(db_path):
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0))
+    with pytest.raises(ValueError):
+        vision.set_person_access_level(db_path, "dug", "superuser")
 
 
 # --- unknown faces ---------------------------------------------------------------------
@@ -151,3 +218,94 @@ def test_presence_now_still_counts_unknown_people(db_path):
     vision.record_event(db_path, "touch1", "unknown_person", detail="unknown_face:1")
     cams = vision.presence_now(db_path)
     assert cams["touch1"]["unknown_people"] == 1
+
+
+# --- terminal <-> camera mapping (Room Presence & Identity) ---------------------------
+
+def test_terminal_camera_roundtrip(db_path):
+    vision.add_camera(db_path, "touch1_cam", "Touch1 camera", "http://touch1.local:8080")
+    vision.set_terminal_camera(db_path, "touch1", "touch1_cam")
+    assert vision.get_terminal_camera(db_path, "touch1") == "touch1_cam"
+
+
+def test_unassigned_terminal_has_no_camera(db_path):
+    assert vision.get_terminal_camera(db_path, "jarvisaudio1") is None
+
+
+def test_set_terminal_camera_is_upsert(db_path):
+    vision.set_terminal_camera(db_path, "touch1", "cam_a")
+    vision.set_terminal_camera(db_path, "touch1", "cam_b")
+    assert vision.get_terminal_camera(db_path, "touch1") == "cam_b"
+
+
+# --- identity_on_camera: what presence.py actually reads -----------------------------
+
+def test_no_events_means_unconfirmed(db_path):
+    assert vision.identity_on_camera(db_path, "touch1_cam") is None
+
+
+def test_identified_event_resolves_to_the_known_person_row(db_path):
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0), access_level="owner")
+    vision.record_event(db_path, "touch1_cam", "identified", label="Dug", person_key="dug", confidence=0.9)
+
+    identity = vision.identity_on_camera(db_path, "touch1_cam")
+    assert identity is not None
+    assert identity["key"] == "dug"
+    assert identity["access_level"] == "owner"
+
+
+def test_unknown_person_after_identified_invalidates_immediately(db_path):
+    """The most recent event wins, not 'was there an identified event in the window' --
+    someone the house doesn't recognise stepping into frame after the owner leaves must
+    not keep reading as the owner."""
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0), access_level="owner")
+    vision.record_event(db_path, "touch1_cam", "identified", person_key="dug")
+    vision.record_event(db_path, "touch1_cam", "unknown_person")
+
+    assert vision.identity_on_camera(db_path, "touch1_cam") is None
+
+
+def test_cleared_event_invalidates_identity(db_path):
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0), access_level="owner")
+    vision.record_event(db_path, "touch1_cam", "identified", person_key="dug")
+    vision.record_event(db_path, "touch1_cam", "cleared")
+
+    assert vision.identity_on_camera(db_path, "touch1_cam") is None
+
+
+def test_stale_identified_event_outside_window_is_unconfirmed(db_path):
+    import sqlite3
+    from contextlib import closing
+    from datetime import datetime, timedelta, timezone
+
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0), access_level="owner")
+    event_id = vision.record_event(db_path, "touch1_cam", "identified", person_key="dug")
+
+    stale_at = (datetime.now(timezone.utc) - timedelta(seconds=999)).isoformat()
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("UPDATE vision_events SET at = ? WHERE id = ?", (stale_at, event_id))
+        conn.commit()
+
+    assert vision.identity_on_camera(db_path, "touch1_cam", within_seconds=45) is None
+
+
+def test_different_cameras_are_independent(db_path):
+    vision.enroll_known_person(db_path, "Dug", _vec(1.0, 0.0), access_level="owner")
+    vision.record_event(db_path, "cam_a", "identified", person_key="dug")
+
+    assert vision.identity_on_camera(db_path, "cam_a") is not None
+    assert vision.identity_on_camera(db_path, "cam_b") is None
+
+
+# --- pending camera view (the "show me X" one-shot handoff to the web UI) ------------
+
+def test_pending_camera_view_is_one_shot(db_path):
+    vision.set_pending_camera_view(db_path, 1, {"key": "kitchen", "name": "Kitchen", "location": "kitchen"})
+    assert vision.pop_pending_camera_view(db_path, 1) is not None
+    assert vision.pop_pending_camera_view(db_path, 1) is None
+
+
+def test_pending_camera_view_is_per_user(db_path):
+    vision.set_pending_camera_view(db_path, 1, {"key": "kitchen"})
+    assert vision.pop_pending_camera_view(db_path, 2) is None
+    assert vision.pop_pending_camera_view(db_path, 1) is not None

@@ -21,3 +21,7 @@ fpdf2>=2.8.0
 # load inside scripts/vision_worker.py's own .venv-vision. See core/detector.py's
 # docstring for why that split exists.
 numpy>=1.26.0
+# SSH for the dev-team ops-plan workflow (assistant/core/ssh_ops.py). Was previously used
+# by device/deploy_to_pi.py and scripts/scan_network_media.py without ever being declared
+# here -- both only worked because it happened to already be installed by hand.
+paramiko>=3.4.0

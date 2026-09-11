@@ -78,13 +78,20 @@ def claim(device_id: str, score: float, window_ms: int = DEFAULT_WINDOW_MS,
         if rival_best is not None and rival_best >= score + margin:
             # Someone clearly closer has already claimed it -- no reason to keep waiting
             # out the rest of the window; that's a faster "go back to sleep" for the loser.
-            with _lock:
-                _claims.pop(device_id, None)
+            # Deliberately does NOT pop this device's own entry here (see the note below
+            # the final candidates check for why self-popping is the actual bug this
+            # replaced) -- it just ages out via _prune_stale like every other claim.
             return False
 
     with _lock:
+        # Read-only: an earlier version popped this device's own entry here, which raced
+        # a concurrent rival whose window happened to close a moment later -- that rival
+        # would then build its own candidates from a _claims dict missing this entry,
+        # occasionally picking itself as the winner even after correctly losing to a
+        # higher score moments before. Every entry -- everyone's, including this
+        # device's -- only ever leaves _claims via _prune_stale's age check, never a
+        # self-removal tied to one particular caller finishing first.
         candidates = [(s, d) for d, (s, t) in _claims.items() if t >= now - window_s]
-        _claims.pop(device_id, None)
     if not candidates:
         return True
     # Ties (a genuinely simultaneous, equal-confidence hear) go to whichever device_id

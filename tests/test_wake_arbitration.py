@@ -46,10 +46,16 @@ def test_close_scores_within_margin_go_to_the_higher_one_without_flapping(monkey
     results = {}
 
     def run(device_id, score):
-        results[device_id] = wake_arbitration.claim(device_id, score, window_ms=100, margin=0.05)
+        results[device_id] = wake_arbitration.claim(device_id, score, window_ms=400, margin=0.05)
 
     # Within the margin of each other -- neither should "clearly" beat the other during
-    # the wait, so the window closes and the strictly higher score wins.
+    # the wait, so the window closes and the strictly higher score wins. This genuinely
+    # flaked before claim() stopped self-popping a device's own entry right after
+    # computing its candidates (see wake_arbitration.py) -- whichever thread's window
+    # closed first would remove itself from _claims before the other thread's own
+    # candidates read ran, occasionally handing the loser a win. window_ms is left
+    # generous, matching DEFAULT_WINDOW_MS, purely to give two real OS threads room
+    # rather than to paper over that race.
     t1 = threading.Thread(target=run, args=("touch1", 0.60))
     t2 = threading.Thread(target=run, args=("laptop1", 0.61))
     t1.start(); t2.start()

@@ -431,6 +431,30 @@ def test_scheduler_registers_no_agent_jobs_when_disabled(tmp_path):
         started.shutdown(wait=False)
 
 
+def test_scheduler_registers_the_stop_loss_enforcer_alongside_the_market_poll(tmp_path):
+    """check_stops() has to actually run on a timer, not just exist as a function nobody
+    calls -- that was the entire point of adding it (see paper_trading.check_stops's own
+    docstring): a stop-loss the model states at entry but nothing ever re-checks is not
+    real exit discipline."""
+    from assistant.core import db, scheduler
+
+    path = str(tmp_path / "sched.db")
+    db.init_db(path)
+    business_db.init_business_db(path)
+    db.upsert_user(path, "111", "Dug", "owner")
+
+    started = scheduler.start(
+        path, notify=lambda *a: None, poll_interval_seconds=3600,
+        market_api_key="fake-key", market_poll_seconds=120,
+    )
+    try:
+        job_ids = {j.id for j in started.get_jobs()}
+        assert "market_poll" in job_ids
+        assert "paper_stop_loss" in job_ids
+    finally:
+        started.shutdown(wait=False)
+
+
 # --- ops-plan workflow ----------------------------------------------------------
 
 class FakeSSHOps:

@@ -129,8 +129,139 @@ class TestParseOrders:
         assert paper_trading.parse_orders(text) == [{"side": "buy", "code": "SOL", "usd": 2}]
 
 
+def test_stop_loss_and_take_profit_persist_on_the_position(db):
+    r = paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 1000, "stop_loss": 180.0, "take_profit": 240.0}])
+    assert not r["rejections"]
+    pos = r["portfolio"]["positions"][0]
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT stop_loss, take_profit FROM paper_positions WHERE code='SOL'").fetchone()
+    conn.close()
+    assert row["stop_loss"] == 180.0
+    assert row["take_profit"] == 240.0
+
+
+def test_adding_to_a_position_keeps_the_existing_levels_if_none_restated(db):
+    paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 500, "stop_loss": 180.0, "take_profit": 240.0}])
+    paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 500}])
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT stop_loss, take_profit FROM paper_positions WHERE code='SOL'").fetchone()
+    conn.close()
+    assert row["stop_loss"] == 180.0
+    assert row["take_profit"] == 240.0
+
+
+def test_adding_to_a_position_moves_the_level_when_explicitly_restated(db):
+    paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 500, "stop_loss": 180.0}])
+    paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 500, "stop_loss": 190.0}])
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT stop_loss FROM paper_positions WHERE code='SOL'").fetchone()
+    conn.close()
+    assert row["stop_loss"] == 190.0
+
+
+def test_check_stops_closes_a_position_that_breached_its_stop_loss(db):
+    paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 1000, "stop_loss": 180.0}])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE market_coins SET rate = 170.0 WHERE code = 'SOL'")
+    conn.commit(); conn.close()
+
+    r = paper_trading.check_stops(db)
+
+    assert len(r["fills"]) == 1
+    assert r["fills"][0]["code"] == "SOL"
+    assert r["portfolio"]["positions"] == []
+    trades = paper_trading.recent_trades(db, limit=1)
+    assert trades[0]["exit_kind"] == "stop_loss"
+    assert trades[0]["staff_key"] == "system:check_stops"
+
+
+def test_check_stops_closes_a_position_that_hit_its_take_profit(db):
+    paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 1000, "take_profit": 220.0}])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE market_coins SET rate = 230.0 WHERE code = 'SOL'")
+    conn.commit(); conn.close()
+
+    r = paper_trading.check_stops(db)
+
+    assert len(r["fills"]) == 1
+    assert paper_trading.recent_trades(db, limit=1)[0]["exit_kind"] == "take_profit"
+
+
+def test_check_stops_leaves_a_position_alone_when_nothing_is_breached(db):
+    paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 1000, "stop_loss": 180.0, "take_profit": 240.0}])
+    r = paper_trading.check_stops(db)
+    assert r["fills"] == []
+    assert len(r["portfolio"]["positions"]) == 1
+
+
+def test_check_stops_ignores_positions_with_no_levels_set(db):
+    paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 1000}])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE market_coins SET rate = 1.0 WHERE code = 'SOL'")  # would "breach" anything
+    conn.commit(); conn.close()
+    r = paper_trading.check_stops(db)
+    assert r["fills"] == []
+
+
+def test_a_discretionary_sell_with_no_levels_is_classified_discretionary(db):
+    paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 1000}])
+    paper_trading.execute_orders(db, [{"side": "sell", "code": "SOL", "qty": "all"}])
+    assert paper_trading.recent_trades(db, limit=1)[0]["exit_kind"] == "discretionary"
+
+
+def test_a_coin_stopped_out_cannot_be_rebought_during_the_cooldown(db):
+    paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 1000, "stop_loss": 180.0}])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE market_coins SET rate = 170.0 WHERE code = 'SOL'")
+    conn.commit(); conn.close()
+    paper_trading.check_stops(db)  # stops out, exit_kind='stop_loss'
+
+    r = paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 100}])
+
+    assert not r["fills"]
+    assert "cooldown" in r["rejections"][0]["reason"]
+
+
+def test_a_coin_closed_at_take_profit_can_be_rebought_immediately(db):
+    paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 1000, "take_profit": 220.0}])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE market_coins SET rate = 230.0 WHERE code = 'SOL'")
+    conn.commit(); conn.close()
+    paper_trading.check_stops(db)  # closes at take-profit, not a stop-loss
+
+    r = paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 100}])
+
+    assert r["fills"]
+
+
+def test_cooldown_expires_after_the_configured_window(db, monkeypatch):
+    paper_trading.execute_orders(
+        db, [{"side": "buy", "code": "SOL", "usd": 1000, "stop_loss": 180.0}])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE market_coins SET rate = 170.0 WHERE code = 'SOL'")
+    conn.commit(); conn.close()
+    paper_trading.check_stops(db)
+
+    monkeypatch.setattr(paper_trading, "STOP_LOSS_COOLDOWN_HOURS", 0.0)
+    r = paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 100}])
+
+    assert r["fills"]
+
+
 def test_order_instructions_template_survives_formatting():
     """It embeds JSON, which is exactly what broke the verdict template."""
     out = paper_trading.ORDER_INSTRUCTIONS.format(
-        fee_pct=paper_trading.DEFAULT_FEE_PCT, max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY)
+        fee_pct=paper_trading.DEFAULT_FEE_PCT, max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
+        cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS)
     assert '"side": "buy"' in out and "0.1" in out

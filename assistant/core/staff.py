@@ -634,6 +634,23 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 if listings:
                     lines.append("  tokens entering/leaving the tracked set (24h): "
                                  + ", ".join(f"{l['code']} {l['event']}" for l in listings))
+                # The whole tracked universe, not just today's movers -- a real, confirmed
+                # incident: employees were told to "only trade coins in the tracked set"
+                # with no way to actually check that before proposing a trade (no market
+                # tool exists for a research-tier employee to call), so 83 of 84 order
+                # rejections in one stretch were exactly this, wasting a third of every
+                # attempt. This is coverage, not a top-250-by-market-cap list: LiveCoinWatch
+                # is missing several real, large tokens entirely -- called out explicitly
+                # so "obviously top-100" isn't assumed to mean "on this feed".
+                tracked = market_data.list_tracked_codes(db_path)
+                lines.append(f"  TRADEABLE ON THIS FEED ({len(tracked)} codes) -- propose "
+                             "trades ONLY from this list, anything else will be rejected:")
+                lines.append("    " + ", ".join(tracked))
+                lines.append(
+                    "  KNOWN GAPS: TAO, WLD, AERO, MNT, ETHFI, TIA are real, large tokens "
+                    "but are NOT on this feed at any rank -- treat as watch-only, no matter "
+                    "the catalyst. 'JUP' on this feed is an unrelated $300K micro-coin, NOT "
+                    "the real Jupiter DEX token -- do not trade it expecting the latter.")
                 parts.append("\n".join(lines))
         except Exception as e:
             parts.append(f"CRYPTO FEED: unavailable ({type(e).__name__}). "
@@ -651,10 +668,17 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
             if snap["positions"]:
                 lines.append("  open positions:")
                 for pos in snap["positions"]:
+                    # The committed stop/target, actually persisted and enforced by
+                    # check_stops() between your runs -- not something you have to
+                    # remember or re-derive from the current unrealized %. "none set"
+                    # means this position has no automatic exit and can drift unmanaged.
+                    sl = _fmt_price(pos["stop_loss"]) if pos.get("stop_loss") else None
+                    tp = _fmt_price(pos["take_profit"]) if pos.get("take_profit") else None
+                    plan = f"stop {sl or 'none set'} / target {tp or 'none set'}"
                     lines.append(
                         f"    {pos['code']} {pos['qty']:.6g} @ avg {_fmt_price(pos['avg_cost'])}"
                         f" now {_fmt_price(pos['price'])} -> {pos['unrealized_pct']:+.2f}%"
-                        f" (${pos['unrealized']:+,.2f})")
+                        f" (${pos['unrealized']:+,.2f}) | {plan}")
             else:
                 lines.append("  open positions: none — fully in cash")
             if snap["unpriced"]:
@@ -668,8 +692,10 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 lines.append("  recent fills:")
                 for f in fills:
                     r = f" realised ${f['realized']:+,.2f}" if f["realized"] is not None else ""
+                    kind = f" [{f['exit_kind']}]" if f.get("exit_kind") else ""
+                    why = f" -- {f['reason']}" if f.get("reason") else ""
                     lines.append(f"    {f['at'][11:16]}Z {f['side']} {f['qty']:.6g} {f['code']}"
-                                 f" @ {_fmt_price(f['price'])}{r}")
+                                 f" @ {_fmt_price(f['price'])}{r}{kind}{why}")
             rejects = paper_trading.recent_rejections(db_path, limit=4)
             if rejects:
                 lines.append("  orders REJECTED (these did not happen):")
@@ -754,7 +780,8 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800) -
             from . import paper_trading
             prompt += paper_trading.ORDER_INSTRUCTIONS.format(
                 fee_pct=paper_trading.DEFAULT_FEE_PCT,
-                max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY)
+                max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
+                cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS)
 
         if emp["capability_tier"] == "execute":
             if not hasattr(llm, "engineer"):

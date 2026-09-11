@@ -64,6 +64,60 @@ class TestFeedGranting:
         assert staff.build_feed_briefing(db, "") == ""
 
 
+class TestFeedBriefingContent:
+    """A real, confirmed incident: employees were told to "only trade coins in the
+    tracked set" and to set a numeric stop-loss/take-profit, with no actual way to check
+    the former and nothing that ever showed the latter back to them. These pin that the
+    briefing now hands over the real tracked list and each position's committed plan.
+    """
+
+    @pytest.fixture
+    def market_db(self, db):
+        import sqlite3
+        from datetime import datetime, timezone
+        from assistant.core import market_data
+        market_data.init_market_db(db)
+        conn = sqlite3.connect(db)
+        now = datetime.now(timezone.utc).isoformat()
+        for code, rank, rate in (("BTC", 1, 80_000.0), ("SOL", 7, 200.0)):
+            conn.execute(
+                """INSERT INTO market_coins (code, name, rank, rate, present,
+                                             first_seen, last_seen, updated_at)
+                   VALUES (?,?,?,?,1,?,?,?)""", (code, code, rank, rate, now, now, now))
+        conn.execute(
+            "INSERT INTO market_polls (ok, coins, at) VALUES (1, 2, ?)", (now,))
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_market_briefing_lists_every_tradeable_code(self, market_db):
+        out = staff.build_feed_briefing(market_db, "market")
+        assert "TRADEABLE ON THIS FEED" in out
+        assert "BTC" in out and "SOL" in out
+        assert "TAO" in out  # named explicitly as a known gap, not just absent
+
+    def test_paper_briefing_shows_the_committed_stop_and_target(self, market_db):
+        from assistant.core import paper_trading
+        paper_trading.execute_orders(
+            market_db, [{"side": "buy", "code": "SOL", "usd": 100, "stop_loss": 180.0, "take_profit": 240.0}])
+        out = staff.build_feed_briefing(market_db, "paper")
+        assert "stop $180" in out or "stop $180.00" in out
+        assert "target $240" in out or "target $240.00" in out
+
+    def test_paper_briefing_flags_a_position_with_no_exit_plan(self, market_db):
+        from assistant.core import paper_trading
+        paper_trading.execute_orders(market_db, [{"side": "buy", "code": "SOL", "usd": 100}])
+        out = staff.build_feed_briefing(market_db, "paper")
+        assert "none set" in out
+
+    def test_paper_briefing_shows_the_reason_and_exit_kind_on_a_fill(self, market_db):
+        from assistant.core import paper_trading
+        paper_trading.execute_orders(
+            market_db, [{"side": "buy", "code": "SOL", "usd": 100, "reason": "momentum breakout"}])
+        out = staff.build_feed_briefing(market_db, "paper")
+        assert "momentum breakout" in out
+
+
 class TestColleagueBriefing:
     def test_an_employee_cannot_be_briefed_from_itself(self, db):
         key = staff.hire(db, "Trader", "Fifteen years trading experience across spot and derivatives markets.")["key"]

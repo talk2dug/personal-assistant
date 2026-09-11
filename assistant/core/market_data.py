@@ -262,6 +262,17 @@ def refresh(db_path: str, api_key: str, limit: int = 250,
 
 # --- reads (what the agents and tools use) ------------------------------------
 
+def list_tracked_codes(db_path: str) -> list[str]:
+    """Every ticker this feed can currently price, sorted by rank. The ground truth for
+    "can I actually trade this" -- an employee has no market-data tool to check with
+    itself (research-tier grants only WebSearch), so this has to be handed to it directly
+    rather than assumed from "top 250 by market cap" reasoning, which real coverage
+    doesn't match (LiveCoinWatch is missing several real, large tokens entirely)."""
+    with closing(_connect(db_path)) as conn:
+        return [r["code"] for r in conn.execute(
+            "SELECT code FROM market_coins WHERE present = 1 ORDER BY rank")]
+
+
 def snapshot(db_path: str, codes: list[str] | None = None, limit: int = 25) -> list[dict]:
     sql = "SELECT * FROM market_coins"
     params: list = []

@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import (
     agents, business_db, db, github_client, kitchen_db, location, mail_triage, market_data,
-    personal_agents, personal_db, staff,
+    paper_trading, personal_agents, personal_db, staff,
 )
 from .engine import handle_message
 from .finance import CADENCE_DAYS
@@ -495,6 +495,24 @@ def start(
             next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
         )
         logger.info("market feed: polling top %d every %ds", market_track_limit, market_poll_seconds)
+
+        # Mechanically enforces the paper-trading desk's stored stop-loss/take-profit
+        # levels against each fresh price poll -- the actual fix for "lack of numeric
+        # exit discipline": a position closes the moment its level is hit, rather than
+        # waiting up to 5 minutes for the day-trader's own next cycle to notice (or not).
+        # Runs right after the market poll it depends on, on the same cadence -- checking
+        # faster than prices actually refresh would just repeat the same comparison.
+        def _check_stops_tick():
+            result = paper_trading.check_stops(db_path)
+            for fill in result.get("fills", []):
+                logger.info("paper trading: auto-closed %s %s @ %s (%s)",
+                           fill["code"], fill.get("realized"), fill["price"], fill["reason"])
+
+        scheduler.add_job(
+            _guarded_simple("paper_stop_loss", _check_stops_tick), "interval",
+            seconds=market_poll_seconds, id="paper_stop_loss",
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=15),
+        )
 
     scheduler.start()
     return scheduler

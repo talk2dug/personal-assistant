@@ -255,10 +255,22 @@ def build_era_context(cfg) -> EraContext | None:
 
 
 def build_recipe_context(cfg) -> RecipeContext | None:
+    """A third-party cloud MCP server, same class of dependency as Era/CalDAV -- but
+    unlike those, a failure here must only disable recipe tools, never take down the
+    whole assistant (same reasoning as build_phone_context's docstring). A real startup
+    once looked hung for ~90s because phone and Kroger's own (unrelated) MCP checks each
+    took their full retry/timeout to fail before this one's turn came; this one succeeded
+    in under 2s once it ran -- but nothing before this fix stopped a genuinely-down
+    recipe API from crashing the entire process instead of just going without recipes.
+    """
     if not cfg.recipe_api_key:
         return None
-    mcp_client = MCPClient(cfg.recipe_mcp_url, cfg.recipe_api_key)
-    discovered = mcp_client.list_tools()
+    try:
+        mcp_client = MCPClient(cfg.recipe_mcp_url, cfg.recipe_api_key)
+        discovered = mcp_client.list_tools()
+    except Exception as e:
+        logger.warning("Recipe API unreachable at startup (%s) — recipe tools disabled this session", e)
+        return None
     recipe_tools = [
         {
             "type": "function",

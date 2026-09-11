@@ -761,7 +761,12 @@ BUSINESS_TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "employee_work_history",
-        "description": "Recent assignments and deliverables, optionally for one employee.",
+        "description": (
+            "Recent assignments and deliverables, optionally for one employee. This is "
+            "the live, real state (not memory of what was said earlier) -- always check "
+            "here before telling the owner where something stands. Includes anything "
+            "still sitting queued, not yet started."
+        ),
         "parameters": {"type": "object", "properties": {
             "employee": {"type": "string"},
             "limit": {"type": "integer"},
@@ -1497,8 +1502,21 @@ class BusinessClient:
                     "can": staff.TIER_DESCRIPTIONS.get(emp["capability_tier"], "")}
 
         if name == "employee_work_history":
-            return {"work": staff.recent_work(
-                db_path, key=arguments.get("employee") or None,
-                limit=int(arguments.get("limit") or 20))}
+            employee_key = arguments.get("employee") or None
+            work = staff.recent_work(db_path, key=employee_key, limit=int(arguments.get("limit") or 20))
+            # staff_work only gets a row once a job is actually claimed -- one still
+            # sitting 'queued' in work_queue is otherwise invisible to this tool, so
+            # "what's happening with X" could go unanswered even though the real state
+            # (queued, not started) is known and live. Surfaced separately rather than
+            # merged into `work` since a queued job has no deliverable/status of its own.
+            queued = []
+            if self.work_queue is not None:
+                queued = [
+                    {"employee": j["employee_key"], "assignment": j["assignment"][:200],
+                     "queued_at": j["created_at"]}
+                    for j in self.work_queue.jobs(status="queued", limit=20)
+                    if not employee_key or j["employee_key"] == employee_key
+                ]
+            return {"work": work, "queued": queued}
 
         return {"error": f"unknown business tool {name}"}

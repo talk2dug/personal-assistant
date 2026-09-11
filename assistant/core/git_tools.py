@@ -106,5 +106,9 @@ GIT_SYSTEM_NOTE = (
     "what's on main, so calling it does not execute immediately — it stages the action "
     "and you must clearly state which PR and describe what merging it will do, then ask "
     "the owner to explicitly confirm before it happens. Never claim a PR is merged "
-    "unless you actually called git_merge_pr and it was confirmed."
+    "unless you actually called git_merge_pr and it was confirmed. A PR is not 'done' "
+    "just because you opened it, either — check git_get_pr_status yourself before "
+    "reporting it as finished; git_merge_pr itself now refuses to merge anything whose "
+    "CI isn't fully green and mergeable, so 'opened' and 'ready to merge' are not the "
+    "same claim."
 )

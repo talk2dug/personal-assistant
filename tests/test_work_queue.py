@@ -6,7 +6,7 @@ exactly the "Jarvis went quiet and nobody found out" gap task 10 exists to close
 """
 import pytest
 
-from assistant.core import db, staff, work_queue
+from assistant.core import business_db, db, staff, work_queue
 from assistant.core.work_queue import WorkQueue
 
 
@@ -271,6 +271,148 @@ class TestCadenceExecution:
 
         assert alerts == []
         assert queue.job(queue_id)["status"] in ("done", "failed")
+
+
+class TestReconcileOrphaned:
+    """A row still 'running' after a restart is not "in progress" -- this queue drains
+    strictly one job at a time, so nothing legitimately survives a crash mid-job. A real
+    incident: 10 staff_work rows sat 'running' for 3-6 days because nothing ever
+    reconciled them."""
+
+    def test_reconcile_fails_a_row_stuck_running(self, queue, db_path):
+        key = _hire(db_path)
+        queue_id = queue.submit(key, "task")
+        queue._claim_next()  # marks it 'running', simulating a crash mid-job
+        assert queue.job(queue_id)["status"] == "running"
+
+        n = work_queue.reconcile_orphaned(db_path)
+
+        assert n == 1
+        row = queue.job(queue_id)
+        assert row["status"] == "failed"
+        assert "orphaned" in row["error"]
+
+    def test_reconcile_leaves_queued_and_done_rows_alone(self, queue, db_path):
+        key = _hire(db_path)
+        queue.llm = FakeLLM()
+        already_done = queue.submit(key, "task two")
+        queue.tick()  # drains and completes it before the next one is even submitted
+        still_queued = queue.submit(key, "task one")
+
+        n = work_queue.reconcile_orphaned(db_path)
+
+        assert n == 0
+        assert queue.job(still_queued)["status"] == "queued"
+        assert queue.job(already_done)["status"] == "done"
+
+
+class TestOnDemandRetryAndContractorHandoff:
+    """The "never say die" mechanism: an on_demand failure must not just sit there --
+    it retries the same employee (with the failure appended as context), then hands off
+    to a temporary contractor, and only escalates to the owner once that's exhausted."""
+
+    def test_retries_then_hires_a_contractor_then_escalates_once(self, queue, db_path, owner_id):
+        sent = []
+        queue.llm = FakeLLM(raises=RuntimeError("boom"))
+        queue.notify = lambda chat_id, text: sent.append(text)
+        key = _hire(db_path, "Senior Developer")
+        queue.submit(key, "a hard task", owner_user_id=owner_id)
+
+        queue.tick()
+
+        # attempt 1 (orig) -> retry 2 -> retry 3 -> hire contractor -> attempt 4 -> escalate.
+        # Four real runs recorded (one per attempt, contractor's included), one notification.
+        assert len(staff.recent_work(db_path)) == 4
+        assert len(sent) == 1
+        assert "failed after 4 attempt" in sent[0]
+        assert "contractor" in sent[0]
+
+    def test_a_contractor_is_hired_with_the_same_department_after_the_third_failure(self, queue, db_path, owner_id):
+        queue.llm = FakeLLM(raises=RuntimeError("boom"))
+        key = _hire(db_path, "Senior Developer")
+        queue.submit(key, "a hard task", owner_user_id=owner_id)
+
+        queue.tick()
+
+        contractors = [e for e in staff.list_staff(db_path) if "(Contractor)" in e["title"]]
+        assert len(contractors) == 1
+        assert contractors[0]["department"] == staff.get_staff(db_path, key)["department"]
+
+    def test_succeeding_on_a_retry_notifies_success_not_failure(self, queue, db_path, owner_id):
+        sent = []
+        attempts = {"n": 0}
+
+        class FlakyLLM:
+            def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
+                attempts["n"] += 1
+                if attempts["n"] < 2:
+                    raise RuntimeError("transient failure")
+                return "fixed it on the second try"
+
+        queue.llm = FlakyLLM()
+        queue.notify = lambda chat_id, text: sent.append(text)
+        key = _hire(db_path)
+        queue.submit(key, "a flaky task", owner_user_id=owner_id)
+
+        queue.tick()
+
+        assert len(sent) == 1
+        assert "done" in sent[0]
+        assert "fixed it on the second try" in sent[0]
+
+    def test_cadence_jobs_are_never_retried_even_on_failure(self, queue, db_path):
+        key = staff.hire(db_path, "Upsilon", "Ten years of full-stack experience.",
+                         alert_policy="never")["key"]
+        queue.llm = FakeLLM(raises=RuntimeError("backend down"))
+        queue.submit(key, "scheduled check-in", kind="cadence")
+
+        queue.tick()
+
+        assert len(staff.recent_work(db_path, key=key)) == 1
+
+    def test_an_unknown_employee_is_never_retried(self, queue, db_path):
+        """No employee to copy a department from or requeue against -- retrying would
+        just fail identically forever, so this must escalate immediately instead."""
+        queue.llm = FakeLLM()
+        queue.submit("nobody_hired", "do a thing")
+
+        queue.tick()
+
+        assert work_queue.WorkQueue(db_path).jobs()[0]["status"] == "failed"
+        assert staff.list_staff(db_path, include_released=True) == []
+
+
+class TestPRVerifiedNotification:
+    """A coding task's success message must reflect the PR's real, live CI state --
+    never the employee's own unverified "done, tests pass" claim."""
+
+    def test_reports_the_pr_s_real_ci_status_not_the_employee_s_claim(self, queue, db_path, owner_id):
+        business_db.init_business_db(db_path)
+        sent = []
+
+        class FakeGitOps:
+            def get_pr_status(self, pr_number):
+                return {"ok": True, "checks": [
+                    {"name": "backend-tests", "status": "completed", "conclusion": "failure"}]}
+
+        queue.git_ops_client = FakeGitOps()
+        queue.llm = FakeLLM(output="all done, tests pass, ready to merge!")
+        queue.notify = lambda chat_id, text: sent.append(text)
+        key = _hire(db_path)
+        queue.submit(key, "ship it", owner_user_id=owner_id)
+        item = queue._claim_next()
+        # Simulate the employee having opened a real PR mid-run, the same way engine.py
+        # logs a git_pull_requests-ref review item for every git_open_pr call.
+        business_db.create_review_item(
+            db_path, owner_id, title="PR #99", kind="other", source_agent="git",
+            ref_table="git_pull_requests", ref_id=99)
+
+        queue._execute(item)
+
+        assert len(sent) == 1
+        assert "PR #99" in sent[0]
+        assert "failure" in sent[0]
+        assert "tests pass" not in sent[0]  # the employee's own unverified claim never ships
 
 
 class TestHasPending:

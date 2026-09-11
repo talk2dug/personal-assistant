@@ -319,7 +319,65 @@ def test_merge_pr_calls_the_github_api(client):
     client._http = FakeHTTP()
     result = client.merge_pr(42, merge_method="squash")
     assert result == {"ok": True, "merged": True, "sha": "def456"}
-    assert client._http.calls[0] == ("PUT", "/repos/owner/repo/pulls/42/merge", {"merge_method": "squash"})
+    # FakeHTTP's default GET already reports mergeable=True and green checks, so the
+    # pre-merge re-verification passes and the PUT still happens -- just no longer first.
+    assert ("PUT", "/repos/owner/repo/pulls/42/merge", {"merge_method": "squash"}) in client._http.calls
+
+
+def test_merge_pr_refuses_when_ci_is_not_green(client):
+    class RedCI(FakeHTTP):
+        def get(self, path):
+            self.calls.append(("GET", path, None))
+            if "check-runs" in path:
+                return FakeResponse(200, {"check_runs": [
+                    {"name": "backend-tests", "status": "completed", "conclusion": "failure"}]})
+            return FakeResponse(200, {
+                "state": "open", "mergeable": True, "merged": False,
+                "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
+            })
+
+    client._http = RedCI()
+    result = client.merge_pr(42)
+    assert result["ok"] is False
+    assert "not 100% green" in result["error"]
+    assert not any(call[0] == "PUT" for call in client._http.calls)
+
+
+def test_merge_pr_refuses_when_not_cleanly_mergeable(client):
+    class Unmergeable(FakeHTTP):
+        def get(self, path):
+            self.calls.append(("GET", path, None))
+            if "check-runs" in path:
+                return FakeResponse(200, {"check_runs": [
+                    {"name": "backend-tests", "status": "completed", "conclusion": "success"}]})
+            return FakeResponse(200, {
+                "state": "open", "mergeable": False, "merged": False,
+                "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
+            })
+
+    client._http = Unmergeable()
+    result = client.merge_pr(42)
+    assert result["ok"] is False
+    assert "needs a rebase" in result["error"]
+    assert not any(call[0] == "PUT" for call in client._http.calls)
+
+
+def test_merge_pr_refuses_when_mergeable_still_unknown(client):
+    class StillComputing(FakeHTTP):
+        def get(self, path):
+            self.calls.append(("GET", path, None))
+            if "check-runs" in path:
+                return FakeResponse(200, {"check_runs": [
+                    {"name": "backend-tests", "status": "completed", "conclusion": "success"}]})
+            return FakeResponse(200, {
+                "state": "open", "mergeable": None, "merged": False,
+                "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
+            })
+
+    client._http = StillComputing()
+    result = client.merge_pr(42)
+    assert result["ok"] is False
+    assert not any(call[0] == "PUT" for call in client._http.calls)
 
 
 def test_call_tool_dispatches_by_name(client):

@@ -309,6 +309,17 @@ def compile_system_prompt(title: str, job_description: str, department: str,
                    "flag anything you are unsure about rather than guessing."),
     }.get(seniority, "You are competent and careful.")
 
+    persistence_line = (
+        "- You do not stop at the first obstacle and hand back 'I couldn't do it'. "
+        "Diagnose the actual problem, try a different approach, and keep working the "
+        "task through to a real result. If something is genuinely missing -- a "
+        "capability, access, or information only the owner has -- use "
+        "request_capability to ask for exactly that, specifically, rather than "
+        "quietly giving up or guessing around it. Only report the task as blocked "
+        "after you've actually tried to solve it, not instead of trying.\n"
+        if tier == "execute" else ""
+    )
+
     return (
         f"You are {title}, working for the owner of a small maker business.\n\n"
         f"YOUR ROLE, as hired:\n{job_description.strip()}\n\n"
@@ -321,6 +332,7 @@ def compile_system_prompt(title: str, job_description: str, department: str,
         "- You state what you actually did. If you could not verify something, you say "
         "so rather than presenting a guess as fact. A confident wrong answer costs more "
         "than an honest 'I don't know'.\n"
+        f"{persistence_line}"
         "- You are concise. The owner is busy and reads everything you write.\n"
         "- If the assignment is underspecified in a way that changes the answer, say "
         "which detail you need instead of inventing it."
@@ -781,6 +793,28 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800) -
             "output": output, "error": error}
 
 
+def reconcile_orphaned_work(db_path: str) -> int:
+    """Fails any staff_work row still stuck 'running' -- this system runs one
+    employee assignment at a time in this process, so nothing can legitimately
+    still be 'running' after a restart; a row like that is proof the process died
+    mid-run and nobody ever followed up on it.
+
+    Call once at startup, before anything new is assigned. A real, confirmed
+    incident: 10 rows sat 'running' for 3-6 days with finished_at still NULL,
+    silently invisible to any status check, because nothing ever reconciled them.
+    """
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """UPDATE staff_work SET status = 'failed',
+                   error = 'orphaned: process restarted while this was running',
+                   finished_at = ? WHERE status = 'running'""",
+            (_now(),))
+        conn.commit()
+        if cur.rowcount:
+            logger.warning("reconciled %d orphaned staff_work row(s) stuck at 'running'", cur.rowcount)
+        return cur.rowcount
+
+
 def recent_work(db_path: str, key: str | None = None, limit: int = 20) -> list[dict]:
     sql = """SELECT w.*, s.title, s.key FROM staff_work w
              JOIN staff s ON s.id = w.staff_id"""
@@ -963,7 +997,7 @@ def _alert_allowed(row, cooldown_min: int) -> bool:
     return datetime.now(timezone.utc) - last >= timedelta(minutes=cooldown_min)
 
 
-def format_alert_text(headline: str, body: str, urgency: str, person: dict) -> str:
+def format_alert_text(headline: str, body: str, urgency: str, person: dict, max_body: int = 1200) -> str:
     """The exact text one employee escalation becomes on the owner's phone.
 
     Shared so the message reads identically regardless of which caller actually delivers
@@ -971,10 +1005,16 @@ def format_alert_text(headline: str, body: str, urgency: str, person: dict) -> s
     run_due is called with no work_queue), and work_queue.py's cadence-result handler
     (used when it is) all format through this one function rather than three copies that
     could quietly drift apart.
+
+    max_body defaults to room enough for a real alert body -- the payload the owner
+    explicitly configured alert_policy to be woken up for. A run-failure notice is not
+    that: the owner asked to be told *that* something broke, not to be handed the raw
+    stack trace unprompted, so that call site passes a much smaller max_body and lets
+    him ask for the rest (employee_work_history has the full record).
     """
     prefix = {"high": "URGENT", "normal": "", "low": "FYI"}.get(urgency, "")
     title = f"{person['title']}: {headline}".strip()
-    return f"{prefix + ' - ' if prefix else ''}{title}\n\n{(body or '').strip()[:1200]}"
+    return f"{prefix + ' - ' if prefix else ''}{title}\n\n{(body or '').strip()[:max_body]}"
 
 
 def handle_cadence_outcome(db_path: str, person: dict, outcome: dict, notify=None) -> dict:
@@ -1004,8 +1044,9 @@ def handle_cadence_outcome(db_path: str, person: dict, outcome: dict, notify=Non
     if not outcome.get("ok"):
         if notify is not None and _alert_allowed(person, cooldown):
             try:
+                error = (outcome.get("error") or "no error detail recorded").strip()
                 notify(f"{person['title']} run failed",
-                       outcome.get("error") or "no error detail recorded",
+                       f"{error[:150]} Ask me for details if you want the full run.",
                        "normal", person)
                 _mark_alerted(db_path, person["key"])
                 alerted = True

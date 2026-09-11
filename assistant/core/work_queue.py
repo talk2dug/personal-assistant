@@ -27,7 +27,8 @@ import threading
 from contextlib import closing
 from datetime import datetime, timezone
 
-from . import db, staff
+from . import business_db, db, staff
+from .github_client import summarize_checks
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,11 @@ def init_work_queue_db(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        # Idempotent migration, same pattern as db.py/business_db.py: added after the
+        # initial CREATE TABLE, so a column check guards it on an already-populated db.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(work_queue)")}
+        if "attempt" not in cols:
+            conn.execute("ALTER TABLE work_queue ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1")
         conn.commit()
 
 
@@ -69,6 +75,24 @@ def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def reconcile_orphaned(db_path: str) -> int:
+    """Fails any row still stuck 'running' -- this queue drains strictly one job at a
+    time (see module docstring), so nothing can legitimately still be 'running' after
+    a restart. Call once at startup, before start_worker, so a crash mid-job doesn't
+    leave it silently invisible forever (the on_demand/cadence failure notification
+    below only ever fires for a job the worker actually finished running)."""
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """UPDATE work_queue SET status = 'failed',
+                   error = 'orphaned: process restarted while this was running',
+                   finished_at = ? WHERE status = 'running'""",
+            (_now(),))
+        conn.commit()
+        if cur.rowcount:
+            logger.warning("reconciled %d orphaned work_queue row(s) stuck at 'running'", cur.rowcount)
+        return cur.rowcount
 
 
 class WorkQueue:
@@ -93,18 +117,24 @@ class WorkQueue:
         self.notify = None
         self.cadence_notify = None
         self.timeout = 10800
+        # Set at start_worker() alongside notify/cadence_notify -- used only to verify a
+        # PR's real CI/merge state before reporting a coding task "done" instead of
+        # trusting the employee's own claim (see _pr_status_line). None (the default,
+        # and always the case in tests that don't set it) just means that verification
+        # step is skipped and the raw outcome text is reported instead.
+        self.git_ops_client = None
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
 
     # -- producer ----------------------------------------------------------------
 
     def submit(self, employee_key: str, assignment: str, kind: str = "on_demand",
-               owner_user_id: int | None = None) -> int:
+               owner_user_id: int | None = None, attempt: int = 1) -> int:
         with closing(_connect(self.db_path)) as conn:
             cur = conn.execute(
-                """INSERT INTO work_queue (employee_key, assignment, kind, owner_user_id, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (employee_key, assignment, kind, owner_user_id, _now()),
+                """INSERT INTO work_queue (employee_key, assignment, kind, owner_user_id, attempt, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (employee_key, assignment, kind, owner_user_id, attempt, _now()),
             )
             conn.commit()
             return cur.lastrowid
@@ -157,23 +187,99 @@ class WorkQueue:
             conn.commit()
             return dict(row) if cur.rowcount else None
 
-    def _notify_owner(self, item: dict, employee_title: str, ok: bool, text: str) -> None:
-        """Delivers the result as a follow-up message -- the behavior change the owner
-        actually notices: instead of chat going quiet for up to three hours and then
-        reporting nothing, he gets this once the job actually finishes. Best-effort, same
-        as every other notify() call site in this codebase (e.g. run_due's alerting):
-        a delivery failure is logged, not raised, since there is no live request left to
-        report it to."""
+    def _notify_owner(self, item: dict, text: str) -> None:
+        """Delivers an already-composed, short status line -- the behavior change the
+        owner actually notices: instead of chat going quiet for up to three hours (or,
+        with the retry chain below, up to twelve) and then reporting nothing, he gets
+        this once the chain actually resolves. Best-effort, same as every other notify()
+        call site in this codebase (e.g. run_due's alerting): a delivery failure is
+        logged, not raised, since there is no live request left to report it to."""
         if item["owner_user_id"] is None or self.notify is None:
             return
         user = db.get_user_by_id(self.db_path, item["owner_user_id"])
         if user is None:
             return
-        prefix = f"{employee_title}: " + ("done" if ok else "failed")
         try:
-            self.notify(user["telegram_chat_id"], f"{prefix}\n\n{(text or '').strip()[:1500]}".strip())
+            self.notify(user["telegram_chat_id"], text.strip())
         except Exception:
             logger.exception("work queue: notifying owner about job %s failed", item["id"])
+
+    def _pr_status_line(self, item: dict) -> str | None:
+        """If this task opened a real PR (tracked as a git_pull_requests-ref review
+        item -- engine.py logs one for every git_open_pr call, employee-triggered or
+        not), report its actual current CI state instead of trusting the employee's
+        own "done, tests pass"-style self-report. Returns None (caller falls back to
+        the raw outcome text) when no git_ops client is wired up, no PR was involved,
+        or its status can't be fetched -- never fabricates a status it didn't verify.
+        """
+        if self.git_ops_client is None or item.get("owner_user_id") is None:
+            return None
+        try:
+            recent = business_db.list_review_items(
+                self.db_path, item["owner_user_id"], status=None, limit=50)
+        except Exception:
+            return None
+        started = item.get("started_at") or ""
+        prs = [r for r in recent
+               if r.get("ref_table") == "git_pull_requests" and (r.get("created_at") or "") >= started]
+        if not prs:
+            return None
+        pr = max(prs, key=lambda r: r.get("created_at") or "")
+        status = self.git_ops_client.get_pr_status(pr["ref_id"])
+        if not status.get("ok"):
+            return f"opened PR #{pr['ref_id']} (could not verify its CI status)"
+        return f"opened PR #{pr['ref_id']} — CI {summarize_checks(status.get('checks') or [])}"
+
+    def _success_message(self, title: str, item: dict, outcome: dict) -> str:
+        pr_line = self._pr_status_line(item)
+        if pr_line is not None:
+            return f"{title}: done — {pr_line}"
+        text = (outcome.get("output") or "").strip()
+        if not text:
+            return f"{title}: done — no output recorded."
+        return f"{title}: done — {text[:300]}{'…' if len(text) > 300 else ''}"
+
+    def _failure_message(self, title: str, outcome: dict, attempt: int) -> str:
+        error = (outcome.get("error") or "no error detail recorded").strip()
+        extra = " (a contractor also tried and could not finish it)" if attempt >= 4 else ""
+        return (f"{title}: task failed after {attempt} attempt(s){extra} — {error[:150]}. "
+                "Ask me for details if you want the full run.")
+
+    def _hire_contractor(self, emp: dict, assignment: str) -> dict | None:
+        """Brings in one temporary employee to take a fresh look at a task the regular
+        employee has failed 3 times in a row -- the "don't bottleneck, spin up more
+        help" behavior the owner asked for, rather than a task just sitting dead.
+        Named/departmented like a real hand-off so it's visible on the roster, not a
+        silent duplicate. Best-effort: if hiring itself fails, the caller falls back to
+        escalating to the owner instead."""
+        try:
+            return staff.hire(
+                self.db_path,
+                title=f"{emp['title']} (Contractor)",
+                job_description=(
+                    f"Temporary contractor brought in because {emp['title']} could not "
+                    f"complete this specific task after repeated attempts: "
+                    f"{assignment[:300]}. Same responsibilities as {emp['title']}: "
+                    f"{(emp.get('job_description') or '')[:500]}"
+                ),
+                department=emp["department"],
+            )
+        except Exception:
+            logger.exception("work queue: could not hire a contractor to take over a stuck task")
+            return None
+
+    def _requeue_after_failure(self, item: dict, employee_key: str, attempt: int,
+                                failure_note: str | None, handoff: bool) -> None:
+        label = "HANDOFF to a fresh contractor" if handoff else "RETRY"
+        note = (
+            f"\n\n--- {label} (this is attempt {attempt}) ---\n"
+            f"A previous attempt at this exact task failed with: "
+            f"{(failure_note or 'no error detail recorded').strip()[:500]}\n"
+            "Diagnose the actual problem and fix it properly -- do not just repeat the "
+            "same approach and hope."
+        )
+        self.submit(employee_key, item["assignment"] + note, kind="on_demand",
+                    owner_user_id=item["owner_user_id"], attempt=attempt)
 
     def _execute(self, item: dict) -> None:
         emp = staff.get_staff(self.db_path, item["employee_key"])
@@ -202,13 +308,37 @@ class WorkQueue:
             # still has a real staff row (get_staff doesn't filter by status) and gets
             # alerted on normally, e.g. "run failed" for the now-inactive assignment; emp
             # is only None if the row itself is gone, which nothing in the current API
-            # does -- defensive, not a reachable case today.
+            # does -- defensive, not a reachable case today. Cadence work is deliberately
+            # never retried here -- it already gets a fresh attempt on its next scheduled
+            # tick, and auto-hiring a contractor for a 10-minute monitoring check would
+            # be wrong.
             if emp is not None:
                 staff.handle_cadence_outcome(self.db_path, emp, outcome, self.cadence_notify)
             return
 
-        body = outcome.get("output") if ok else (outcome.get("error") or "no error detail recorded")
-        self._notify_owner(item, title, ok, body or "")
+        if ok:
+            self._notify_owner(item, self._success_message(title, item, outcome))
+            return
+
+        # on_demand failure: never just let it sit there. Retry the same employee (with
+        # the failure appended as context -- the exact pattern the owner already did by
+        # hand once) up to 3 total attempts, then hand off to one temporary contractor
+        # for a final try, then stop and escalate -- bounded so a genuinely impossible
+        # task can't retry forever burning real API time, but nothing silently stalls
+        # on the first wall either.
+        attempt = item.get("attempt") or 1
+        if emp is not None and attempt < 3:
+            self._requeue_after_failure(item, item["employee_key"], attempt + 1,
+                                        outcome.get("error"), handoff=False)
+            return
+        if emp is not None and attempt == 3:
+            contractor = self._hire_contractor(emp, item["assignment"])
+            if contractor is not None:
+                self._requeue_after_failure(item, contractor["key"], attempt + 1,
+                                            outcome.get("error"), handoff=True)
+                return
+
+        self._notify_owner(item, self._failure_message(title, outcome, attempt))
 
     def tick(self) -> int:
         """One pass: claims and runs jobs serially until the queue is empty. Returns how
@@ -233,10 +363,12 @@ class WorkQueue:
                     conn.commit()
             processed += 1
 
-    def start_worker(self, llm, notify=None, cadence_notify=None, timeout: int = 10800) -> None:
+    def start_worker(self, llm, notify=None, cadence_notify=None, timeout: int = 10800,
+                      git_ops_client=None) -> None:
         if self._worker and self._worker.is_alive():
             return
         self.llm, self.notify, self.cadence_notify, self.timeout = llm, notify, cadence_notify, timeout
+        self.git_ops_client = git_ops_client
 
         def _loop():
             while not self._stop.wait(self.poll_seconds):

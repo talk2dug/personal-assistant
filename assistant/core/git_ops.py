@@ -28,6 +28,8 @@ from pathlib import Path
 
 import httpx
 
+from .github_client import summarize_checks
+
 GITHUB_API = "https://api.github.com"
 
 
@@ -261,6 +263,39 @@ class GitOpsClient:
         return [{"number": p["number"], "title": p["title"], "url": p["html_url"]} for p in resp.json()]
 
     def merge_pr(self, pr_number: int, merge_method: str = "squash") -> dict:
+        """Merges a PR -- but only after re-verifying its real, current state.
+
+        A real incident (PR #19, 2026-09-08) merged with a failing backend-tests
+        check and had to be manually reverted the next day; the pattern then
+        repeated twice more (PR #21/#22) needing emergency post-merge fix commits.
+        The gate that would have caught all three lives here, in the one place
+        every merge path funnels through -- engine.py's auto-merge heuristic
+        (_try_auto_merge_pr) and the human "confirm" flow both end up calling this
+        method, and neither used to re-check anything at the moment of execution.
+        Checking here, rather than only at each call site, means no future caller
+        can accidentally skip it.
+
+        Requires CI to be unanimously green AND GitHub's own `mergeable` flag to be
+        true -- that flag is what "needs a rebase" cashes out to technically
+        (GitHub sets it false/null when the branch can't cleanly combine with the
+        current base), and nothing previously read it at all.
+        """
+        status = self.get_pr_status(pr_number)
+        if not status.get("ok"):
+            return {"ok": False,
+                    "error": f"refusing to merge PR #{pr_number}: could not verify its current "
+                             f"status first ({status.get('error')})"}
+        checks = status.get("checks") or []
+        if not checks or any(c.get("conclusion") != "success" for c in checks):
+            return {"ok": False,
+                    "error": f"refusing to merge PR #{pr_number}: CI is not 100% green "
+                             f"({summarize_checks(checks)}). Fix the failing check(s) first."}
+        if status.get("mergeable") is not True:
+            return {"ok": False,
+                    "error": f"refusing to merge PR #{pr_number}: GitHub reports it is not "
+                             f"cleanly mergeable (mergeable={status.get('mergeable')!r}) -- the "
+                             "branch likely needs a rebase onto the current base branch first."}
+
         resp = self._http.put(f"/repos/{self.repo}/pulls/{pr_number}/merge", json={"merge_method": merge_method})
         if resp.status_code >= 400:
             return {"ok": False, "error": resp.text[:500]}

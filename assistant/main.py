@@ -3,7 +3,7 @@ import asyncio
 import logging
 
 from .config import load_config
-from .core import business_db, db, github_client, staff, vision
+from .core import business_db, db, github_client, staff, vision, work_queue
 from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
@@ -92,6 +92,19 @@ def main() -> None:
     # same way the GPU bridge and vision workers below are started separately from where
     # they're built.
     if business is not None and business.work_queue is not None:
+        # Any staff_work/work_queue row still 'running' at this point cannot be a real
+        # in-progress job -- this process just started, and both drain strictly one job
+        # at a time, so a 'running' row is proof the previous process died mid-run and
+        # nobody ever followed up. A real, confirmed incident: 10 rows sat 'running' for
+        # 3-6 days, invisible to any status check, before this existed. Reconciling here,
+        # before the worker (re)starts, means a crash self-heals on the next restart
+        # instead of needing a manual DB fix.
+        orphaned_runs = staff.reconcile_orphaned_work(cfg.db_path)
+        orphaned_jobs = work_queue.reconcile_orphaned(cfg.db_path)
+        if orphaned_runs or orphaned_jobs:
+            logger.warning("startup: reconciled %d orphaned staff_work + %d orphaned work_queue row(s)",
+                           orphaned_runs, orphaned_jobs)
+
         def _cadence_notify(headline: str, body: str, urgency: str, person: dict) -> None:
             """Delivers a scheduled ('cadence') job's alert once the work queue's worker
             finishes it -- same formatting and owner-resolution as scheduler.py's
@@ -104,7 +117,10 @@ def main() -> None:
 
         business.work_queue.start_worker(
             llm, notify=notify, cadence_notify=_cadence_notify,
-            timeout=cfg.staff_assignment_timeout_seconds)
+            timeout=cfg.staff_assignment_timeout_seconds,
+            # So a finished coding task can report a PR's real, live CI status instead
+            # of the employee's own unverified claim -- see work_queue._pr_status_line.
+            git_ops_client=git_ops.mcp_client if git_ops is not None else None)
     scheduler.start(
         cfg.db_path, notify, cfg.poll_interval_seconds,
         calendar=calendar, caldav_sync_interval_seconds=cfg.caldav_sync_interval_seconds,

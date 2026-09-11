@@ -25,6 +25,7 @@ class FakeConfig:
     web_session_secret: str = "test-secret"
     ha_conversation_api_key: str | None = None
     device_api_key: str = "device-secret"
+    presence_identity_enabled: bool = True
     presence_confirm_window_seconds: int = 45
     presence_authorized_access_levels: list = field(default_factory=lambda: ["owner"])
     wake_arbitration_window_ms: int = 50
@@ -99,6 +100,41 @@ def test_unconfirmed_terminal_strips_sensitive_context_and_runs_as_guest(client,
     owner = db.get_user_by_chat_id(cfg.db_path, "111")
     assert captured["user_id"] != owner["id"]
     assert db.get_user_by_id(cfg.db_path, captured["user_id"])["role"] == "guest"
+
+
+def test_flag_off_is_a_genuine_no_op_even_with_zero_camera_setup(db_path, monkeypatch):
+    """presence_identity_enabled defaults False -- the original design's promise was that
+    main stays a real no-op until the owner opts in, not fail-closed-by-default. This is
+    the exact live regression found 2026-09-10: the flag shipped missing, so every voice
+    turn ran as a stripped guest the moment cameras weren't configured yet."""
+    import dataclasses
+
+    off_cfg = dataclasses.replace(FakeConfig(
+        db_path=db_path,
+        users=[UserConfig(telegram_chat_id="111", display_name="Dug", role="owner", web_password="ownerpass")],
+    ), presence_identity_enabled=False)
+    app = create_app(
+        off_cfg, FakeLLM(), era=SENTINEL_ERA, calendar=None, phone=SENTINEL_PHONE, stt=FakeSTT(),
+        personal=SENTINEL_PERSONAL, static_dir=None,
+    )
+    client = TestClient(app)
+
+    captured = {}
+
+    def fake_handle_message(db_path, llm, user_id, text, **kwargs):
+        captured["user_id"] = user_id
+        captured.update(kwargs)
+        return "reply"
+
+    monkeypatch.setattr(devices_module, "handle_message", fake_handle_message)
+
+    resp = _post_turn(client, off_cfg, "touch1")  # no camera registered anywhere
+    assert resp.status_code == 200
+
+    assert captured["era"] is SENTINEL_ERA
+    assert captured["personal"] is SENTINEL_PERSONAL
+    owner = db.get_user_by_chat_id(off_cfg.db_path, "111")
+    assert captured["user_id"] == owner["id"]
 
 
 def test_confirmed_owner_on_camera_gets_real_context_and_real_user_id(client, cfg, monkeypatch):

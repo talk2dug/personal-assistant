@@ -177,7 +177,11 @@ class Config:
     # known_people.access_level values unlock personal/financial context. Defaults match
     # presence.py's own DEFAULT_AUTHORIZED_ACCESS_LEVELS/confirmed_identity default so a
     # deployment that never sets these gets the same fail-closed behaviour the module
-    # documents.
+    # documents. Master switch: the original design promised this stays a genuine no-op
+    # on every /turn until the owner opts in ("presence_identity_enabled", default
+    # false) -- off means every voice terminal behaves exactly as it did before this
+    # feature existed (always answers as the owner, full context, no camera required).
+    presence_identity_enabled: bool = False
     presence_confirm_window_seconds: int = 45
     presence_authorized_access_levels: list[str] = field(default_factory=lambda: ["owner"])
     # Cross-terminal wake-word arbitration (core/wake_arbitration.py) -- how long a
@@ -355,6 +359,7 @@ def load_config(path: str = "config.json") -> Config:
         face_match_threshold=data.get("face_match_threshold", 0.42),
         enroll_after_sightings=data.get("enroll_after_sightings", 3),
         device_camera_map=data.get("device_camera_map", {"touch1": "touch1", "laptop1": "laptop1"}),
+        presence_identity_enabled=data.get("presence_identity_enabled", False),
         presence_confirm_window_seconds=data.get("presence_confirm_window_seconds", 45),
         presence_authorized_access_levels=data.get("presence_authorized_access_levels", ["owner"]),
         wake_arbitration_window_ms=data.get("wake_arbitration_window_ms", 400),

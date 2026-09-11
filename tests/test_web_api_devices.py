@@ -22,6 +22,7 @@ class FakeConfig:
     timezone: str = "America/New_York"
     web_session_secret: str = "test-secret"
     device_api_key: str = "device-secret"
+    presence_identity_enabled: bool = False
     presence_confirm_window_seconds: int = 45
     presence_authorized_access_levels: list = field(default_factory=lambda: ["owner"])
 

@@ -106,6 +106,12 @@ class Config:
         self.vad_floor: float = data.get("vad_floor", 0.006)
         self.vad_margin: float = data.get("vad_margin", 2.5)
         self.chime: bool = data.get("chime", True)
+        # Cross-terminal wake-word arbitration (server-side: assistant/core/
+        # wake_arbitration.py) -- defaults on since the problem it prevents (two
+        # terminals within earshot both chiming and answering the same "hey Jarvis") is
+        # real, not hypothetical, so a device with no opinion in its config still gets
+        # the fix.
+        self.wake_arbitration_enabled: bool = data.get("wake_arbitration", True)
         # Filled in by resolve_audio_devices() once the hardware has been inspected.
         self.capture_rate: int = SAMPLE_RATE
         # Whether the system has any capture-capable device at all, named or default.
@@ -388,6 +394,19 @@ class JarvisClient:
         resp.raise_for_status()
         return resp.json()
 
+    def wake_claim(self, score: float) -> dict:
+        """Reports this terminal's wake-word confidence for the current moment and
+        returns {"proceed": bool} -- False means a rival terminal clearly heard it better
+        and this one should stand down (assistant/core/wake_arbitration.py). Raises on
+        failure, same pattern as conversation_mode() above -- the caller decides how to
+        treat that (see the wake-word branch in handle(), which fails open rather than
+        silently muting the terminal over a network blip)."""
+        resp = self.http.post(
+            f"{self.cfg.server}/api/devices/{self.cfg.device_id}/wake_claim",
+            json={"score": score}, timeout=8.0)
+        resp.raise_for_status()
+        return resp.json()
+
     def conversation_mode(self) -> dict:
         """Whether this device should be in open-mic mode right now, per the server's
         camera-driven presence/identity check (assistant/web/routes/vision.py). Raises on
@@ -589,6 +608,12 @@ def main() -> int:
     # wake-word trigger -- read by the two finish() call sites below so open-mic doesn't
     # chime on every utterance of a continuous conversation.
     current_is_open_mic = False
+    # Cross-terminal wake-word arbitration's outcome for the wake event currently being
+    # recorded -- written by _on_wake's background thread (never the audio callback
+    # thread itself, see the chime comment below for why), read by finish() once the
+    # utterance is complete. True (the default) fails open: a network hiccup on the
+    # arbitration call must never silently mute this terminal.
+    wake_claim_result = {"proceed": True}
 
     def handle(frame: np.ndarray) -> None:
         nonlocal state, utterance, silence_started, started_at, heard_speech, speech_frames
@@ -647,6 +672,7 @@ def main() -> int:
             speech_frames = 0
             started_at = time.time()
             current_is_open_mic = False
+            wake_claim_result["proceed"] = True
             state = "record"
             # client.report is a blocking HTTP call and safe_chime opens a second audio
             # stream -- both must run off PortAudio's own callback thread, which is what
@@ -656,7 +682,26 @@ def main() -> int:
             # `ret == self->nfds`) the instant a second stream opens while this one's
             # callback is still executing. finish() below already gets this right for
             # the reply audio; only the wake chime hadn't been moved off-thread too.
+            # Recording itself always starts immediately, unconditionally -- arbitration
+            # (below, in this same background thread) only ever gates whether the
+            # eventual utterance is actually sent once finish() runs, never whether
+            # capture starts, so losing arbitration costs nothing but a discarded local
+            # buffer, not a missed word of real audio.
             def _on_wake():
+                score = top
+                if cfg.wake_arbitration_enabled:
+                    try:
+                        result = client.wake_claim(score)
+                        wake_claim_result["proceed"] = bool(result.get("proceed", True))
+                    except Exception as e:
+                        # Fails open -- a network blip on the arbitration call must never
+                        # silently mute this terminal (same principle as every other
+                        # optional check in this codebase).
+                        log.debug("wake_claim failed, proceeding anyway: %s", e)
+                        wake_claim_result["proceed"] = True
+                if not wake_claim_result["proceed"]:
+                    log.info("lost wake-word arbitration to another terminal -- staying quiet")
+                    return
                 client.report("listening")
                 if cfg.chime:
                     speaker.safe_chime(up=True)
@@ -706,6 +751,14 @@ def main() -> int:
         try:
             if elapsed < MIN_UTTERANCE_SEC:
                 log.info("utterance too short (%.2fs) â€” ignoring", elapsed)
+                client.report("idle")
+                return
+            # Lost wake-word arbitration to another terminal (open-mic never arbitrates --
+            # there's no wake word to have won or lost). By now the arbitration call has
+            # long since resolved: it started the moment the wake word fired, bounded by
+            # the server's own wake_arbitration_window_ms (hundreds of ms), and finish()
+            # only ever runs after a full utterance was spoken.
+            if not was_open_mic and cfg.wake_arbitration_enabled and not wake_claim_result["proceed"]:
                 client.report("idle")
                 return
             # No chime for open-mic: a ding on every turn of a continuous conversation is

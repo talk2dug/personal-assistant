@@ -23,10 +23,9 @@ logger = logging.getLogger(__name__)
 def _seed_cameras(cfg) -> None:
     """Cameras are metadata (a key/name/url), so config.json is the source of truth for
     day-one coverage -- same pattern as seeding users below. The actual detection loop
-    (scripts/vision_worker.py, run from the separate jarvis-vision.service/vision_main.py
-    process -- see that module's docstring) never touches config; it just reads whatever
-    rows are here, so adding a camera through the web UI later works without editing
-    this list.
+    (scripts/vision_worker.py, run from the separate jarvis-vision.service process -- see
+    that script's own docstring) never touches config; it just reads whatever rows are
+    here, so adding a camera through the web UI later works without editing this list.
     """
     for cam in cfg.cameras or []:
         try:
@@ -89,8 +88,8 @@ def main() -> None:
         bridge.start_worker()
 
     # The actual camera-watching/YOLO/InsightFace detection loop runs in its own process
-    # (jarvis-vision.service / assistant/vision_main.py) and its own virtualenv
-    # (.venv-vision) -- never in this one. See vision_main.py's docstring for why: torch/
+    # (jarvis-vision.service, scripts/vision_worker.py) and its own virtualenv
+    # (.venv-vision) -- never in this one. See that script's own docstring for why: torch/
     # ultralytics/insightface are real GPU dependencies that must not become something
     # the Telegram/chat process needs installed just to answer a question.
 

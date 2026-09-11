@@ -194,24 +194,6 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
 
     _set_state(device_id, state="thinking", caption=transcript)
 
-    # Room Presence & Identity: who is actually standing near this terminal right now,
-    # by camera -- not who the device claims to be, since there's no login here at all.
-    presence_result = presence.evaluate(
-        cfg.db_path, device_id,
-        within_seconds=cfg.presence_confirm_window_seconds,
-        authorized_access_levels=frozenset(cfg.presence_authorized_access_levels),
-    )
-    logger.info("device %s presence: %s", device_id, presence_result.reason)
-
-    if presence_result.authorized:
-        user_id = _owner_user_id(request)
-    else:
-        # No confirmed, authorized identity: run this turn as a fresh per-device guest so
-        # conversation history and any privately-scoped data stay isolated from the
-        # owner's real account, on top of (not instead of) stripping the sensitive
-        # contexts below.
-        user_id = presence.guest_user_id(cfg.db_path, device_id)
-
     all_contexts = {
         "era": request.app.state.era, "calendar": request.app.state.calendar,
         "phone": request.app.state.phone, "mail": request.app.state.mail,
@@ -226,7 +208,33 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
         "git_ops": request.app.state.git_ops, "recipe": request.app.state.recipe,
         "local_llm": request.app.state.local_llm,
     }
-    gated_contexts = presence.gate_contexts(all_contexts, presence_result)
+
+    # Room Presence & Identity: who is actually standing near this terminal right now,
+    # by camera -- not who the device claims to be, since there's no login here at all.
+    # Master switch, off by default: the design this shipped from promised main stays a
+    # genuine no-op until the owner opts in with real cameras configured (see
+    # cfg.presence_identity_enabled's own docstring) -- off means exactly the pre-feature
+    # behavior below, on runs the real evaluate()/gate_contexts() gate.
+    if cfg.presence_identity_enabled:
+        presence_result = presence.evaluate(
+            cfg.db_path, device_id,
+            within_seconds=cfg.presence_confirm_window_seconds,
+            authorized_access_levels=frozenset(cfg.presence_authorized_access_levels),
+        )
+        logger.info("device %s presence: %s", device_id, presence_result.reason)
+
+        if presence_result.authorized:
+            user_id = _owner_user_id(request)
+        else:
+            # No confirmed, authorized identity: run this turn as a fresh per-device guest
+            # so conversation history and any privately-scoped data stay isolated from the
+            # owner's real account, on top of (not instead of) stripping the sensitive
+            # contexts below.
+            user_id = presence.guest_user_id(cfg.db_path, device_id)
+        gated_contexts = presence.gate_contexts(all_contexts, presence_result)
+    else:
+        user_id = _owner_user_id(request)
+        gated_contexts = all_contexts
 
     call = functools.partial(
         handle_message, cfg.db_path, request.app.state.llm, user_id, transcript,

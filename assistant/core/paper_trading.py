@@ -20,6 +20,14 @@ That split is not just a safety formality, it makes the simulation honest:
 Fees are charged on both sides. A zero-fee simulation systematically overstates the
 returns of a strategy that trades often, which is precisely the strategy a five-minute
 cadence encourages.
+
+Risk is handled the same way, and for the same reason. Exit timing is exactly what a
+model is worst at under its own judgement -- asked "hold or exit?" on a position that is
+down 4%, it can rationalise "hold" again every single run, forever, because each single
+run looks like a reasonable place to wait one more cycle. The fix is not a better prompt;
+it is check_risk_limits() below, a hard numeric stop-loss/take-profit that closes a
+position in code the moment it crosses a line, independent of what the employee decides
+or whether it decides anything at all.
 """
 import json
 import re
@@ -35,12 +43,14 @@ DEFAULT_STARTING_CASH = 10_000.0
 # show whether the strategy reads the market, not whether one all-in bet happened to land.
 MAX_ORDER_PCT_OF_EQUITY = 25.0
 
-# How long after a stop-loss exit a coin is off-limits for a fresh buy. A real, confirmed
-# incident: the same ticker bought, stopped out, and immediately re-bought minutes later
-# on a "fresh" momentum call several times in one session -- each round-trip pays fees
-# twice and re-risks capital on a thesis that just failed. A genuinely new catalyst can
-# still win an exception once the window passes; this only stops the immediate whipsaw.
-STOP_LOSS_COOLDOWN_HOURS = 2.0
+# Hard risk mandate: every paper account is capped on both sides. These are not phrased
+# as advice in a prompt -- check_risk_limits() enforces them in code, on every price
+# refresh, so "when do I get out" is not a question the employee gets to keep deciding.
+# New accounts get these as their starting values (stored per-account so they can be
+# tuned later without a code change); an existing account keeps whatever it was created
+# with even if these module defaults change.
+DEFAULT_STOP_LOSS_PCT = 8.0      # force-close once a position has drawn down this much from cost
+DEFAULT_TAKE_PROFIT_PCT = 15.0   # force-close once a position has gained this much from cost
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_accounts (
@@ -49,6 +59,10 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     starting_cash REAL NOT NULL,
     cash REAL NOT NULL,
     fee_pct REAL NOT NULL DEFAULT 0.10,
+    -- Hard stop-loss/take-profit mandate for this account, enforced by
+    -- check_risk_limits() -- see DEFAULT_STOP_LOSS_PCT/DEFAULT_TAKE_PROFIT_PCT above.
+    stop_loss_pct REAL NOT NULL DEFAULT 8.0,
+    take_profit_pct REAL NOT NULL DEFAULT 15.0,
     -- Realised P&L accumulates here as positions are closed; unrealised is derived from
     -- live prices at read time rather than stored, so it can never go stale.
     realized_pnl REAL NOT NULL DEFAULT 0,
@@ -63,12 +77,6 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     -- Average cost per unit including fees paid to acquire, so realised P&L on the way
     -- out is the true round-trip result rather than the headline price difference.
     avg_cost REAL NOT NULL,
-    -- The numeric exit levels set at entry, actually persisted (not just stated in prose
-    -- and forgotten) -- see check_stops(), which enforces these mechanically rather than
-    -- waiting on the model to notice and re-decide every cycle. NULL means no committed
-    -- level yet; a position can hold either, both, or neither.
-    stop_loss REAL,
-    take_profit REAL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (account_id, code)
 );
@@ -89,11 +97,6 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     -- How old the quote was when it filled. A fill against a stale cache is a fill
     -- against a price that no longer existed, and that has to be visible after the fact.
     quote_age_sec INTEGER,
-    -- Set on a sell only, by comparing the fill price against the position's own stored
-    -- stop_loss/take_profit at the moment of the sell (see _classify_exit) -- never
-    -- parsed from prose. 'stop_loss' | 'take_profit' | 'discretionary' | NULL (buys).
-    -- What the re-entry cooldown (see execute_orders' buy path) actually keys off.
-    exit_kind TEXT,
     at TEXT NOT NULL
 );
 
@@ -115,17 +118,17 @@ CREATE TABLE IF NOT EXISTS paper_rejections (
 CREATE INDEX IF NOT EXISTS idx_paper_rej_acct ON paper_rejections(account_id, id DESC);
 """
 
-ORDER_INSTRUCTIONS = """
+ORDER_INSTRUCTIONS = f"""
 
 --- PLACING PAPER TRADES ---
 You do not execute trades. End your response with a fenced ```orders block containing
 JSON, and the system will fill it against the live price cache and report back to you
 next run. An empty list is a legitimate and often correct answer -- you are not required
-to trade on every run, and churning costs {fee_pct}% per side.
+to trade on every run, and churning costs {{fee_pct}}% per side.
 
 ```orders
 {{"orders": [
-  {{"side": "buy",  "code": "SOL", "usd": 500, "stop_loss": 130.0, "take_profit": 165.0, "reason": "why, in one line"}},
+  {{"side": "buy",  "code": "SOL", "usd": 500, "reason": "why, in one line"}},
   {{"side": "sell", "code": "DASH", "qty": "all", "reason": "why, in one line"}}
 ]}}
 ```
@@ -133,16 +136,18 @@ to trade on every run, and churning costs {fee_pct}% per side.
 Rules that are enforced in code, not by you:
   * Buys are sized in `usd`; sells in `qty` (a number, or "all" to close the position).
   * You cannot spend cash you do not have, or sell a coin you do not hold.
-  * No single order may exceed {max_pct}% of total equity.
+  * No single order may exceed {{max_pct}}% of total equity.
   * Fills use the cached price, not a price you state. Do not predict your fill.
-  * Every buy must set `stop_loss` and/or `take_profit` as real numeric prices (not a
-    percentage, not "later") -- these are stored on the position and enforced
-    automatically between your runs, not something you have to remember or re-derive.
-    Adding to an existing position keeps its current stop_loss/take_profit unless you
-    explicitly state a new one -- state one only when you actually mean to move it.
-  * A coin stopped out (price hit its stored stop_loss) cannot be re-bought for
-    {cooldown_hours:g}h -- that failed thesis needs to actually cool off, not get
-    re-entered on the next momentum call. The rejection will tell you if this is why.
+  * HARD MANDATE -- stop-loss/take-profit: any position that draws down
+    {DEFAULT_STOP_LOSS_PCT:.0f}% or more from its average cost, or gains
+    {DEFAULT_TAKE_PROFIT_PCT:.0f}% or more, is force-closed automatically the next time
+    prices refresh (about once a minute) -- whether or not you act on it this run. This
+    is not a target for you to sit and wait for. Do not hold a loser hoping it recovers:
+    either exit it yourself with a clear reason before it reaches that floor, or the
+    system closes it for you and logs it as an automatic stop-loss, not a decision you
+    made. The same applies on the upside -- do not treat the automatic take-profit line
+    as your plan; decide deliberately when a gain is worth locking in rather than riding
+    it to the ceiling by default.
 Report your reasoning in prose above the block. If you are not trading, say why.
 """
 
@@ -151,17 +156,17 @@ def init_paper_db(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
-        # Idempotent migrations for columns added after the initial CREATE TABLE IF NOT
-        # EXISTS -- same pattern as db.py/market_data.py -- safe on a fresh or
-        # already-populated database.
-        pos_cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_positions)")}
-        if "stop_loss" not in pos_cols:
-            conn.execute("ALTER TABLE paper_positions ADD COLUMN stop_loss REAL")
-        if "take_profit" not in pos_cols:
-            conn.execute("ALTER TABLE paper_positions ADD COLUMN take_profit REAL")
-        trade_cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)")}
-        if "exit_kind" not in trade_cols:
-            conn.execute("ALTER TABLE paper_trades ADD COLUMN exit_kind TEXT")
+        # CREATE TABLE IF NOT EXISTS won't add a column to a table that already exists
+        # from an earlier version -- same idempotent migration pattern as market_data.py.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_accounts)")}
+        if "stop_loss_pct" not in cols:
+            conn.execute(
+                f"ALTER TABLE paper_accounts ADD COLUMN stop_loss_pct REAL NOT NULL "
+                f"DEFAULT {DEFAULT_STOP_LOSS_PCT}")
+        if "take_profit_pct" not in cols:
+            conn.execute(
+                f"ALTER TABLE paper_accounts ADD COLUMN take_profit_pct REAL NOT NULL "
+                f"DEFAULT {DEFAULT_TAKE_PROFIT_PCT}")
         conn.commit()
 
 
@@ -175,46 +180,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_at(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def _parse_level(value) -> float | None:
-    """A stop_loss/take_profit value from an order, or None if absent/garbage -- never
-    raises, since a malformed level should just mean "no committed level" rather than
-    failing the whole order over one bad field."""
-    if value is None:
-        return None
-    try:
-        level = float(value)
-    except (TypeError, ValueError):
-        return None
-    return level if level > 0 else None
-
-
-def _classify_exit(price: float, pos) -> str:
-    """Whether a sell at `price` was a stop-loss, a take-profit, or a discretionary
-    close -- from the position's own persisted levels, never from prose. A position with
-    both levels set and a price that (due to a gap) cleared both in one tick is called a
-    stop-loss: preserving capital is the one of the two that actually mattered."""
-    stop_loss = pos["stop_loss"] if "stop_loss" in pos.keys() else None
-    take_profit = pos["take_profit"] if "take_profit" in pos.keys() else None
-    if stop_loss is not None and price <= stop_loss:
-        return "stop_loss"
-    if take_profit is not None and price >= take_profit:
-        return "take_profit"
-    return "discretionary"
-
-
 def ensure_account(db_path: str, name: str = "crypto",
                    starting_cash: float = DEFAULT_STARTING_CASH,
-                   fee_pct: float = DEFAULT_FEE_PCT) -> dict:
+                   fee_pct: float = DEFAULT_FEE_PCT,
+                   stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
+                   take_profit_pct: float = DEFAULT_TAKE_PROFIT_PCT) -> dict:
     init_paper_db(db_path)
     with closing(_connect(db_path)) as conn:
         row = conn.execute("SELECT * FROM paper_accounts WHERE name = ?", (name,)).fetchone()
@@ -222,9 +192,11 @@ def ensure_account(db_path: str, name: str = "crypto",
             now = _now()
             conn.execute(
                 """INSERT INTO paper_accounts (name, starting_cash, cash, fee_pct,
+                                               stop_loss_pct, take_profit_pct,
                                                created_at, updated_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (name, starting_cash, starting_cash, fee_pct, now, now))
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (name, starting_cash, starting_cash, fee_pct, stop_loss_pct, take_profit_pct,
+                 now, now))
             conn.commit()
             row = conn.execute("SELECT * FROM paper_accounts WHERE name = ?", (name,)).fetchone()
         return dict(row)
@@ -281,7 +253,6 @@ def portfolio(db_path: str, name: str = "crypto") -> dict:
                 "unrealized": round(value - cost, 2),
                 "unrealized_pct": round((value - cost) / cost * 100, 2) if cost else 0.0,
                 "quote_age_sec": mark["age"] if mark else None,
-                "stop_loss": r["stop_loss"], "take_profit": r["take_profit"],
             })
         positions.sort(key=lambda p: p["value"], reverse=True)
 
@@ -302,6 +273,8 @@ def portfolio(db_path: str, name: str = "crypto") -> dict:
         "realized_pnl": round(acct["realized_pnl"], 2),
         "unrealized_pnl": round(sum(p["unrealized"] for p in positions), 2),
         "fee_pct": acct["fee_pct"],
+        "stop_loss_pct": acct["stop_loss_pct"],
+        "take_profit_pct": acct["take_profit_pct"],
         "positions": positions,
         "trades": n_trades,
         "unpriced": stale,
@@ -338,6 +311,11 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
     Every rejection carries a reason, and both are persisted: the next run's briefing
     tells the employee what actually happened, which is the only way a simulated trader
     can learn that its sizing is wrong.
+
+    Used both by the employee's own proposed orders (staff_key = the employee's key) and
+    by check_risk_limits()'s forced closes (staff_key='risk_control') -- same validation,
+    same fee, same fill path either way, so a forced close cannot behave differently from
+    a trade the employee chose to make.
     """
     acct = ensure_account(db_path, name)
     fills, rejects = [], []
@@ -387,21 +365,6 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
             equity = snapshot["equity"]
 
             if side == "buy":
-                last_stop_out = conn.execute(
-                    """SELECT at FROM paper_trades WHERE account_id = ? AND code = ?
-                           AND side = 'sell' AND exit_kind = 'stop_loss'
-                           ORDER BY id DESC LIMIT 1""",
-                    (acct["id"], code)).fetchone()
-                if last_stop_out is not None:
-                    stopped_at = _parse_at(last_stop_out["at"])
-                    elapsed_h = ((datetime.now(timezone.utc) - stopped_at).total_seconds() / 3600
-                                 if stopped_at else STOP_LOSS_COOLDOWN_HOURS)
-                    if elapsed_h < STOP_LOSS_COOLDOWN_HOURS:
-                        remaining_min = round((STOP_LOSS_COOLDOWN_HOURS - elapsed_h) * 60)
-                        reject(order, f"{code} was stopped out {elapsed_h * 60:.0f} min ago; "
-                                      f"re-entry cooldown active for {remaining_min} more minute(s)")
-                        continue
-
                 try:
                     usd = float(order.get("usd") if order.get("usd") is not None
                                 else float(order.get("qty", 0)) * price)
@@ -425,21 +388,13 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 # Fees fold into cost basis, so realised P&L is the round-trip result.
                 new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd + fee) / new_qty
                 cash -= usd + fee
-                stop_loss = _parse_level(order.get("stop_loss"))
-                take_profit = _parse_level(order.get("take_profit"))
-                if stop_loss is None and pos is not None:
-                    stop_loss = pos["stop_loss"]
-                if take_profit is None and pos is not None:
-                    take_profit = pos["take_profit"]
                 conn.execute(
-                    """INSERT INTO paper_positions (account_id, code, qty, avg_cost,
-                                                     stop_loss, take_profit, updated_at)
-                       VALUES (?,?,?,?,?,?,?)
+                    """INSERT INTO paper_positions (account_id, code, qty, avg_cost, updated_at)
+                       VALUES (?,?,?,?,?)
                        ON CONFLICT(account_id, code) DO UPDATE SET
                            qty = excluded.qty, avg_cost = excluded.avg_cost,
-                           stop_loss = excluded.stop_loss, take_profit = excluded.take_profit,
                            updated_at = excluded.updated_at""",
-                    (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, now))
+                    (acct["id"], code, new_qty, new_cost, now))
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
@@ -473,11 +428,6 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 realized = gross - fee - qty * pos["avg_cost"]
                 cash += gross - fee
                 realized_total += realized
-                # Classified from the position's own stored levels vs. the actual fill
-                # price -- never parsed from prose -- so the re-entry cooldown above has
-                # something real to key off regardless of whether this sell was the
-                # model's own discretionary call or check_stops' automatic one.
-                exit_kind = _classify_exit(price, pos)
                 remaining = pos["qty"] - qty
                 if remaining <= 1e-12:
                     conn.execute("DELETE FROM paper_positions WHERE account_id = ? AND code = ?",
@@ -489,10 +439,10 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
-                                                 quote_age_sec, exit_kind, at)
-                       VALUES (?,?,'sell',?,?,?,?,?,?,?,?,?,?,?)""",
+                                                 quote_age_sec, at)
+                       VALUES (?,?,'sell',?,?,?,?,?,?,?,?,?,?)""",
                     (acct["id"], code, qty, price, fee, gross, realized, cash, reason,
-                     staff_key, age, exit_kind, now))
+                     staff_key, age, now))
                 fills.append({"side": "sell", "code": code, "qty": qty, "price": price,
                               "usd": round(gross, 2), "fee": round(fee, 2),
                               "realized": round(realized, 2), "reason": reason})
@@ -504,44 +454,49 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
     return {"fills": fills, "rejections": rejects, "portfolio": portfolio(db_path, name)}
 
 
-def check_stops(db_path: str, name: str = "crypto") -> dict:
-    """Mechanically enforces every open position's stored stop_loss/take_profit against
-    the live price cache -- the actual fix for "lack of numeric exit discipline": the
-    model states a level once, at entry, and this closes the position the moment it's
-    hit, rather than waiting for the next 5-minute cycle to notice (or not) via a
-    judgment call reconstructed from scratch. Meant to run on a short interval
-    (scheduler.py) relative to the trading cadence.
+def check_risk_limits(db_path: str, name: str = "crypto") -> dict:
+    """Force-closes any position that has crossed the account's stop-loss or
+    take-profit line. This is the actual mandate, not the prose in ORDER_INSTRUCTIONS --
+    that text tells the employee the numbers; this function is what makes them real.
 
-    A breached position becomes a real, full-size sell order routed through
-    execute_orders() -- the exact same validation/fill/fee/exit-classification path a
-    model-proposed sell uses, not a second write path that could drift from it.
+    Deliberately independent of the trading employee's own run: it is meant to be called
+    from the market price poll (see scheduler.py), on a roughly one-minute cadence, so a
+    position cannot sit past its limit for days just because the employee's own
+    reasoning cadence didn't happen to revisit it or kept deciding to hold.
+
+    Every forced close goes through execute_orders() -- the same validation, fee and fill
+    path as any order the employee places -- tagged staff_key='risk_control' so the trade
+    log is honest about who actually decided it.
     """
     acct = ensure_account(db_path, name)
-    with closing(_connect(db_path)) as conn:
-        positions = conn.execute(
-            """SELECT * FROM paper_positions WHERE account_id = ? AND qty > 0
-                   AND (stop_loss IS NOT NULL OR take_profit IS NOT NULL)""",
-            (acct["id"],)).fetchall()
-        if not positions:
-            return {"fills": [], "rejections": [], "portfolio": portfolio(db_path, name)}
-        marks = _prices(conn, [p["code"] for p in positions])
+    snap = portfolio(db_path, name)
+    stop_loss_pct = abs(float(acct["stop_loss_pct"]))
+    take_profit_pct = float(acct["take_profit_pct"])
 
-    orders = []
-    for p in positions:
-        mark = marks.get(p["code"])
-        if mark is None:
-            continue  # can't check what can't be priced; execute_orders would reject it anyway
-        price = mark["price"]
-        if p["stop_loss"] is not None and price <= p["stop_loss"]:
-            orders.append({"side": "sell", "code": p["code"], "qty": "all",
-                           "reason": f"Automatic stop-loss: price ${price:,.6g} <= stop ${p['stop_loss']:,.6g}"})
-        elif p["take_profit"] is not None and price >= p["take_profit"]:
-            orders.append({"side": "sell", "code": p["code"], "qty": "all",
-                           "reason": f"Automatic take-profit: price ${price:,.6g} >= target ${p['take_profit']:,.6g}"})
+    triggered = []
+    for pos in snap["positions"]:
+        if pos["price"] is None:
+            continue  # no live quote for this position -- nothing safe to act on
+        change = pos["unrealized_pct"]
+        if change <= -stop_loss_pct:
+            triggered.append((pos["code"], "stop_loss", change))
+        elif change >= take_profit_pct:
+            triggered.append((pos["code"], "take_profit", change))
 
-    if not orders:
-        return {"fills": [], "rejections": [], "portfolio": portfolio(db_path, name)}
-    return execute_orders(db_path, orders, name=name, staff_key="system:check_stops")
+    closed, rejected = [], []
+    for code, kind, change in triggered:
+        label = "stop-loss" if kind == "stop_loss" else "take-profit"
+        limit = stop_loss_pct if kind == "stop_loss" else take_profit_pct
+        order = {
+            "side": "sell", "code": code, "qty": "all",
+            "reason": f"Auto {label}: {change:+.2f}% crossed the {limit:.1f}% mandate limit",
+        }
+        result = execute_orders(db_path, [order], name=name, staff_key="risk_control")
+        closed.extend({**f, "trigger": kind, "unrealized_pct": change} for f in result["fills"])
+        rejected.extend(result["rejections"])
+
+    return {"checked": len(snap["positions"]), "triggered": len(triggered),
+            "closed": closed, "rejections": rejected}
 
 
 def recent_trades(db_path: str, name: str = "crypto", limit: int = 20) -> list[dict]:
@@ -573,6 +528,9 @@ def performance(db_path: str, name: str = "crypto") -> dict:
             (acct["id"],)).fetchone()[0]
         rejected = conn.execute(
             "SELECT COUNT(*) FROM paper_rejections WHERE account_id = ?", (acct["id"],)).fetchone()[0]
+        risk_closes = conn.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE account_id = ? AND staff_key = 'risk_control'",
+            (acct["id"],)).fetchone()[0]
     wins = [c["realized"] for c in closed if c["realized"] > 0]
     snap.update({
         "closed_trades": len(closed),
@@ -580,6 +538,7 @@ def performance(db_path: str, name: str = "crypto") -> dict:
         "win_rate_pct": round(len(wins) / len(closed) * 100, 1) if closed else None,
         "fees_paid": round(fees, 2),
         "orders_rejected": rejected,
+        "risk_control_closes": risk_closes,
     })
     return snap
 

@@ -31,6 +31,29 @@ from .ssh_ops import SSHOpsClient
 logger = logging.getLogger(__name__)
 
 
+def _root_cause(exc: BaseException) -> str:
+    """The real error, not `str(an ExceptionGroup)` -- an async MCP client's startup
+    failure (Era/phone/Kroger/recipe) surfaces as `BaseExceptionGroup: unhandled errors
+    in a TaskGroup (1 sub-exception)`, a message with zero diagnostic value on its own,
+    because asyncio.TaskGroup wraps whatever actually failed. Walks into `.exceptions`
+    (TaskGroup/ExceptionGroup) and `.__cause__`/`.__context__` (a normal raised-from
+    chain) to find the innermost real exception, so a startup failure log is actually
+    actionable instead of always reading the same generic line regardless of what broke.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        sub = getattr(exc, "exceptions", None)
+        if sub:
+            exc = sub[0]
+            continue
+        nxt = exc.__cause__ or exc.__context__
+        if nxt is None:
+            break
+        exc = nxt
+    return f"{type(exc).__name__}: {exc}"
+
+
 def build_llm(cfg, owner_user_id: int | None = None):
     """Picks the LLM backend from config so all three entrypoints agree.
 
@@ -269,7 +292,7 @@ def build_recipe_context(cfg) -> RecipeContext | None:
         mcp_client = MCPClient(cfg.recipe_mcp_url, cfg.recipe_api_key)
         discovered = mcp_client.list_tools()
     except Exception as e:
-        logger.warning("Recipe API unreachable at startup (%s) — recipe tools disabled this session", e)
+        logger.warning("Recipe API unreachable at startup (%s) — recipe tools disabled this session", _root_cause(e))
         return None
     recipe_tools = [
         {
@@ -294,7 +317,8 @@ def build_phone_context(cfg) -> PhoneContext | None:
         mcp_client = MCPClient(cfg.phone_mcp_url)
         discovered = mcp_client.list_tools()
     except Exception as e:
-        logger.warning("Phone MCP server unreachable at startup (%s) — phone tools disabled this session", e)
+        logger.warning("Phone MCP server unreachable at startup (%s) — phone tools disabled this session",
+                       _root_cause(e))
         return None
     phone_tools = [
         {
@@ -478,7 +502,7 @@ def build_kroger_context(cfg) -> KrogerContext | None:
     try:
         tools = _mcp_tool_schemas(raw_client.list_tools())
     except Exception as e:
-        logger.warning("Kroger MCP server failed to start (%s) — disabled this session", e)
+        logger.warning("Kroger MCP server failed to start (%s) — disabled this session", _root_cause(e))
         return None
     # add_recipe_to_cart and check_kroger_deals are both synthetic (Jarvis's own, not part
     # of kroger-mcp's catalog) -- see kroger_recipe.py for why matching ingredients to real

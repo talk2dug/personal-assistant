@@ -152,6 +152,40 @@ class Config:
     # Voice devices (the Pi terminals). piper_voice_path enables server-side speech;
     # device_api_key authenticates the headless clients, which have no session cookie.
     device_api_key: str | None = None
+    # Room presence & identity: YOLO11n (person detection) + insightface (face
+    # recognition), targeting the RTX 3060 on the same host as the assistant. The heavy
+    # models never load in jarvis-core/jarvis-web's own process -- see
+    # core/detector.py and core/face_recognition.py's docstrings -- this config only
+    # says which cameras exist and how the pipeline should behave; the actual inference
+    # runs in scripts/vision_worker.py, under its own .venv-vision. Each entry in
+    # `cameras` is {key, name, url, kind ('mjpeg'|'rtsp'|'local'), location,
+    # motion_threshold, recordable}. Omit `cameras` (or leave it empty) and the whole
+    # vision side stays inert: no cameras seeded, conversation_mode never returns true.
+    cameras: list[dict] = None
+    vision_device: str | None = None   # e.g. "cuda:0"; None = auto-detect
+    camera_poll_seconds: float = 1.5
+    face_match_threshold: float = 0.42
+    enroll_after_sightings: int = 3
+    # Which voice device's room a camera watches, for open-mic gating -- day one, Touch1
+    # and laptop1 are both their own camera and their own voice terminal, so the map
+    # starts as the identity map. Override in config.json if a device and its camera
+    # ever diverge (e.g. a device with no camera of its own, watched by a neighbouring
+    # one).
+    device_camera_map: dict = field(default_factory=lambda: {"touch1": "touch1", "laptop1": "laptop1"})
+    # Room Presence & Identity gating for an unattended voice terminal's /turn (see
+    # core/presence.py) -- how recent a camera confirmation counts, and which
+    # known_people.access_level values unlock personal/financial context. Defaults match
+    # presence.py's own DEFAULT_AUTHORIZED_ACCESS_LEVELS/confirmed_identity default so a
+    # deployment that never sets these gets the same fail-closed behaviour the module
+    # documents.
+    presence_confirm_window_seconds: int = 45
+    presence_authorized_access_levels: list[str] = field(default_factory=lambda: ["owner"])
+    # Cross-terminal wake-word arbitration (core/wake_arbitration.py) -- how long a
+    # terminal waits to see a louder rival claim before proceeding, and the margin a
+    # rival needs to clearly beat it by. Defaults match wake_arbitration.py's own
+    # DEFAULT_WINDOW_MS/DEFAULT_MARGIN.
+    wake_arbitration_window_ms: int = 400
+    wake_arbitration_margin: float = 0.05
     # Shared bearer token Home Assistant's actionable-notification automation sends.
     notification_token: str | None = None
     # SSH login used to sweep the house Pis and Ubuntu boxes for media. One password
@@ -232,30 +266,6 @@ class Config:
     # business_agents_enabled — that switch is about the print business's unattended agents,
     # and nesting this under it would make personal research silently never run by default.
     personal_research_interval_minutes: int = 30
-    # Camera-based presence and identity: YOLO11n person/pet detection (already used by
-    # detector.py) plus InsightFace face matching (assistant/core/face_id.py). Off by
-    # default like every other GPU-dependent integration here -- the detection loop only
-    # ever runs in the core process (main.py), on whichever machine actually has the
-    # RTX 3060, never in the web process (see assistant/web/app.py's own docstring about
-    # running on pi5nas002, not the GPU box).
-    vision_enabled: bool = False
-    # None = auto-detect (cuda:0 if available, else cpu) -- same convention as
-    # detector.Detector's own device parameter.
-    vision_device: str | None = None
-    vision_model_name: str = "yolo11n.pt"
-    vision_face_model_name: str = "buffalo_l"
-    vision_poll_seconds: float = 2.0
-    # Cosine similarity on InsightFace's normalised 512-d embeddings. 0.38 is a
-    # reasonable starting point for buffalo_l but genuinely needs calibrating against
-    # the real cameras and real faces this deployment sees -- flagged for owner testing,
-    # not something to trust blindly out of the box.
-    vision_face_match_threshold: float = 0.38
-    # How many times an unfamiliar face has to be seen before it becomes a Review-page
-    # enrollment request, rather than pestering the owner over one glimpse.
-    vision_unknown_face_ask_after: int = 3
-    # How long an 'identified' sighting on a camera still counts as someone being there,
-    # for both vision.presence_now() and the identity gate in devices.py's /turn.
-    vision_presence_window_seconds: int = 180
 
 
 def load_config(path: str = "config.json") -> Config:
@@ -339,6 +349,16 @@ def load_config(path: str = "config.json") -> Config:
         gpu_max_concurrent=data.get("gpu_max_concurrent", 2),
         comfy_host=data.get("comfy_host"),
         device_api_key=data.get("device_api_key"),
+        cameras=data.get("cameras"),
+        vision_device=data.get("vision_device"),
+        camera_poll_seconds=data.get("camera_poll_seconds", 1.5),
+        face_match_threshold=data.get("face_match_threshold", 0.42),
+        enroll_after_sightings=data.get("enroll_after_sightings", 3),
+        device_camera_map=data.get("device_camera_map", {"touch1": "touch1", "laptop1": "laptop1"}),
+        presence_confirm_window_seconds=data.get("presence_confirm_window_seconds", 45),
+        presence_authorized_access_levels=data.get("presence_authorized_access_levels", ["owner"]),
+        wake_arbitration_window_ms=data.get("wake_arbitration_window_ms", 400),
+        wake_arbitration_margin=data.get("wake_arbitration_margin", 0.05),
         notification_token=data.get("notification_token"),
         livecoinwatch_api_key=data.get("livecoinwatch_api_key"),
         market_poll_seconds=data.get("market_poll_seconds", 60),
@@ -377,12 +397,4 @@ def load_config(path: str = "config.json") -> Config:
         pipeline_interval_hours=data.get("pipeline_interval_hours", 12),
         business_digest_hour=data.get("business_digest_hour", 8),
         personal_research_interval_minutes=data.get("personal_research_interval_minutes", 30),
-        vision_enabled=data.get("vision_enabled", False),
-        vision_device=data.get("vision_device"),
-        vision_model_name=data.get("vision_model_name", "yolo11n.pt"),
-        vision_face_model_name=data.get("vision_face_model_name", "buffalo_l"),
-        vision_poll_seconds=data.get("vision_poll_seconds", 2.0),
-        vision_face_match_threshold=data.get("vision_face_match_threshold", 0.38),
-        vision_unknown_face_ask_after=data.get("vision_unknown_face_ask_after", 3),
-        vision_presence_window_seconds=data.get("vision_presence_window_seconds", 180),
     )

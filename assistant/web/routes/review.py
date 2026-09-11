@@ -1,12 +1,14 @@
 """The review queue — everything the team has made that needs the owner's decision.
 
 Approving here doesn't just tick a card: when a review item references a pipeline row
-(a product concept, an art brief, a listing, a post, an unfamiliar face) the decision is
-written through to that row as well. Otherwise the office would show an approved design
-that the Art Director still can't see, or a face the owner just named would stay an
-anonymous sighting forever -- exactly the kind of quietly-wrong state that makes a
-dashboard untrustworthy.
+(a product concept, an art brief, a listing, a post, an ops plan, a capability request, a
+pending sensitive-tool call, an opened PR, an unrecognised face), the decision is written
+through to that row as well. Otherwise the office would show an approved design the Art
+Director still can't see, a confirmed action that never actually ran, or a face the house
+keeps asking about after the owner already named them -- exactly the kind of quietly-wrong
+state that makes a dashboard untrustworthy.
 """
+import json
 import mimetypes
 import pathlib
 
@@ -28,6 +30,27 @@ def _owner_id(request: Request) -> int:
     return user["id"]
 
 
+def _apply_enrollment_decision(db_path: str, item: dict, decision: str, note: str | None) -> str | None:
+    """The write-through for an 'unrecognised face' review item: approving it turns a
+    stranger's accumulated sightings into a named known_people row; rejecting leaves
+    them unidentified. Either way the unknown_faces row stays 'asked' (set when the item
+    was created), so the house won't ask about the same face again on its own.
+    """
+    face = vision.get_unknown_face(db_path, item["ref_id"])
+    if face is None:
+        return None
+    if decision != "approved":
+        return f"unknown_faces#{item['ref_id']} -> left unidentified"
+    name = (note or "").strip()
+    if not name:
+        # Unreachable in normal use -- decide() checks this before the decision is even
+        # recorded -- but a missing name must never silently enroll someone as "".
+        return None
+    key = vision.enroll_known_person(db_path, name, json.loads(face["embedding"]))
+    vision.resolve_unknown_face(db_path, item["ref_id"], key)
+    return f"unknown_faces#{item['ref_id']} -> known_people#{key}"
+
+
 @router.get("/items")
 async def list_items(request: Request, status: str = "pending", limit: int = 50):
     owner = _owner_id(request)
@@ -46,10 +69,20 @@ async def decide(item_id: int, request: Request):
     decision = body.get("decision")
     if decision not in ("approved", "rejected", "cancelled"):
         raise HTTPException(400, "decision must be approved, rejected or cancelled")
+    note = body.get("note")
+
+    # Enrolling a new known person needs a name up front. Checked before the decision is
+    # recorded, because a review item can only ever be decided once (see
+    # decide_review_item) -- "approved, but nobody was actually enrolled" would be a
+    # silent dead end with no way to retry from this same card.
+    pending_item = business_db.get_review_item(cfg.db_path, owner, item_id)
+    if (pending_item and pending_item.get("ref_table") == "unknown_faces" and decision == "approved"
+            and not (note or "").strip()):
+        raise HTTPException(400, "type the person's name in the note before approving")
 
     item = business_db.decide_review_item(
         cfg.db_path, owner, item_id, decision,
-        option_id=body.get("option_id"), note=body.get("note"),
+        option_id=body.get("option_id"), note=note,
     )
     if item is None:
         # Either it doesn't exist or it was already decided — both mean "not yours to
@@ -94,18 +127,7 @@ async def decide(item_id: int, request: Request):
         else:
             written_through = f"git_pull_requests#{ref_id} -> left open on GitHub"
     elif ref_table == "unknown_faces" and ref_id:
-        # The enrollment flow: an unfamiliar face only ever becomes (or gets folded
-        # into) a known person here, after this exact approval. chosen is whichever
-        # review_option the owner picked -- its `body` carries which existing person
-        # was matched, or that this is a brand new enrollment (see vision_runtime.py's
-        # _create_face_review for how the options are built).
-        chosen = next((o for o in item.get("options", []) if o.get("chosen")), None)
-        result = vision.apply_face_review_decision(
-            cfg.db_path, ref_id, decision,
-            chosen.get("body") if chosen else None, body.get("note"),
-        )
-        if result:
-            written_through = result
+        written_through = _apply_enrollment_decision(cfg.db_path, item, decision, note)
     else:
         business = request.app.state.business
         ssh_ops = getattr(business.mcp_client, "ssh_ops", None) if business is not None else None

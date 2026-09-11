@@ -10,7 +10,7 @@ from .core.setup import (
     build_era_context, build_git_ops_context, build_gpu_bridge, build_notifier,
     build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
     build_local_llm_context, build_mail_context, build_obsidian_context, build_personal_context,
-    build_phone_context, build_recipe_context, build_ticketmaster_context, build_vision_context,
+    build_phone_context, build_recipe_context, build_ticketmaster_context,
 )
 from .transports import telegram_bot
 
@@ -18,6 +18,26 @@ from .core.logging_setup import setup_logging
 
 setup_logging("jarvis-core")
 logger = logging.getLogger(__name__)
+
+
+def _seed_cameras(cfg) -> None:
+    """Cameras are metadata (a key/name/url), so config.json is the source of truth for
+    day-one coverage -- same pattern as seeding users below. The actual detection loop
+    (scripts/vision_worker.py, run from the separate jarvis-vision.service/vision_main.py
+    process -- see that module's docstring) never touches config; it just reads whatever
+    rows are here, so adding a camera through the web UI later works without editing
+    this list.
+    """
+    for cam in cfg.cameras or []:
+        try:
+            vision.add_camera(
+                cfg.db_path, cam["key"], cam["name"], cam["url"],
+                kind=cam.get("kind", "mjpeg"), location=cam.get("location", ""),
+                motion_threshold=cam.get("motion_threshold", 0.012),
+                recordable=cam.get("recordable", True),
+            )
+        except Exception:
+            logger.exception("failed to seed camera %r from config", cam.get("key"))
 
 
 def main() -> None:
@@ -30,6 +50,7 @@ def main() -> None:
     # show_camera/list_cameras/add_camera are always-on tools (see engine.py's CAMERA_TOOLS),
     # not behind a build_*_context flag, so the cameras table must exist unconditionally too.
     vision.init_vision_db(cfg.db_path)
+    _seed_cameras(cfg)
     # github_pr_state backs the GitHub PR/CI watchdog (scheduler.py's run_github_watchdog)
     # -- unconditional for the same reason business_db/vision are: cheap to create, and
     # the watchdog job itself is what actually checks whether git_ops is configured.
@@ -67,13 +88,11 @@ def main() -> None:
     if bridge is not None:
         bridge.start_worker()
 
-    # Same reasoning as the GPU bridge: the detection loop needs local CUDA (the RTX
-    # 3060 both detector.py and face_id.py target) and must only ever run in the process
-    # actually deployed on that hardware -- which is this one, per detector.py's own
-    # docstring ("Runs YOLO on the laptop's RTX 3060").
-    vision_runtime = build_vision_context(cfg, owner_row["id"] if owner_row else None)
-    if vision_runtime is not None:
-        vision_runtime.start_worker(poll_seconds=cfg.vision_poll_seconds)
+    # The actual camera-watching/YOLO/InsightFace detection loop runs in its own process
+    # (jarvis-vision.service / assistant/vision_main.py) and its own virtualenv
+    # (.venv-vision) -- never in this one. See vision_main.py's docstring for why: torch/
+    # ultralytics/insightface are real GPU dependencies that must not become something
+    # the Telegram/chat process needs installed just to answer a question.
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -89,8 +108,7 @@ def main() -> None:
     notify = build_notifier(cfg, telegram_bot.make_notifier(application, loop), home_assistant)
     # assign_work's queue (see work_queue.WorkQueue) is constructed back in
     # build_business_context, before notify exists -- started here, now that it does, the
-    # same way the GPU bridge and vision workers below are started separately from where
-    # they're built.
+    # same way the GPU bridge is started separately from where it's built.
     if business is not None and business.work_queue is not None:
         # Any staff_work/work_queue row still 'running' at this point cannot be a real
         # in-progress job -- this process just started, and both drain strictly one job

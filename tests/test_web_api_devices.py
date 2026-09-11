@@ -22,6 +22,8 @@ class FakeConfig:
     timezone: str = "America/New_York"
     web_session_secret: str = "test-secret"
     device_api_key: str = "device-secret"
+    presence_confirm_window_seconds: int = 45
+    presence_authorized_access_levels: list = field(default_factory=lambda: ["owner"])
 
 
 class FakeSTT:
@@ -141,10 +143,26 @@ def _personal_for(cfg):
     return PersonalContext(mcp_client=PersonalClient(cfg.db_path, owner))
 
 
+def _confirm_presence(cfg, device_id: str) -> None:
+    """display_recipe lives on `personal`, one of Room Presence & Identity's gated
+    contexts (assistant/core/presence.py) -- with no camera confirming who's there, a
+    turn now runs as an identity-less guest and personal gets stripped entirely, same as
+    every other unconfirmed terminal. These tests are about the recipe relay, not
+    presence gating itself, so they confirm the owner on camera the same way
+    test_web_api_devices_presence.py does, rather than exercise the gate.
+    """
+    camera_key = f"{device_id}_cam"
+    vision.add_camera(cfg.db_path, camera_key, f"{device_id} camera", f"http://{device_id}/snapshot")
+    vision.set_terminal_camera(cfg.db_path, device_id, camera_key)
+    vision.enroll_known_person(cfg.db_path, "Dug", [1.0, 0.0, 0.0], access_level="owner")
+    vision.record_event(cfg.db_path, camera_key, "identified", person_key="dug", label="Dug")
+
+
 def test_turn_at_the_kitchens_own_kiosk_shows_the_recipe_the_same_turn(cfg):
     """display_recipe's target device_id (laptop1, kitchen_tools.KITCHEN_DEVICE_MAP) is
     the same device asking here -- an immediate same-turn display, not just eventually
     via the next poll."""
+    _confirm_presence(cfg, "laptop1")
     personal = _personal_for(cfg)
     recipe_id = kitchen_db.create_recipe(
         cfg.db_path, personal.mcp_client.owner_user_id, "Pancakes",
@@ -171,6 +189,7 @@ def test_turn_at_the_kitchens_own_kiosk_shows_the_recipe_the_same_turn(cfg):
 def test_display_recipe_from_a_different_device_reaches_the_target_on_its_next_poll(cfg):
     """The command is issued at touch1 but targets the kitchen screen (laptop1) -- touch1
     never sees it, laptop1 picks it up purely from its own poll, no /turn involved."""
+    _confirm_presence(cfg, "touch1")
     personal = _personal_for(cfg)
     recipe_id = kitchen_db.create_recipe(
         cfg.db_path, personal.mcp_client.owner_user_id, "Chili",
@@ -196,6 +215,7 @@ def test_display_recipe_from_a_different_device_reaches_the_target_on_its_next_p
 
 
 def test_recipe_seq_increments_so_the_kiosk_can_detect_a_fresh_display(cfg):
+    _confirm_presence(cfg, "laptop1")
     personal = _personal_for(cfg)
     recipe_id = kitchen_db.create_recipe(
         cfg.db_path, personal.mcp_client.owner_user_id, "Pancakes", [{"name": "flour"}], ["Mix."])

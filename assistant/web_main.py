@@ -1,4 +1,4 @@
-﻿"""Entrypoint for the web UI (jarvis-web.service) — separate process from main.py's
+"""Entrypoint for the web UI (jarvis-web.service) — separate process from main.py's
 Telegram bot, sharing config/db but running independently."""
 import logging
 
@@ -23,6 +23,21 @@ setup_logging("jarvis-web")
 logger = logging.getLogger(__name__)
 
 
+def _seed_cameras(cfg) -> None:
+    """Same seeding as main.py -- add_camera is an upsert, so both processes doing this
+    at startup is harmless (identical to how both already upsert users)."""
+    for cam in cfg.cameras or []:
+        try:
+            vision.add_camera(
+                cfg.db_path, cam["key"], cam["name"], cam["url"],
+                kind=cam.get("kind", "mjpeg"), location=cam.get("location", ""),
+                motion_threshold=cam.get("motion_threshold", 0.012),
+                recordable=cam.get("recordable", True),
+            )
+        except Exception:
+            logger.exception("failed to seed camera %r from config", cam.get("key"))
+
+
 def main() -> None:
     cfg = load_config()
     db.init_db(cfg.db_path)
@@ -37,6 +52,7 @@ def main() -> None:
     # show_camera/list_cameras/add_camera are always-on tools (see engine.py's CAMERA_TOOLS),
     # not behind a build_*_context flag, so the cameras table must exist unconditionally too.
     vision.init_vision_db(cfg.db_path)
+    _seed_cameras(cfg)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)
 

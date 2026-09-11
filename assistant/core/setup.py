@@ -12,13 +12,11 @@ from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
 from .claude_cli import ClaudeCLIClient
-from .detector import Detector
 from .engine import (
     AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, GitOpsContext,
     HomeAssistantContext, KrogerContext, LetterStreamContext, MailContext, ObsidianContext,
     PersonalContext, PhoneContext, RecipeContext, TicketmasterContext,
 )
-from .face_id import FaceIdentifier
 from .git_ops import GitOpsClient
 from .git_tools import GIT_TOOLS
 from .personal_tools import PersonalClient
@@ -29,7 +27,6 @@ from .mcp_client import MCPClient
 from .mcp_stdio_client import StdioMCPClient
 from .obsidian_client import ObsidianClient
 from .ssh_ops import SSHOpsClient
-from .vision_runtime import VisionRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -204,38 +201,6 @@ def build_git_ops_context(cfg) -> GitOpsContext | None:
     logger.info("Git ops: targeting %s, %d tools, %d gated as sensitive",
                cfg.github_repo, len(GIT_TOOLS), len(GIT_SENSITIVE_TOOLS))
     return GitOpsContext(mcp_client=client, git_tools=GIT_TOOLS, sensitive_tools=GIT_SENSITIVE_TOOLS)
-
-
-def build_vision_context(cfg, owner_user_id: int | None):
-    """Camera-based presence and identity (YOLO11n person detection, InsightFace face
-    matching). The schema is initialised unconditionally — cheap and DB-only — so the
-    Review page's enrollment flow and the /api/vision/* routes work even on a process
-    that never runs detection at all (see web_main.py, which calls vision.init_vision_db
-    directly rather than this function).
-
-    Returns None (schema only, no runtime) when vision is off or there's no owner to
-    attribute Review-page items to. Never starts the background worker itself — the
-    caller (main.py) decides that, same build-vs-start split as build_gpu_bridge,
-    because the detection loop needs local CUDA for the RTX 3060 both detector.py and
-    face_id.py target, and must only ever run in the process actually deployed there.
-    """
-    vision.init_vision_db(cfg.db_path)
-    if not cfg.vision_enabled or owner_user_id is None:
-        return None
-
-    detector = Detector(model_name=cfg.vision_model_name, device=cfg.vision_device)
-    face_identifier = FaceIdentifier(model_name=cfg.vision_face_model_name, device=cfg.vision_device)
-    runtime = VisionRuntime(
-        cfg.db_path, owner_user_id, detector, face_identifier, cfg.generated_media_path,
-        face_match_threshold=cfg.vision_face_match_threshold,
-        unknown_face_ask_after=cfg.vision_unknown_face_ask_after,
-    )
-    logger.info(
-        "Vision: enabled (person model=%s, face model=%s) — both load lazily on the "
-        "first camera pass; %d camera(s) currently registered",
-        cfg.vision_model_name, cfg.vision_face_model_name, len(vision.list_cameras(cfg.db_path)),
-    )
-    return runtime
 
 
 def build_personal_context(

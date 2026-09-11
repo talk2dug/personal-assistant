@@ -1,4 +1,4 @@
-﻿"""Background poller that fires due reminders, and (optionally) pulls Apple Calendar
+"""Background poller that fires due reminders, and (optionally) pulls Apple Calendar
 changes into the reminders table and refreshes the Era finance cache. Transport-agnostic:
 takes a notify(chat_id, text) callback so it doesn't need to know about Telegram.
 """
@@ -9,10 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import (
-    agents, business_db, db, github_client, kitchen_db, location, mail_triage, market_data,
-    paper_trading, personal_agents, personal_db, staff,
-)
+from . import agents, business_db, db, location, market_data, paper_trading, personal_agents, staff
 from .engine import handle_message
 from .finance import CADENCE_DAYS
 
@@ -29,43 +26,14 @@ def start(
     market_api_key: str | None = None, market_poll_seconds: int = 60,
     market_track_limit: int = 250,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
-    personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
-    mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
-    mail_triage_interval_minutes: int = 30, mail_triage_scan_limit: int = 15,
-    kroger_sync_interval_seconds: int = 3600,
-    task_watchdog_interval_seconds: int = 60,
-    review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
-    github_watchdog_interval_seconds: int = 180,
-    local_llm=None, local_llm_keepalive_interval_seconds: int = 600,
-    staff_assignment_timeout_seconds: int = 10800,
+    personal=None, personal_research_minutes: int = 30,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
     business is an engine.BusinessContext; together with a web-searching llm AND
     business_agents_enabled it schedules the market/trend/research/pipeline agents and the
     daily briefing. With business_agents_enabled False (the default) nothing agent-related
-    is scheduled at all, though every agent still runs on demand from chat.
-    mail is an engine.MailContext; when present it also schedules the autonomous
-    junk-flagging pass (mail_junk_scan) regardless of business_agents_enabled -- triaging
-    the owner's own inbox isn't a print-business agent, it's core mail hygiene, the same
-    reasoning personal_research_interval_minutes uses below. mail, together with llm,
-    also schedules mail_triage (see mail_triage.py) -- drafts a reply for messages that
-    need one and leaves it in the review queue; nothing here can send anything.
-    kroger, when given alongside personal, schedules kroger_sync -- see
-    kitchen_db.sync_kroger_orders's own docstring for the real (narrow) limits of what
-    this can actually find: only orders Jarvis's own cart tools built and that were
-    later marked placed, never a trip made independently on Kroger's own app or site.
-
-    personal, on its own, also schedules the task-due-date watchdog (mechanical --
-    notifies directly, no LLM round trip, same as reminders). business, together with
-    llm, schedules the Review-queue staleness watchdog (a pending item nudges the owner
-    through handle_message once it's sat unreviewed past review_watchdog_stale_hours).
-    git_ops, together with llm, schedules the GitHub PR/CI watchdog (polls every open
-    PR via the same GitOpsClient every git tool uses, and nudges the owner on any real
-    state change -- a check failing, a PR becoming (un)mergeable, a merge/close). All
-    three watchdog jobs are deliberately NOT gated behind business_agents_enabled, same
-    reasoning as mail_junk_scan: noticing the owner has something waiting on him is core
-    watchdog behaviour, not a print-business agent. See docs/watchdog-system-design.md."""
+    is scheduled at all, though every agent still runs on demand from chat."""
     business_intervals = business_intervals or {
         "market_hours": 72, "trend_hours": 24, "research_minutes": 120,
         "pipeline_hours": 12, "digest_hour": 8,
@@ -125,105 +93,6 @@ def start(
 
         scheduler.add_job(_era_cache_tick, "interval", seconds=era_cache_interval_seconds, id="era_cache_refresh")
 
-    if mail is not None:
-        def _mail_junk_tick():
-            result = run_mail_junk_scan(mail.mcp_client, limit=mail_junk_scan_limit)
-            if result.get("flagged"):
-                logger.info(
-                    "mail junk scan: flagged %d of %d scanned message(s) as junk (moved %d)",
-                    result["flagged"], result["scanned"], result.get("moved", 0),
-                )
-
-        scheduler.add_job(
-            _guarded_simple("mail_junk_scan", _mail_junk_tick), "interval",
-            seconds=mail_junk_scan_interval_seconds, id="mail_junk_scan",
-            # A minute after boot rather than a full interval away, same reasoning as
-            # the research queues below: new spam doesn't wait for a service restart's
-            # remaining interval to elapse before it's worth a first look.
-            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
-        )
-
-    if mail is not None and llm is not None:
-        # Draft-reply generation (see mail_triage.py). Deliberately requires only mail +
-        # a plain .chat()-capable llm, NOT hasattr(llm, "research") like the agents above
-        # -- drafting a reply from a message already in hand needs no web search, so this
-        # runs on the Ollama backend too, not just Claude CLI. It only ever writes to the
-        # email_drafts table and the review queue; nothing here can send anything.
-        owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
-        if owner is not None:
-            scheduler.add_job(
-                _guarded_simple(
-                    "mail_triage",
-                    lambda: mail_triage.run_mail_triage_once(
-                        db_path, llm, mail.mcp_client, owner["id"], limit=mail_triage_scan_limit),
-                ),
-                "interval", minutes=mail_triage_interval_minutes, id="mail_triage_agent",
-                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
-            )
-
-    if business is not None and llm is not None:
-        # The Review-queue staleness watchdog: catches a pending item nobody ever came
-        # back to, not just what's currently pending when someone happens to open the
-        # page. Deliberately outside the business_agents_enabled gate -- same reasoning
-        # as mail_junk_scan above: noticing the owner has something waiting on him
-        # (which includes any sensitive-tool confirmation, e.g. a PR ready to merge --
-        # see review.py's ref_table == 'pending_actions' branch) is core watchdog
-        # behaviour, not a print-business agent that owner switch is meant to gate.
-        def _review_watchdog_tick():
-            results = run_review_watchdog(
-                db_path, llm, notify, hours=review_watchdog_stale_hours, tz_name=tz_name,
-                era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
-                home_assistant=home_assistant, business=business, personal=personal,
-                airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
-            )
-            if results:
-                logger.info("review watchdog: nudged on %d stale item(s)", len(results))
-
-        scheduler.add_job(
-            _guarded_simple("review_watchdog", _review_watchdog_tick), "interval",
-            seconds=review_watchdog_interval_seconds, id="review_watchdog",
-            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
-        )
-
-    if git_ops is not None and llm is not None:
-        # The GitHub PR/CI watchdog -- the sharpest pain point this whole watchdog
-        # effort was built for ("coding isn't getting done, I find out hours later").
-        # Deliberately outside business_agents_enabled, same reasoning as mail_junk_scan
-        # and review_watchdog above: noticing a dev-team PR's CI just failed is core
-        # watchdog behaviour, not a print-business agent.
-        def _github_watchdog_tick():
-            results = run_github_watchdog(
-                db_path, git_ops.mcp_client, llm, notify, tz_name=tz_name,
-                era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
-                home_assistant=home_assistant, business=business, personal=personal,
-                airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
-            )
-            if results:
-                logger.info("github watchdog: nudged on %d PR change(s)", len(results))
-
-        scheduler.add_job(
-            _guarded_simple("github_watchdog", _github_watchdog_tick), "interval",
-            seconds=github_watchdog_interval_seconds, id="github_watchdog",
-            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
-        )
-
-    if local_llm is not None:
-        # Keeps the local-fast-path model resident in VRAM (local_fast_path.py) --
-        # Ollama's own keep_alive only resets on each real use, so a quiet period, or
-        # another job on the same GPU claiming its memory, can let it fall out. Without
-        # this, the very first real request after that pays a real ~10s reload cost
-        # instead of the sub-second warm response the fast path exists to provide.
-        def _local_llm_keepalive_tick():
-            local_llm.chat([{"role": "user", "content": "ok"}], think=False)
-
-        scheduler.add_job(
-            _guarded_simple("local_llm_keepalive", _local_llm_keepalive_tick), "interval",
-            seconds=local_llm_keepalive_interval_seconds, id="local_llm_keepalive",
-            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
-        )
-
     if home_assistant is not None:
         owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
         _last_forced_refresh = 0.0
@@ -277,7 +146,7 @@ def start(
                         era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
                         home_assistant=home_assistant, business=business, personal=personal,
                         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                        letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
+                        letterstream=letterstream,
                     )
                     if reply:
                         notify(owner["telegram_chat_id"], f"{routine['name']}: {reply}")
@@ -384,35 +253,31 @@ def start(
 
             The employee produced a judgement; this decides it is worth sending and how
             loudly. Nothing an employee writes reaches the phone without passing through
-            here, so an unattended job cannot notify on its own authority. Formatting is
-            shared with the async work queue's cadence notifier (main.py) via
-            staff.format_alert_text, so the message reads identically either way.
+            here, so an unattended job cannot notify on its own authority.
             """
             if owner is None:
                 return
-            notify(owner["telegram_chat_id"], staff.format_alert_text(headline, body, urgency, person))
+            prefix = {"high": "URGENT", "normal": "", "low": "FYI"}.get(urgency, "")
+            title = f"{person['title']}: {headline}".strip()
+            text = f"{prefix + ' - ' if prefix else ''}{title}\n\n{(body or '').strip()[:1200]}"
+            notify(owner["telegram_chat_id"], text)
 
         def _staff_tick():
             """One pass over the roster.
 
             Logs on every tick, including the empty ones: "nobody was due" and "the job
             stopped firing" are indistinguishable from the outside, and telling them
-            apart after the fact is exactly what was needed here. With business.work_queue
-            wired (the normal case), run_due only enqueues -- see its own docstring for
-            why -- so ok/alert/alerted are None/False here and the real outcome is logged
-            later by the work queue's worker instead.
+            apart after the fact is exactly what was needed here.
             """
             due = staff.due_for_cadence(db_path, tz_name)
             if not due:
                 logger.debug("staff tick: nobody due")
                 return
             logger.info("staff tick: running %s", [p["key"] for p in due])
-            results = staff.run_due(db_path, llm, tz_name=tz_name, notify=_staff_alert,
-                                    timeout=staff_assignment_timeout_seconds,
-                                    work_queue=business.work_queue)
+            results = staff.run_due(db_path, llm, tz_name=tz_name, notify=_staff_alert)
             for r in results:
-                logger.info("staff run %s queued=%s ok=%s alert=%s alerted=%s",
-                            r["employee"], r.get("queued"), r["ok"], r["alert"], r["alerted"])
+                logger.info("staff run %s ok=%s alert=%s alerted=%s",
+                            r["employee"], r["ok"], r["alert"], r["alerted"])
 
         scheduler.add_job(
             _guarded("staff_cadence", _staff_tick),
@@ -444,50 +309,45 @@ def start(
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
 
-    if personal is not None:
-        # The task-due-date watchdog. Purely mechanical (see run_task_watchdog), so
-        # unlike personal_research above it needs no LLM at all -- a due_at column
-        # already saying "now" is the judgement, same as reminders.
-        def _task_watchdog_tick():
-            results = run_task_watchdog(db_path, notify)
-            if results:
-                logger.info("task watchdog: notified %d due task(s)", len(results))
-
-        scheduler.add_job(
-            _guarded_simple("task_watchdog", _task_watchdog_tick), "interval",
-            seconds=task_watchdog_interval_seconds, id="task_watchdog",
-        )
-
-    if kroger is not None and personal is not None:
-        owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
-
-        def _kroger_sync_tick():
-            result = kitchen_db.sync_kroger_orders(kroger.mcp_client, db_path, owner["id"])
-            if result.get("ok") and result.get("synced_orders"):
-                logger.info("kroger sync: folded %d newly-placed order(s) into inventory (%d item write(s))",
-                            result["synced_orders"], len(result.get("items_updated") or []))
-            elif not result.get("ok"):
-                logger.warning("kroger sync failed: %s", result.get("error"))
-
-        if owner is not None:
-            scheduler.add_job(
-                _guarded_simple("kroger_sync", _kroger_sync_tick), "interval",
-                seconds=kroger_sync_interval_seconds, id="kroger_sync",
-                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
-            )
-
     if market_api_key:
         # The crypto feed. Deliberately outside the business_agents_enabled gate: the
         # cache is cheap (1 credit a poll, 14% of the daily budget at 60s) and an
         # employee that wakes to an empty table is worse than useless -- it would report
         # "no data" as though that were a market condition.
+        risk_owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+
         def _market_tick():
             result = market_data.refresh(db_path, market_api_key, limit=market_track_limit)
             if not result.get("ok"):
                 logger.warning("market poll failed: %s", result.get("error"))
-            elif result.get("appeared") or result.get("disappeared"):
+                return
+            if result.get("appeared") or result.get("disappeared"):
                 logger.info("market listings changed: +%s -%s",
                             result["appeared"], result["disappeared"])
+
+            # Stop-loss/take-profit is a hard mandate, not something the paper trading
+            # employee is trusted to enforce through its own qualitative judgement --
+            # that is exactly what let a losing position sit unresolved for days. Checked
+            # here, on every price refresh, so it runs independent of whether or when the
+            # employee's own reasoning cadence fires. See paper_trading.check_risk_limits.
+            try:
+                risk = paper_trading.check_risk_limits(db_path)
+            except Exception:
+                logger.exception("risk limit check failed")
+                risk = None
+            if risk and risk.get("closed"):
+                for c in risk["closed"]:
+                    logger.info("risk control: %s %s qty=%.6f @ %.6f (%.2f%%) realized=%.2f",
+                                c["trigger"], c["code"], c["qty"], c["price"],
+                                c["unrealized_pct"], c.get("realized", 0.0))
+                    if risk_owner is not None:
+                        label = "Stop-loss" if c["trigger"] == "stop_loss" else "Take-profit"
+                        notify(
+                            risk_owner["telegram_chat_id"],
+                            f"{label} triggered: closed {c['code']} at {c['unrealized_pct']:+.2f}% "
+                            f"(${c.get('realized', 0.0):+.2f} realized). This was the automatic "
+                            f"mandate, not the trading employee's call.",
+                        )
 
         scheduler.add_job(
             _guarded_simple("market", _market_tick), "interval",
@@ -495,24 +355,6 @@ def start(
             next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
         )
         logger.info("market feed: polling top %d every %ds", market_track_limit, market_poll_seconds)
-
-        # Mechanically enforces the paper-trading desk's stored stop-loss/take-profit
-        # levels against each fresh price poll -- the actual fix for "lack of numeric
-        # exit discipline": a position closes the moment its level is hit, rather than
-        # waiting up to 5 minutes for the day-trader's own next cycle to notice (or not).
-        # Runs right after the market poll it depends on, on the same cadence -- checking
-        # faster than prices actually refresh would just repeat the same comparison.
-        def _check_stops_tick():
-            result = paper_trading.check_stops(db_path)
-            for fill in result.get("fills", []):
-                logger.info("paper trading: auto-closed %s %s @ %s (%s)",
-                           fill["code"], fill.get("realized"), fill["price"], fill["reason"])
-
-        scheduler.add_job(
-            _guarded_simple("paper_stop_loss", _check_stops_tick), "interval",
-            seconds=market_poll_seconds, id="paper_stop_loss",
-            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=15),
-        )
 
     scheduler.start()
     return scheduler
@@ -541,15 +383,8 @@ def sync_calendar(
         remote_start = event["start"]
         if remote_start is None:
             continue
-        if isinstance(remote_start, datetime):
-            if remote_start.tzinfo is None:
-                remote_start = remote_start.replace(tzinfo=timezone.utc)
-        else:
-            # An all-day event's DTSTART (icalendar's dtstart.dt) is a plain date, not
-            # a datetime -- it has no time-of-day and, unlike datetime, no .tzinfo
-            # attribute at all. Treat it as midnight UTC on that date so it still gets
-            # a concrete due_at instead of crashing this job every cycle.
-            remote_start = datetime(remote_start.year, remote_start.month, remote_start.day, tzinfo=timezone.utc)
+        if remote_start.tzinfo is None:
+            remote_start = remote_start.replace(tzinfo=timezone.utc)
         remote_due_at = remote_start.astimezone(timezone.utc).isoformat()
 
         existing = db.find_reminder_by_caldav_uid(db_path, uid)
@@ -609,132 +444,3 @@ def refresh_era_cache(mcp_client, db_path: str) -> None:
                 db_path, group["category_key"], period, group.get("label", ""),
                 group["amount"], group.get("percent_of_total"), group.get("transaction_count"),
             )
-
-
-def run_mail_junk_scan(mcp_client, limit: int = 25) -> dict:
-    """One pass of the autonomous junk-flagging job: asks the mail client to score
-    recent unread inbox mail and move likely junk into the Junk folder, returning its
-    summary for logging.
-
-    A thin top-level wrapper (rather than inlining this in start()'s closure) so it's
-    directly unit-testable against a fake mail client, the same pattern
-    refresh_era_cache/sync_calendar already use.
-    """
-    return mcp_client.call_tool("scan_inbox_for_junk", {"limit": limit, "only_unread": True})
-
-
-def run_task_watchdog(db_path: str, notify, as_of: str | None = None) -> list[dict]:
-    """One pass of the personal-task due-date watchdog: notifies the owner of every
-    task whose due_at has arrived and hasn't been notified about yet, then marks it
-    notified so a slow poll interval can't fire on it twice.
-
-    Purely mechanical -- no LLM round trip -- same reasoning db.due_reminders()'s own
-    _tick uses: there's no judgement to make about a due-date table already saying a
-    task is due. A thin top-level wrapper, same pattern as run_mail_junk_scan, so it's
-    directly unit-testable against a fake notify callback.
-    """
-    results = []
-    users_by_id = {u["id"]: u for u in db.all_users(db_path)}
-    for task in personal_db.due_tasks(db_path, as_of=as_of):
-        owner = users_by_id.get(task["owner_user_id"])
-        notified = False
-        if owner is not None:
-            try:
-                notify(owner["telegram_chat_id"], f"Task due: {task['text']}")
-                notified = True
-            except Exception:
-                logger.exception("failed to notify task %s due", task["id"])
-        personal_db.mark_task_notified(db_path, task["id"])
-        results.append({"task_id": task["id"], "notified": notified})
-    return results
-
-
-def run_review_watchdog(db_path: str, llm, notify, hours: float = 2.0, tz_name: str = "UTC",
-                         **context) -> list[dict]:
-    """One pass of the Review-queue staleness watchdog: for every pending Review item
-    that's sat without a decision longer than `hours`, marks it notified (before running
-    the prompt below -- same reasoning as routines: a slow or failing run must not be
-    retried into a repeat-fire storm) and runs a short synthesized prompt through
-    handle_message so Jarvis describes what's waiting in his own words, then notifies
-    the reply.
-
-    This is the "judgement-needed" watchdog path from docs/watchdog-system-design.md
-    section 3 -- one more caller of handle_message/notify, same as chat and routines,
-    so it inherits the pending_actions confirmation gate automatically and gets no
-    shortcut around it. **context forwards whatever contexts start() was given (era,
-    calendar, business, kroger, git_ops, ...) so the synthesized prompt has the same
-    tool surface a typed chat message would.
-    """
-    results = []
-    users_by_id = {u["id"]: u for u in db.all_users(db_path)}
-    for item in business_db.stale_review_items(db_path, hours=hours):
-        # Mark first: if handle_message throws or hangs, the next tick must not re-nudge
-        # on the same item and pile up duplicate notifications.
-        business_db.mark_review_item_watchdog_notified(db_path, item["id"])
-        owner = users_by_id.get(item["owner_user_id"])
-        if owner is None:
-            results.append({"item_id": item["id"], "notified": False})
-            continue
-        prompt = (
-            f"A Review item has been sitting pending without a decision for over "
-            f"{hours:g} hours: \"{item['title']}\" ({item['kind']}). "
-            f"Summary: {item.get('summary') or 'no summary given'}. "
-            "Briefly let the owner know it's still waiting on his decision."
-        )
-        try:
-            reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name, **context)
-            if reply:
-                notify(owner["telegram_chat_id"], reply)
-            results.append({"item_id": item["id"], "notified": bool(reply)})
-        except Exception:
-            logger.exception("review watchdog failed for item %s", item["id"])
-            results.append({"item_id": item["id"], "notified": False, "error": True})
-    return results
-
-
-def run_github_watchdog(db_path: str, git_ops_client, llm, notify, tz_name: str = "UTC",
-                         **context) -> list[dict]:
-    """One pass of the GitHub PR/CI watchdog: polls every open PR (github_client.refresh,
-    which persists the new state before this even looks at what changed -- same
-    mark-before-running-the-prompt reasoning as run_review_watchdog, just structured as
-    part of the poll itself here), and for every real transition it found (a check just
-    failed, a PR became mergeable/unmergeable, CI finished, a PR got merged or closed)
-    synthesizes a short prompt and runs it through handle_message so Jarvis describes
-    what happened in his own words, then notifies the reply.
-
-    Same judgement-needed path as run_review_watchdog, same reason it's safe: the
-    watchdog's only way to act is handle_message, so it inherits the pending_actions
-    confirmation gate automatically -- noticing a PR is green can never become merging
-    it without the owner saying yes (git_merge_pr already sits in GIT_SENSITIVE_TOOLS,
-    so this needed no new sensitive-tool-list entry, unlike docs/watchdog-system-design.md
-    section 4's general caution for a brand new surface).
-    """
-    result = github_client.refresh(db_path, git_ops_client)
-    if not result.get("ok"):
-        logger.warning("github watchdog poll failed: %s", result.get("error"))
-        return []
-
-    results = []
-    owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
-    if owner is None:
-        return results
-    for change in result["changes"]:
-        prev, now = change["previous"], change["now"]
-        prompt = (
-            f"PR #{change['pr_number']} \"{change['title']}\" ({change['url']}) just changed. "
-            f"Before: state={prev['state']} merged={prev['merged']} mergeable={prev['mergeable']} "
-            f"checks={prev['checks_conclusion']}. Now: state={now['state']} merged={now['merged']} "
-            f"mergeable={now['mergeable']} checks={now['checks_conclusion']}. "
-            "Briefly let the owner know what changed and whether it needs his attention."
-        )
-        try:
-            reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name, **context)
-            if reply:
-                notify(owner["telegram_chat_id"], reply)
-            results.append({"pr_number": change["pr_number"], "notified": bool(reply)})
-        except Exception:
-            logger.exception("github watchdog failed for PR %s", change["pr_number"])
-            results.append({"pr_number": change["pr_number"], "notified": False, "error": True})
-    return results
-
-

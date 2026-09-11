@@ -27,6 +27,8 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 
+from . import market_data
+
 # Taker fee per side. Roughly a retail exchange's rate; the point is that it is not zero.
 DEFAULT_FEE_PCT = 0.10
 DEFAULT_STARTING_CASH = 10_000.0
@@ -34,13 +36,6 @@ DEFAULT_STARTING_CASH = 10_000.0
 # A single order may not exceed this share of total equity. The simulation is meant to
 # show whether the strategy reads the market, not whether one all-in bet happened to land.
 MAX_ORDER_PCT_OF_EQUITY = 25.0
-
-# How long after a stop-loss exit a coin is off-limits for a fresh buy. A real, confirmed
-# incident: the same ticker bought, stopped out, and immediately re-bought minutes later
-# on a "fresh" momentum call several times in one session -- each round-trip pays fees
-# twice and re-risks capital on a thesis that just failed. A genuinely new catalyst can
-# still win an exception once the window passes; this only stops the immediate whipsaw.
-STOP_LOSS_COOLDOWN_HOURS = 2.0
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_accounts (
@@ -63,12 +58,6 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     -- Average cost per unit including fees paid to acquire, so realised P&L on the way
     -- out is the true round-trip result rather than the headline price difference.
     avg_cost REAL NOT NULL,
-    -- The numeric exit levels set at entry, actually persisted (not just stated in prose
-    -- and forgotten) -- see check_stops(), which enforces these mechanically rather than
-    -- waiting on the model to notice and re-decide every cycle. NULL means no committed
-    -- level yet; a position can hold either, both, or neither.
-    stop_loss REAL,
-    take_profit REAL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (account_id, code)
 );
@@ -89,11 +78,6 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     -- How old the quote was when it filled. A fill against a stale cache is a fill
     -- against a price that no longer existed, and that has to be visible after the fact.
     quote_age_sec INTEGER,
-    -- Set on a sell only, by comparing the fill price against the position's own stored
-    -- stop_loss/take_profit at the moment of the sell (see _classify_exit) -- never
-    -- parsed from prose. 'stop_loss' | 'take_profit' | 'discretionary' | NULL (buys).
-    -- What the re-entry cooldown (see execute_orders' buy path) actually keys off.
-    exit_kind TEXT,
     at TEXT NOT NULL
 );
 
@@ -125,7 +109,7 @@ to trade on every run, and churning costs {fee_pct}% per side.
 
 ```orders
 {{"orders": [
-  {{"side": "buy",  "code": "SOL", "usd": 500, "stop_loss": 130.0, "take_profit": 165.0, "reason": "why, in one line"}},
+  {{"side": "buy",  "code": "SOL", "usd": 500, "reason": "why, in one line"}},
   {{"side": "sell", "code": "DASH", "qty": "all", "reason": "why, in one line"}}
 ]}}
 ```
@@ -134,34 +118,34 @@ Rules that are enforced in code, not by you:
   * Buys are sized in `usd`; sells in `qty` (a number, or "all" to close the position).
   * You cannot spend cash you do not have, or sell a coin you do not hold.
   * No single order may exceed {max_pct}% of total equity.
+  * Only codes in the tracked coin universe you were given can be priced -- a symbol
+    that is not currently tracked is rejected with no fill, no matter how well-known it
+    is or how confident you are in it. Check the tracked list before naming a code.
   * Fills use the cached price, not a price you state. Do not predict your fill.
-  * Every buy must set `stop_loss` and/or `take_profit` as real numeric prices (not a
-    percentage, not "later") -- these are stored on the position and enforced
-    automatically between your runs, not something you have to remember or re-derive.
-    Adding to an existing position keeps its current stop_loss/take_profit unless you
-    explicitly state a new one -- state one only when you actually mean to move it.
-  * A coin stopped out (price hit its stored stop_loss) cannot be re-bought for
-    {cooldown_hours:g}h -- that failed thesis needs to actually cool off, not get
-    re-entered on the next momentum call. The rejection will tell you if this is why.
 Report your reasoning in prose above the block. If you are not trading, say why.
 """
+
+
+def order_instructions(db_path: str, fee_pct: float = DEFAULT_FEE_PCT,
+                       max_pct: float = MAX_ORDER_PCT_OF_EQUITY) -> str:
+    """ORDER_INSTRUCTIONS, prefixed with the live tracked-coin universe.
+
+    This is what any employee holding the 'paper' data feed should actually be handed --
+    ORDER_INSTRUCTIONS alone explains the mechanics of placing an order but says nothing
+    about which codes exist to trade right now. That gap is exactly what let
+    recommendations for untracked coins (TAO, AERO, WLD, IOST, ...) reach the ledger only
+    to be rejected: nothing told the employee, before it wrote its recommendation, what
+    was actually tracked. market_data.tracked_universe_brief() is the live source of
+    truth for that; this just puts it first, ahead of the mechanics.
+    """
+    return (market_data.tracked_universe_brief(db_path) + "\n"
+            + ORDER_INSTRUCTIONS.format(fee_pct=fee_pct, max_pct=max_pct))
 
 
 def init_paper_db(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
-        # Idempotent migrations for columns added after the initial CREATE TABLE IF NOT
-        # EXISTS -- same pattern as db.py/market_data.py -- safe on a fresh or
-        # already-populated database.
-        pos_cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_positions)")}
-        if "stop_loss" not in pos_cols:
-            conn.execute("ALTER TABLE paper_positions ADD COLUMN stop_loss REAL")
-        if "take_profit" not in pos_cols:
-            conn.execute("ALTER TABLE paper_positions ADD COLUMN take_profit REAL")
-        trade_cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)")}
-        if "exit_kind" not in trade_cols:
-            conn.execute("ALTER TABLE paper_trades ADD COLUMN exit_kind TEXT")
         conn.commit()
 
 
@@ -173,43 +157,6 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _parse_at(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def _parse_level(value) -> float | None:
-    """A stop_loss/take_profit value from an order, or None if absent/garbage -- never
-    raises, since a malformed level should just mean "no committed level" rather than
-    failing the whole order over one bad field."""
-    if value is None:
-        return None
-    try:
-        level = float(value)
-    except (TypeError, ValueError):
-        return None
-    return level if level > 0 else None
-
-
-def _classify_exit(price: float, pos) -> str:
-    """Whether a sell at `price` was a stop-loss, a take-profit, or a discretionary
-    close -- from the position's own persisted levels, never from prose. A position with
-    both levels set and a price that (due to a gap) cleared both in one tick is called a
-    stop-loss: preserving capital is the one of the two that actually mattered."""
-    stop_loss = pos["stop_loss"] if "stop_loss" in pos.keys() else None
-    take_profit = pos["take_profit"] if "take_profit" in pos.keys() else None
-    if stop_loss is not None and price <= stop_loss:
-        return "stop_loss"
-    if take_profit is not None and price >= take_profit:
-        return "take_profit"
-    return "discretionary"
 
 
 def ensure_account(db_path: str, name: str = "crypto",
@@ -281,7 +228,6 @@ def portfolio(db_path: str, name: str = "crypto") -> dict:
                 "unrealized": round(value - cost, 2),
                 "unrealized_pct": round((value - cost) / cost * 100, 2) if cost else 0.0,
                 "quote_age_sec": mark["age"] if mark else None,
-                "stop_loss": r["stop_loss"], "take_profit": r["take_profit"],
             })
         positions.sort(key=lambda p: p["value"], reverse=True)
 
@@ -373,7 +319,14 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
 
             mark = _prices(conn, [code]).get(code)
             if mark is None or mark["price"] <= 0:
-                reject(order, f"{code} is not in the tracked price cache, so it cannot be priced")
+                # Wording kept stable ("not in the tracked price cache") -- it is
+                # depended on by callers/tests as the signal for "untracked coin".
+                # The added universe size makes the rejection self-explanatory in the
+                # trade log without anyone needing to cross-reference feed_status.
+                universe_size = conn.execute(
+                    "SELECT COUNT(*) c FROM market_coins WHERE present = 1").fetchone()["c"]
+                reject(order, f"{code} is not in the tracked price cache, so it cannot be "
+                              f"priced (outside the {universe_size}-coin tracked universe)")
                 continue
             price, age = mark["price"], mark["age"]
 
@@ -387,21 +340,6 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
             equity = snapshot["equity"]
 
             if side == "buy":
-                last_stop_out = conn.execute(
-                    """SELECT at FROM paper_trades WHERE account_id = ? AND code = ?
-                           AND side = 'sell' AND exit_kind = 'stop_loss'
-                           ORDER BY id DESC LIMIT 1""",
-                    (acct["id"], code)).fetchone()
-                if last_stop_out is not None:
-                    stopped_at = _parse_at(last_stop_out["at"])
-                    elapsed_h = ((datetime.now(timezone.utc) - stopped_at).total_seconds() / 3600
-                                 if stopped_at else STOP_LOSS_COOLDOWN_HOURS)
-                    if elapsed_h < STOP_LOSS_COOLDOWN_HOURS:
-                        remaining_min = round((STOP_LOSS_COOLDOWN_HOURS - elapsed_h) * 60)
-                        reject(order, f"{code} was stopped out {elapsed_h * 60:.0f} min ago; "
-                                      f"re-entry cooldown active for {remaining_min} more minute(s)")
-                        continue
-
                 try:
                     usd = float(order.get("usd") if order.get("usd") is not None
                                 else float(order.get("qty", 0)) * price)
@@ -425,21 +363,13 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 # Fees fold into cost basis, so realised P&L is the round-trip result.
                 new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd + fee) / new_qty
                 cash -= usd + fee
-                stop_loss = _parse_level(order.get("stop_loss"))
-                take_profit = _parse_level(order.get("take_profit"))
-                if stop_loss is None and pos is not None:
-                    stop_loss = pos["stop_loss"]
-                if take_profit is None and pos is not None:
-                    take_profit = pos["take_profit"]
                 conn.execute(
-                    """INSERT INTO paper_positions (account_id, code, qty, avg_cost,
-                                                     stop_loss, take_profit, updated_at)
-                       VALUES (?,?,?,?,?,?,?)
+                    """INSERT INTO paper_positions (account_id, code, qty, avg_cost, updated_at)
+                       VALUES (?,?,?,?,?)
                        ON CONFLICT(account_id, code) DO UPDATE SET
                            qty = excluded.qty, avg_cost = excluded.avg_cost,
-                           stop_loss = excluded.stop_loss, take_profit = excluded.take_profit,
                            updated_at = excluded.updated_at""",
-                    (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, now))
+                    (acct["id"], code, new_qty, new_cost, now))
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
@@ -473,11 +403,6 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 realized = gross - fee - qty * pos["avg_cost"]
                 cash += gross - fee
                 realized_total += realized
-                # Classified from the position's own stored levels vs. the actual fill
-                # price -- never parsed from prose -- so the re-entry cooldown above has
-                # something real to key off regardless of whether this sell was the
-                # model's own discretionary call or check_stops' automatic one.
-                exit_kind = _classify_exit(price, pos)
                 remaining = pos["qty"] - qty
                 if remaining <= 1e-12:
                     conn.execute("DELETE FROM paper_positions WHERE account_id = ? AND code = ?",
@@ -489,10 +414,10 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
-                                                 quote_age_sec, exit_kind, at)
-                       VALUES (?,?,'sell',?,?,?,?,?,?,?,?,?,?,?)""",
+                                                 quote_age_sec, at)
+                       VALUES (?,?,'sell',?,?,?,?,?,?,?,?,?,?)""",
                     (acct["id"], code, qty, price, fee, gross, realized, cash, reason,
-                     staff_key, age, exit_kind, now))
+                     staff_key, age, now))
                 fills.append({"side": "sell", "code": code, "qty": qty, "price": price,
                               "usd": round(gross, 2), "fee": round(fee, 2),
                               "realized": round(realized, 2), "reason": reason})
@@ -502,46 +427,6 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
             conn.commit()
 
     return {"fills": fills, "rejections": rejects, "portfolio": portfolio(db_path, name)}
-
-
-def check_stops(db_path: str, name: str = "crypto") -> dict:
-    """Mechanically enforces every open position's stored stop_loss/take_profit against
-    the live price cache -- the actual fix for "lack of numeric exit discipline": the
-    model states a level once, at entry, and this closes the position the moment it's
-    hit, rather than waiting for the next 5-minute cycle to notice (or not) via a
-    judgment call reconstructed from scratch. Meant to run on a short interval
-    (scheduler.py) relative to the trading cadence.
-
-    A breached position becomes a real, full-size sell order routed through
-    execute_orders() -- the exact same validation/fill/fee/exit-classification path a
-    model-proposed sell uses, not a second write path that could drift from it.
-    """
-    acct = ensure_account(db_path, name)
-    with closing(_connect(db_path)) as conn:
-        positions = conn.execute(
-            """SELECT * FROM paper_positions WHERE account_id = ? AND qty > 0
-                   AND (stop_loss IS NOT NULL OR take_profit IS NOT NULL)""",
-            (acct["id"],)).fetchall()
-        if not positions:
-            return {"fills": [], "rejections": [], "portfolio": portfolio(db_path, name)}
-        marks = _prices(conn, [p["code"] for p in positions])
-
-    orders = []
-    for p in positions:
-        mark = marks.get(p["code"])
-        if mark is None:
-            continue  # can't check what can't be priced; execute_orders would reject it anyway
-        price = mark["price"]
-        if p["stop_loss"] is not None and price <= p["stop_loss"]:
-            orders.append({"side": "sell", "code": p["code"], "qty": "all",
-                           "reason": f"Automatic stop-loss: price ${price:,.6g} <= stop ${p['stop_loss']:,.6g}"})
-        elif p["take_profit"] is not None and price >= p["take_profit"]:
-            orders.append({"side": "sell", "code": p["code"], "qty": "all",
-                           "reason": f"Automatic take-profit: price ${price:,.6g} >= target ${p['take_profit']:,.6g}"})
-
-    if not orders:
-        return {"fills": [], "rejections": [], "portfolio": portfolio(db_path, name)}
-    return execute_orders(db_path, orders, name=name, staff_key="system:check_stops")
 
 
 def recent_trades(db_path: str, name: str = "crypto", limit: int = 20) -> list[dict]:

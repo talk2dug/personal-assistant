@@ -262,17 +262,6 @@ def refresh(db_path: str, api_key: str, limit: int = 250,
 
 # --- reads (what the agents and tools use) ------------------------------------
 
-def list_tracked_codes(db_path: str) -> list[str]:
-    """Every ticker this feed can currently price, sorted by rank. The ground truth for
-    "can I actually trade this" -- an employee has no market-data tool to check with
-    itself (research-tier grants only WebSearch), so this has to be handed to it directly
-    rather than assumed from "top 250 by market cap" reasoning, which real coverage
-    doesn't match (LiveCoinWatch is missing several real, large tokens entirely)."""
-    with closing(_connect(db_path)) as conn:
-        return [r["code"] for r in conn.execute(
-            "SELECT code FROM market_coins WHERE present = 1 ORDER BY rank")]
-
-
 def snapshot(db_path: str, codes: list[str] | None = None, limit: int = 25) -> list[dict]:
     sql = "SELECT * FROM market_coins"
     params: list = []
@@ -349,6 +338,60 @@ def new_listings(db_path: str, hours: int = 24, limit: int = 40) -> list[dict]:
         return [dict(r) for r in conn.execute(
             """SELECT code, name, event, rank, rate, at FROM market_listings
                 WHERE at >= ? ORDER BY id DESC LIMIT ?""", (since, limit))]
+
+
+# --- tracked-universe guard -----------------------------------------------------
+#
+# Added to stop the crypto day-trader's recommendations drifting away from what this
+# feed actually tracks. A model's general crypto knowledge is not grounded in
+# LiveCoinWatch's live top-N: it will happily reach for TAO, AERO, WLD, IOST or any
+# other well-known token that simply isn't (or is no longer) in the polled set, and that
+# recommendation becomes a paper order that execute_orders correctly, but uselessly,
+# rejects. These two functions are the single source of truth for "is this coin tracked"
+# and the prompt text that should be handed to any employee before it recommends or
+# trades anything.
+
+def tracked_codes(db_path: str) -> list[str]:
+    """Every coin code currently in the tracked universe (present in the most recent
+    poll). Anything not in this list cannot be priced, recommended, or traded --
+    paper_trading.execute_orders already enforces that at fill time; this is what lets
+    an employee check *before* it writes a recommendation instead of finding out after.
+    """
+    with closing(_connect(db_path)) as conn:
+        return sorted(r["code"] for r in
+                      conn.execute("SELECT code FROM market_coins WHERE present = 1"))
+
+
+def tracked_universe_brief(db_path: str, max_list: int = 300) -> str:
+    """A ready-to-embed prompt fragment enumerating the tracked universe.
+
+    Any employee whose job touches coin recommendations or trades should be handed this
+    verbatim, ahead of its own reasoning. Naming the actual list, rather than trusting a
+    model to infer "top 250" from training data or a web search, is what stops it
+    recommending a coin that reads as a major token but is not currently tracked here --
+    that gap, not a bug in the trading ledger's guardrail, is what produced roughly a
+    40% rejection rate on proposed orders (TAO, AERO, WLD, IOST and similar).
+    """
+    codes = tracked_codes(db_path)
+    if not codes:
+        return (
+            "TRACKED COIN UNIVERSE: empty -- the live market feed has not populated yet "
+            "(poller not warmed up, or misconfigured). Do not recommend or trade any coin "
+            "until this list has entries; there is nothing to check a symbol against."
+        )
+    shown = codes[:max_list]
+    omitted = len(codes) - len(shown)
+    tail = f" (+{omitted} more not shown)" if omitted > 0 else ""
+    return (
+        f"TRACKED COIN UNIVERSE -- the ONLY {len(codes)} coins this desk can price, "
+        f"recommend, or trade right now (live LiveCoinWatch top-{len(codes)} feed):\n"
+        f"{', '.join(shown)}{tail}\n\n"
+        "Hard rule, enforced downstream: only recommend or order a code on this exact "
+        "list. A coin you recall from training, a headline, or general web research that "
+        "is not on this list is not tracked here -- naming it wastes the desk's time, and "
+        "any order for it is rejected with no fill, every time. If nothing on this list "
+        "fits your thesis, say so rather than reaching for something off-list."
+    )
 
 
 def feed_status(db_path: str) -> dict:

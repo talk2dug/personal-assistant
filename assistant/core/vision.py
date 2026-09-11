@@ -161,6 +161,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ALTER TABLE known_people ADD COLUMN access_level TEXT NOT NULL DEFAULT 'household'"
         )
 
+    # pending_camera_views predates the "camera key" -> "full view dict" change (single
+    # camera -> possible multi-camera/room view) -- an older single-camera-key schema
+    # (a bare `camera TEXT` column) left `CREATE TABLE IF NOT EXISTS` a permanent no-op
+    # against it, silently breaking every web chat turn (routes/chat.py's send_message
+    # unconditionally calls pop_pending_camera_view, so this 500'd on EVERY message, not
+    # just ones that used show_camera) since view_json never existed on a db created
+    # before this table's current shape. One-shot ephemeral rows only -- nothing here is
+    # worth preserving across the rename, so drop and recreate rather than migrate data.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(pending_camera_views)")}
+    if cols and "view_json" not in cols:
+        conn.execute("DROP TABLE pending_camera_views")
+        conn.execute(
+            """CREATE TABLE pending_camera_views (
+                user_id INTEGER PRIMARY KEY,
+                view_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+
 
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=30)

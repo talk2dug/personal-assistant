@@ -309,3 +309,26 @@ def test_pending_camera_view_is_per_user(db_path):
     vision.set_pending_camera_view(db_path, 1, {"key": "kitchen"})
     assert vision.pop_pending_camera_view(db_path, 2) is None
     assert vision.pop_pending_camera_view(db_path, 1) is not None
+
+
+def test_migrates_a_pre_view_json_pending_camera_views_table(tmp_path):
+    """Real incident: a db created before pending_camera_views gained view_json (it used
+    to be a bare `camera TEXT` column) left `CREATE TABLE IF NOT EXISTS` a permanent
+    no-op against the old table, so every single web chat turn 500'd -- routes/chat.py's
+    send_message unconditionally calls pop_pending_camera_view on every reply, not just
+    ones that used show_camera. init_vision_db must repair this on an existing db, not
+    just get it right on a fresh one (which is all the other pending_camera_view tests
+    above actually exercise, via the db_path fixture's brand-new database)."""
+    import sqlite3
+
+    path = str(tmp_path / "old_vision.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE pending_camera_views (user_id INTEGER PRIMARY KEY, "
+            "camera TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+
+    vision.init_vision_db(path)
+
+    vision.set_pending_camera_view(path, 1, {"key": "kitchen"})
+    assert vision.pop_pending_camera_view(path, 1) == {"key": "kitchen"}

@@ -34,7 +34,21 @@ class StdioMCPClient:
         self.args = args or []
         # Merge over the real environment rather than replacing it — the child process
         # still needs PATH etc. to find its own runtime (node, python) on Windows.
-        self.env = {**os.environ, **(env or {})}
+        # PYTHONPATH/PYTHONHOME are the one exception: real incident, found live under
+        # jarvis-core.service -- that service's own Environment registry value sets
+        # PYTHONPATH to the *main* .venv's site-packages (pythonservice.exe needs it to
+        # find pywin32; see deploy/windows_service.py's _fix_venv_hosting), and Python
+        # inherits that verbatim into every child process by default. kroger-mcp.exe
+        # lives in its own, deliberately incompatible .venv-kroger (this module's own
+        # docstring: installing kroger-mcp into the main env broke the shared `mcp` SDK
+        # package) -- inheriting the wrong venv's PYTHONPATH made it crash on startup
+        # (MCPError: Connection closed) every time under the real service, while working
+        # fine from any plain interactive shell that never had that override set. A
+        # venv-installed console-script .exe resolves its own site-packages from its own
+        # embedded interpreter path regardless of PYTHONPATH, so dropping it here is safe
+        # for every caller, not just Kroger.
+        self.env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+        self.env.update(env or {})
         self.timeout = timeout
 
     async def _run(self, fn):

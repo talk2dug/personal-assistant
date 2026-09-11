@@ -45,6 +45,7 @@ from .routes.cameras import router as cameras_router
 from .routes.credit import router as credit_router
 from .routes.crypto import router as crypto_router
 from .routes.devices import router as devices_router
+from .routes.email import router as email_router
 from .routes.email_drafts import router as email_drafts_router
 from .routes.notifications import router as notifications_router
 from .routes.finance import router as finance_router
@@ -107,6 +108,7 @@ def create_app(
     app.include_router(weather_router)
     app.include_router(personal_tasks_router)
     app.include_router(grocery_router)
+    app.include_router(email_router)
     app.include_router(email_drafts_router)
     app.include_router(kitchen_router)
     app.include_router(credit_router)

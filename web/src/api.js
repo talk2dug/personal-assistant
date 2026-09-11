@@ -101,6 +101,40 @@ export const api = {
   confirmRecipe: (items) =>
     request('/api/grocery/recipe/confirm', { method: 'POST', body: JSON.stringify({ items }) }),
 
+  // Credit.jsx and web/src/components/credit/* -- the backend (routes/credit.py) and
+  // these components were both built and working, but nothing ever bound them together
+  // here, so the page crashed the instant it mounted (api.creditScores is not a
+  // function). Found and fixed while wiring up Email, since it's the same page-registry
+  // gap the Email page itself needed filling in.
+  creditScores: (bureau) => request(`/api/credit/scores${bureau ? `?bureau=${bureau}` : ''}`),
+  addCreditScore: (entry) => request('/api/credit/scores', { method: 'POST', body: JSON.stringify(entry) }),
+  deleteCreditScore: (id) => request(`/api/credit/scores/${id}`, { method: 'DELETE' }),
+  creditDisputes: ({ status, bureau } = {}) => {
+    const params = new URLSearchParams()
+    if (status) params.set('status', status)
+    if (bureau) params.set('bureau', bureau)
+    const qs = params.toString()
+    return request(`/api/credit/disputes${qs ? `?${qs}` : ''}`)
+  },
+  createDispute: (dispute) => request('/api/credit/disputes', { method: 'POST', body: JSON.stringify(dispute) }),
+  updateDispute: (id, patch) => request(`/api/credit/disputes/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  disputeLetters: (disputeId) => request(`/api/credit/disputes/${disputeId}/letters`),
+  draftDisputeLetter: (disputeId, letter) =>
+    request(`/api/credit/disputes/${disputeId}/letters/draft`, { method: 'POST', body: JSON.stringify(letter) }),
+  mailDisputeLetter: (letterId, expectedCost) =>
+    request(`/api/credit/letters/${letterId}/mail`, { method: 'POST', body: JSON.stringify({ expected_cost: expectedCost }) }),
+  trackDisputeLetter: (letterId) => request(`/api/credit/letters/${letterId}/track`, { method: 'POST' }),
+
+  listEmails: (folder = 'INBOX', limit = 20, query) => {
+    const params = new URLSearchParams({ folder, limit: String(limit) })
+    if (query) params.set('query', query)
+    return request(`/api/email/messages?${params.toString()}`)
+  },
+  readEmail: (uid, folder = 'INBOX') =>
+    request(`/api/email/messages/${encodeURIComponent(uid)}?folder=${encodeURIComponent(folder)}`),
+  sendEmail: (to, subject, body) =>
+    request('/api/email/send', { method: 'POST', body: JSON.stringify({ to, subject, body }) }),
+
   kitchenRecipes: (query) => request(`/api/kitchen/recipes${query ? `?query=${encodeURIComponent(query)}` : ''}`),
   createRecipe: (recipe) => request('/api/kitchen/recipes', { method: 'POST', body: JSON.stringify(recipe) }),
   getRecipe: (id) => request(`/api/kitchen/recipes/${id}`),

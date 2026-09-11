@@ -39,6 +39,7 @@ class SPAStaticFiles(StaticFiles):
             raise
 
 from .auth import router as auth_router
+from .routes.active_work import router as active_work_router
 from .routes.agents import router as agents_router
 from .routes.chat import router as chat_router
 from .routes.cameras import router as cameras_router
@@ -99,6 +100,7 @@ def create_app(
     app.include_router(openai_compat_router)
     app.include_router(tools_router)
     app.include_router(agents_router)
+    app.include_router(active_work_router)
     app.include_router(crypto_router)
     app.include_router(review_router)
     app.include_router(devices_router)

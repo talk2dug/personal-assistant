@@ -749,6 +749,94 @@ body::after {
   flex: 1;
 }
 
+/* --- chat window active-work strip (personal dashboard task 17) -------------
+   Deliberately a distinct chat-active-work-* prefix, not active-work-* -- that
+   name belongs to components/dashboard/ActiveWorkPanel.jsx + active-work.css, a
+   separate, larger panel on the Dashboard page. Vite bundles all pages' CSS into
+   one file regardless of which page renders it, so a shared prefix would let one
+   silently override the other's rules the moment both happen to be more specific
+   than expected -- this file already collided with active-work-panel/-list once. */
+
+.chat-active-work {
+  border-bottom: 1px solid var(--border-dim);
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.chat-active-work-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  color: var(--text-dim);
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.chat-active-work-summary:hover {
+  color: var(--text);
+}
+
+.chat-active-work-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber-dim);
+  flex-shrink: 0;
+}
+
+.chat-active-work-caret {
+  margin-left: auto;
+}
+
+.chat-active-work-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.chat-active-work-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-left: 2px solid var(--border-dim);
+  padding-left: 8px;
+}
+
+.chat-active-work-item.is-running {
+  color: var(--text);
+  border-left-color: var(--cyan);
+}
+
+.chat-active-work-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-active-work-eta {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
 .camera-modal {
   width: min(880px, 92vw);
   height: min(560px, 82vh);

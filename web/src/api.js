@@ -135,6 +135,8 @@ export const api = {
   sendEmail: (to, subject, body) =>
     request('/api/email/send', { method: 'POST', body: JSON.stringify({ to, subject, body }) }),
 
+  activeWork: () => request('/api/active-work'),
+
   kitchenRecipes: (query) => request(`/api/kitchen/recipes${query ? `?query=${encodeURIComponent(query)}` : ''}`),
   createRecipe: (recipe) => request('/api/kitchen/recipes', { method: 'POST', body: JSON.stringify(recipe) }),
   getRecipe: (id) => request(`/api/kitchen/recipes/${id}`),

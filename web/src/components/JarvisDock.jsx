@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useJarvis } from '../context/JarvisContext'
+import ActiveWorkStrip from './chat/ActiveWorkStrip'
 
 function CameraWindow({ camera, onClose }) {
   const [broken, setBroken] = useState(false)
@@ -117,6 +118,7 @@ export default function JarvisDock({ compact }) {
                 close
               </button>
             </div>
+            <ActiveWorkStrip />
             <div className="chat-log">
               {messages.map((m, i) => (
                 <div key={i} className={`chat-bubble ${m.role}`}>

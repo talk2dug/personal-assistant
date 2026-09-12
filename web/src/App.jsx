@@ -44,34 +44,36 @@ function Shell() {
   const location = useLocation()
   const onOrb = location.pathname === ORB_PATH
   const pendingReviews = usePendingReviews()
+  const [menuOpen, setMenuOpen] = useState(false)
 
-  // Below the tablet breakpoint the nav collapses into a hamburger (see
-  // responsive.css); this just tracks whether that collapsed panel is open. It's reset
-  // to closed on every navigation so picking a link doesn't leave the menu covering the
-  // page you just asked for.
-  const [navOpen, setNavOpen] = useState(false)
-  useEffect(() => { setNavOpen(false) }, [location.pathname])
+  // Close the mobile menu whenever the route changes, so navigating away never leaves
+  // the overlay stuck open on top of the next page.
+  useEffect(() => {
+    setMenuOpen(false)
+  }, [location.pathname])
 
   return (
     <div className="app-shell">
-      <nav className={`app-nav${navOpen ? ' nav-open' : ''}`}>
+      <nav className={`app-nav${menuOpen ? ' nav-open' : ''}`}>
         <div className="app-title">Jarvis</div>
-        {/* Desktop ignores this entirely (display: none above 900px). Below that,
-            responsive.css hides every other child of .app-nav until nav-open is set,
-            so this is the only thing visible besides the title. */}
         <button
           type="button"
-          className="nav-hamburger"
-          aria-label={navOpen ? 'Close menu' : 'Open menu'}
-          aria-expanded={navOpen}
-          onClick={() => setNavOpen((o) => !o)}
+          className="nav-toggle"
+          aria-label="Toggle navigation menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
         >
-          <span />
-          <span />
-          <span />
+          <span className="nav-toggle-bar" />
+          <span className="nav-toggle-bar" />
+          <span className="nav-toggle-bar" />
         </button>
         {sections.map((s) => (
-          <NavLink key={s.path} to={s.path} className={({ isActive }) => (isActive ? 'active' : '')}>
+          <NavLink
+            key={s.path}
+            to={s.path}
+            className={({ isActive }) => (isActive ? 'active' : '')}
+            onClick={() => setMenuOpen(false)}
+          >
             {s.label}
             {s.path === '/review' && pendingReviews > 0 && (
               <span className="nav-badge">{pendingReviews}</span>

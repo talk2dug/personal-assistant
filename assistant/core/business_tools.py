@@ -81,10 +81,15 @@ OPS_PLAN_TOOLS = [
     {"type": "function", "function": {
         "name": "list_ssh_hosts",
         "description": (
-            "The real, current list of registered SSH hosts a plan can target. There is "
-            "no other way to see this -- never guess or claim ignorance of a host "
-            "without checking here first, and never claim a host exists without it "
-            "showing up in this list."
+            "The real, current list of registered SSH hosts a plan can target, with what "
+            "each one actually is. is_jarvis_host=true means it runs Jarvis's own code "
+            "(JarvisCore/JarvisWeb, or a device terminal) -- treat those as part of the "
+            "deployment. is_jarvis_host=false means it's other infrastructure on the "
+            "network (a NAS, Home Assistant, a GPU/LLM inference box, etc.) that's "
+            "reachable for ops purposes but isn't Jarvis's own machine -- purpose says "
+            "what it's actually for. There is no other way to see this -- never guess or "
+            "claim ignorance of a host without checking here first, and never claim a "
+            "host exists (or assume what kind of box it is) without it showing up here."
         ),
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
@@ -1164,7 +1169,7 @@ class BusinessClient:
             return {"ok": True, "item": item}
 
         if name == "list_ssh_hosts":
-            return {"hosts": sorted(self.ssh_ops.list_hosts()) if self.ssh_ops is not None else []}
+            return {"hosts": self.ssh_ops.describe_hosts() if self.ssh_ops is not None else []}
 
         if name == "propose_ops_plan":
             steps = arguments.get("steps") or []

@@ -29,10 +29,29 @@ class SSHOpsError(Exception):
 
 class SSHOpsClient:
     def __init__(self, hosts: dict):
-        self.hosts = hosts  # {name: {"host", "user", "key_path"?, "password"?}}
+        self.hosts = hosts  # {name: {"host", "user", "key_path"?, "password"?, "is_jarvis_host"?, "purpose"?}}
 
     def list_hosts(self) -> list[str]:
         return sorted(self.hosts)
+
+    def describe_hosts(self) -> list[dict]:
+        """Per-host metadata for the list_ssh_hosts tool -- so Jarvis can tell a box that
+        runs his own code (is_jarvis_host=true: JarvisCore/Web, or a device terminal)
+        from other network infrastructure he can reach over SSH but doesn't own (a NAS,
+        Home Assistant, a GPU/LLM inference box, etc.), with `purpose` saying what each
+        one actually is. Real incident: every host looked identical to the model before
+        this existed -- just a bare name -- so there was no way to reason about which
+        ones were safe to treat as "his own" deployment versus unrelated infrastructure
+        he merely has ops access to."""
+        out = []
+        for name in sorted(self.hosts):
+            cfg = self.hosts[name]
+            out.append({
+                "name": name,
+                "is_jarvis_host": bool(cfg.get("is_jarvis_host", False)),
+                "purpose": cfg.get("purpose", ""),
+            })
+        return out
 
     def _connect(self, host_name: str) -> paramiko.SSHClient:
         cfg = self.hosts.get(host_name)

@@ -1,13 +1,15 @@
 import { useEffect, useRef } from 'react'
 import { useJarvis } from '../context/JarvisContext'
+import StatusPanel from '../components/StatusPanel'
 
 /**
  * The orb: the largest view onto the Jarvis session.
  *
  * All session state (mic, camera, speech, transcript) now lives in JarvisContext above
- * the router, so this page owns nothing but the canvas visualiser. Navigating away no
- * longer stops a recording or cuts off a reply mid-sentence — the orb just stops being
- * the thing you're looking at.
+ * the router, so this page owns nothing but the canvas visualiser (and, below it, a
+ * compact status panel — see components/StatusPanel.jsx). Navigating away no longer
+ * stops a recording or cuts off a reply mid-sentence — the orb just stops being the
+ * thing you're looking at.
  */
 
 const ACCENT = '#22e8ff'
@@ -174,6 +176,8 @@ export default function Chat() {
       <div className="orb-hint">
         Press <kbd>space</kbd> to talk — tap to latch, hold to push-to-talk, <kbd>esc</kbd> to cancel
       </div>
+
+      <StatusPanel />
 
       {mediaError && <div className="chat-media-error">{mediaError}</div>}
 

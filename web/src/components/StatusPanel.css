@@ -1,0 +1,76 @@
+/* Compact, text-first status summary for the orb page — agents, crypto desk headline,
+   schedule and the review queue at a glance, without leaving /chat.
+
+   Scoped file rather than a global index.css addition: index.css is too large for this
+   change's review tooling to safely read-modify-write in one pass, so new rules live
+   here instead, reusing existing global classes (hud-label) where they already fit. */
+
+.status-panel {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 24px;
+  width: 100%;
+  max-width: 920px;
+  margin: 18px auto 0;
+  padding: 14px 18px;
+  box-sizing: border-box;
+  border: 1px solid rgba(34, 232, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(10, 18, 22, 0.55);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.status-section {
+  flex: 1 1 180px;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.status-section .hud-label {
+  margin-bottom: 2px;
+}
+
+.status-line {
+  color: rgba(230, 245, 248, 0.88);
+  overflow-wrap: anywhere;
+}
+
+.status-muted {
+  color: rgba(230, 245, 248, 0.45);
+  font-style: italic;
+}
+
+.status-error {
+  color: #ff6b6b;
+}
+
+.status-pos {
+  color: #3ddc84;
+}
+
+.status-neg {
+  color: #ff6b6b;
+}
+
+.status-link {
+  color: #22e8ff;
+  text-decoration: none;
+}
+
+.status-link:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+  .status-panel {
+    gap: 14px;
+    padding: 12px;
+  }
+  .status-section {
+    flex: 1 1 100%;
+  }
+}

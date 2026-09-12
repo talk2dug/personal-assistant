@@ -123,8 +123,13 @@ class Config:
     # Bounds converse()/chat() only -- the owner's own live turn, where a human is
     # actually waiting. research()/engineer()/assign() all override this per-call with
     # their own much larger budget (see staff_assignment_timeout_seconds below), so this
-    # can and should stay tight now that background work no longer shares it.
-    claude_timeout_seconds: int = 90
+    # doesn't need to protect against a multi-hour background job the way it used to.
+    # Briefly dropped to 90s on the theory that an interactive turn is always fast --
+    # real usage proved that wrong (a real logged turn with a few chained tool calls,
+    # e.g. checking PR/CI status, already ran ~81s; several genuinely timed out at 90s,
+    # each one surfacing as "I couldn't reach my reasoning backend" for no real reason).
+    # Back to 300s, its long-standing value from before that change.
+    claude_timeout_seconds: int = 300
     claude_tools_api_key: str | None = None
     claude_tools_url: str = "http://127.0.0.1:8080/api/tools/call"
     # staff.assign()'s subprocess ceiling for an employee's own assignment (research- or
@@ -338,7 +343,7 @@ def load_config(path: str = "config.json") -> Config:
         llm_backend=data.get("llm_backend", "ollama"),
         claude_cli_path=data.get("claude_cli_path"),
         claude_model=data.get("claude_model", "sonnet"),
-        claude_timeout_seconds=data.get("claude_timeout_seconds", 90),
+        claude_timeout_seconds=data.get("claude_timeout_seconds", 300),
         staff_assignment_timeout_seconds=data.get("staff_assignment_timeout_seconds", 10800),
         # Authenticates the MCP bridge subprocess to /api/tools/call. Equivalent to full
         # owner access — anything holding it can invoke every tool Jarvis has.

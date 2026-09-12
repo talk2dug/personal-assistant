@@ -73,7 +73,14 @@ GIT_TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "git_get_pr_status",
-        "description": "Check a pull request's state and its CI check results.",
+        "description": (
+            "Check a pull request's state and its CI check results. Also returns "
+            "branch_name -- the ONLY way to learn what branch an existing PR points at. "
+            "To fix a failing PR, call this first, then use git_read_file/"
+            "git_commit_and_push with that same branch_name to push more commits onto "
+            "it (do NOT git_create_branch again -- the PR's branch already exists; "
+            "pushing to it updates the same PR rather than opening a new one)."
+        ),
         "parameters": {"type": "object", "properties": {
             "pr_number": {"type": "integer"},
         }, "required": ["pr_number"]},
@@ -102,7 +109,11 @@ GIT_SYSTEM_NOTE = (
     "work. git_create_branch and git_commit_and_push let you stage real code changes on "
     "a branch — always create a branch first, then write files to it, then git_open_pr "
     "to put it up for CI and review. None of that touches main or anything deployed. "
-    "git_get_pr_status shows CI results. git_merge_pr is different: it actually changes "
+    "git_get_pr_status shows CI results and, critically, branch_name -- if you're asked "
+    "to fix an existing PR, that's the only way to find out what branch it's on; check "
+    "it first, then read/write that same branch (never create a new one for a PR that "
+    "already exists) so your fix lands on the PR that's already open instead of opening "
+    "a second, unrelated one. git_merge_pr is different: it actually changes "
     "what's on main, so calling it does not execute immediately — it stages the action "
     "and you must clearly state which PR and describe what merging it will do, then ask "
     "the owner to explicitly confirm before it happens. Never claim a PR is merged "

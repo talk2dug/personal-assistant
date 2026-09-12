@@ -229,6 +229,13 @@ class GitOpsClient:
         return {
             "ok": True, "state": pr["state"], "mergeable": pr.get("mergeable"),
             "merged": pr["merged"], "url": pr["html_url"],
+            # Real incident: without these, an employee told "PR #24's CI is failing,
+            # fix it" had no way to discover what branch that PR actually points at --
+            # git_read_file/git_commit_and_push both require a branch_name, and nothing
+            # else in this tool set ever surfaces one for an existing PR by number. The
+            # employee reported this back as "no branch access", which is exactly what
+            # it looked like from where they were sitting.
+            "branch_name": pr["head"]["ref"], "base_branch": pr["base"]["ref"],
             "checks": [{"name": c["name"], "status": c["status"], "conclusion": c["conclusion"]} for c in checks],
         }
 

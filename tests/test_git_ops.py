@@ -253,7 +253,8 @@ class FakeHTTP:
             ])
         return FakeResponse(200, {
             "state": "open", "mergeable": True, "merged": False,
-            "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
+            "html_url": "https://github.com/owner/repo/pull/42",
+            "head": {"sha": "abc123", "ref": "feature/my-branch"}, "base": {"ref": "main"},
         })
 
     def put(self, path, json=None):
@@ -273,6 +274,16 @@ def test_get_pr_status_includes_check_runs(client):
     result = client.get_pr_status(42)
     assert result["ok"] is True
     assert result["checks"] == [{"name": "backend-tests", "status": "completed", "conclusion": "success"}]
+
+
+def test_get_pr_status_includes_the_branch_name(client):
+    """Real incident: without this, an employee told to fix a failing PR had no way to
+    discover what branch it's on -- git_read_file/git_commit_and_push both require a
+    branch_name, and nothing else in the tool set surfaces one for an existing PR."""
+    client._http = FakeHTTP()
+    result = client.get_pr_status(42)
+    assert result["branch_name"] == "feature/my-branch"
+    assert result["base_branch"] == "main"
 
 
 def test_list_open_prs_returns_number_title_and_url(client):
@@ -333,7 +344,8 @@ def test_merge_pr_refuses_when_ci_is_not_green(client):
                     {"name": "backend-tests", "status": "completed", "conclusion": "failure"}]})
             return FakeResponse(200, {
                 "state": "open", "mergeable": True, "merged": False,
-                "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "head": {"sha": "abc123", "ref": "feature/my-branch"}, "base": {"ref": "main"},
             })
 
     client._http = RedCI()
@@ -352,7 +364,8 @@ def test_merge_pr_refuses_when_not_cleanly_mergeable(client):
                     {"name": "backend-tests", "status": "completed", "conclusion": "success"}]})
             return FakeResponse(200, {
                 "state": "open", "mergeable": False, "merged": False,
-                "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "head": {"sha": "abc123", "ref": "feature/my-branch"}, "base": {"ref": "main"},
             })
 
     client._http = Unmergeable()
@@ -371,7 +384,8 @@ def test_merge_pr_refuses_when_mergeable_still_unknown(client):
                     {"name": "backend-tests", "status": "completed", "conclusion": "success"}]})
             return FakeResponse(200, {
                 "state": "open", "mergeable": None, "merged": False,
-                "html_url": "https://github.com/owner/repo/pull/42", "head": {"sha": "abc123"},
+                "html_url": "https://github.com/owner/repo/pull/42",
+                "head": {"sha": "abc123", "ref": "feature/my-branch"}, "base": {"ref": "main"},
             })
 
     client._http = StillComputing()

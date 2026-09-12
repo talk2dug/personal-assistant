@@ -458,12 +458,23 @@ def test_scheduler_registers_the_stop_loss_enforcer_alongside_the_market_poll(tm
 # --- ops-plan workflow ----------------------------------------------------------
 
 class FakeSSHOps:
-    def __init__(self, hosts=("simrig", "touch1")):
+    def __init__(self, hosts=("simrig", "touch1"), meta=None):
         self._hosts = list(hosts)
+        # Per-host {"is_jarvis_host": bool, "purpose": str} overrides, same shape
+        # describe_hosts() returns -- defaults to "unknown infrastructure" so a test that
+        # doesn't care about this still gets a well-formed row per host.
+        self._meta = meta or {}
         self.run_calls = []
 
     def list_hosts(self):
         return self._hosts
+
+    def describe_hosts(self):
+        return [
+            {"name": h, "is_jarvis_host": self._meta.get(h, {}).get("is_jarvis_host", False),
+             "purpose": self._meta.get(h, {}).get("purpose", "")}
+            for h in sorted(self._hosts)
+        ]
 
     def run_command(self, host, command, timeout=120):
         self.run_calls.append((host, command))
@@ -485,7 +496,25 @@ def test_list_ssh_hosts_returns_the_real_registry(db_path):
     client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE,
                              ssh_ops=FakeSSHOps(hosts=("simrig", "touch1", "jarvisaudio1")))
     result = client.call_tool("list_ssh_hosts", {})
-    assert result["hosts"] == ["jarvisaudio1", "simrig", "touch1"]
+    assert [h["name"] for h in result["hosts"]] == ["jarvisaudio1", "simrig", "touch1"]
+
+
+def test_list_ssh_hosts_tells_a_jarvis_host_from_other_infrastructure(db_path):
+    """Real incident: every host looked identical to the model -- a bare name -- so there
+    was no way to reason about which ones were Jarvis's own deployment versus other
+    network infrastructure (a NAS, Home Assistant, etc.) merely reachable for ops."""
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE, ssh_ops=FakeSSHOps(
+        hosts=("jarvisbox", "homeassistant"),
+        meta={
+            "jarvisbox": {"is_jarvis_host": True, "purpose": "Runs JarvisCore/JarvisWeb."},
+            "homeassistant": {"is_jarvis_host": False, "purpose": "The Home Assistant server."},
+        },
+    ))
+    result = client.call_tool("list_ssh_hosts", {})
+    by_name = {h["name"]: h for h in result["hosts"]}
+    assert by_name["jarvisbox"]["is_jarvis_host"] is True
+    assert by_name["homeassistant"]["is_jarvis_host"] is False
+    assert by_name["homeassistant"]["purpose"] == "The Home Assistant server."
 
 
 def test_list_ssh_hosts_with_no_ssh_configured_returns_empty(db_path):

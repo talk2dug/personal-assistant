@@ -15,6 +15,25 @@ def test_list_hosts_returns_registered_names_sorted():
     assert client.list_hosts() == ["alpha", "zeta"]
 
 
+def test_describe_hosts_surfaces_is_jarvis_host_and_purpose():
+    client = SSHOpsClient({
+        "jarvisbox": {"host": "127.0.0.1", "user": "swayze", "is_jarvis_host": True, "purpose": "Runs Jarvis."},
+        "homeassistant": {"host": "192.168.0.32", "user": "jack", "is_jarvis_host": False, "purpose": "HA server."},
+    })
+    assert client.describe_hosts() == [
+        {"name": "homeassistant", "is_jarvis_host": False, "purpose": "HA server."},
+        {"name": "jarvisbox", "is_jarvis_host": True, "purpose": "Runs Jarvis."},
+    ]
+
+
+def test_describe_hosts_defaults_when_a_host_predates_the_metadata_fields():
+    """An entry written before is_jarvis_host/purpose existed must not crash or silently
+    lie -- it should read as "not known to be a Jarvis host, no purpose on file" rather
+    than raising a KeyError."""
+    client = SSHOpsClient({"legacy": {"host": "1.2.3.4", "user": "u"}})
+    assert client.describe_hosts() == [{"name": "legacy", "is_jarvis_host": False, "purpose": ""}]
+
+
 def test_unknown_host_raises_with_the_registered_list_not_a_stack_trace():
     client = SSHOpsClient({"simrig": {"host": "simrig.local", "user": "jack"}})
     with pytest.raises(SSHOpsError, match="unknown host 'nope'"):

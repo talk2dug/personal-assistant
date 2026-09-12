@@ -1,21 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { api } from '../api'
 import {
   COLS, DECOR, DESKS, FURNITURE_FILES, ROWS, blockedTiles, walkableTiles,
 } from '../office/layout'
 import { applyServerState, createCharacter, renderOffice, setDecor, updateCharacter } from '../office/engine'
 import { TILE, loadAssets } from '../office/sprites'
-
-const POLL_MS = 4000
-
-const STATUS_LABEL = {
-  working: 'working',
-  on_gpu: 'on the GPU',
-  waiting_gpu: 'waiting for the GPU',
-  just_finished: 'just finished',
-  failed: 'failed',
-  idle: 'idle',
-}
+import { AGENT_STATUS_LABEL as STATUS_LABEL, useAgentStatus } from '../hooks/useAgentStatus'
 
 export default function Agents() {
   const canvasRef = useRef(null)
@@ -23,34 +12,22 @@ export default function Agents() {
   const assetsRef = useRef(null)
   const gpuRef = useRef(null)
   const rafRef = useRef(0)
-  const [status, setStatus] = useState(null)
-  const [error, setError] = useState(null)
+  const { status, error } = useAgentStatus()
   const [scale, setScale] = useState(3)
 
-  // Poll the office's real state. Deliberately separate from the animation loop: the
-  // office keeps moving at 60fps between polls, so a 4s refresh looks continuous rather
-  // than like a slideshow.
+  // Drives the animated office from the shared poll above (useAgentStatus, 4s): seeds
+  // characters once, then reconciles positions/state against the server on every
+  // subsequent tick. Deliberately separate from the animation loop below: the office
+  // keeps moving at 60fps between polls, so a 4s refresh looks continuous rather than
+  // like a slideshow.
   useEffect(() => {
-    let cancelled = false
-    async function poll() {
-      try {
-        const data = await api.agentStatus()
-        if (cancelled) return
-        setStatus(data)
-        setError(null)
-        gpuRef.current = data.gpu
-        if (!charactersRef.current.length) {
-          charactersRef.current = data.agents.map((a, i) => createCharacter(i, a))
-        }
-        applyServerState(charactersRef.current, data.agents, data.gpu?.jobs || [])
-      } catch (err) {
-        if (!cancelled) setError(err.message)
-      }
+    if (!status) return
+    gpuRef.current = status.gpu
+    if (!charactersRef.current.length) {
+      charactersRef.current = status.agents.map((a, i) => createCharacter(i, a))
     }
-    poll()
-    const id = setInterval(poll, POLL_MS)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [])
+    applyServerState(charactersRef.current, status.agents, status.gpu?.jobs || [])
+  }, [status])
 
   useEffect(() => {
     let cancelled = false

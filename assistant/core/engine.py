@@ -103,9 +103,17 @@ class ObsidianContext:
     nothing sensitive in the SMS/email sense, so no confirmation gate and no
     sensitive_tools set — matches the user's choice to let proactive capture run
     without a per-write yes/no. mcp_client keeps the naming convention shared with
-    Era/phone/mail's tool-dispatch contexts."""
+    Era/phone/mail's tool-dispatch contexts.
+
+    standing_digest is his own standing-preference notes, rendered once at startup by
+    setup.build_obsidian_context and spliced into every system prompt thereafter. It lives
+    on the context rather than being read in build_system_prompt precisely so it CANNOT
+    become a per-turn read — see standing_digest.py, and build_system_prompt's own note on
+    why anything varying per turn re-bills the ~25k-token Claude Code preamble every
+    message."""
 
     mcp_client: object
+    standing_digest: str = ""
 
     @property
     def tool_names(self) -> set[str]:
@@ -1349,7 +1357,13 @@ def build_system_prompt(
         era_note=ERA_SYSTEM_NOTE if era is not None else "",
         phone_note=PHONE_SYSTEM_NOTE if phone is not None else "",
         mail_note=MAIL_SYSTEM_NOTE if mail is not None else "",
-        obsidian_note=OBSIDIAN_SYSTEM_NOTE if obsidian is not None else "",
+        # The digest is a FIXED string read once at startup, never re-read here. A
+        # per-turn vault read would vary the prompt prefix and defeat the prompt cache --
+        # see this function's own docstring above, and standing_digest.py.
+        obsidian_note=(
+            OBSIDIAN_SYSTEM_NOTE + getattr(obsidian, "standing_digest", "")
+            if obsidian is not None else ""
+        ),
         home_assistant_note=(HOME_ASSISTANT_SYSTEM_NOTE + LOCATION_SYSTEM_NOTE) if home_assistant is not None else "",
         business_note=BUSINESS_SYSTEM_NOTE.format(
             business_name=business.profile.name, business_location=business.profile.location,

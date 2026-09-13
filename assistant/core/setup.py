@@ -7,7 +7,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, paper_trading, personal_db, staff, vision, work_queue
+from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, paper_trading, personal_db, staff, standing_digest, vision, work_queue
 from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
@@ -367,7 +367,12 @@ def build_obsidian_context(cfg) -> ObsidianContext | None:
         logger.warning("Obsidian vault unreachable at startup (%s) — vault tools disabled this session", e)
         return None
     logger.info("Obsidian: vault connected at %s", cfg.obsidian_vault_path)
-    return ObsidianContext(mcp_client=client)
+    # Read ONCE, here, and cached on the context for the life of the process. This is the
+    # only place the standing digest is ever built -- see standing_digest.py for why a
+    # per-turn read would be the most expensive possible way to implement memory. The
+    # trade-off is real and accepted: editing one of those notes needs a service restart
+    # to take effect.
+    return ObsidianContext(mcp_client=client, standing_digest=standing_digest.build_digest(client))
 
 
 def build_home_assistant_context(cfg) -> HomeAssistantContext | None:

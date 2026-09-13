@@ -193,7 +193,11 @@ def start(
                 _guarded_simple(
                     "mail_triage",
                     lambda: mail_triage.run_mail_triage_once(
-                        db_path, llm, mail.mcp_client, owner["id"], limit=mail_triage_scan_limit),
+                        db_path, llm, mail.mcp_client, owner["id"], limit=mail_triage_scan_limit,
+                        # So a draft written "in his voice" is written in the voice he has
+                        # actually recorded, rather than the model's default business
+                        # register -- see mail_triage.build_voice_note.
+                        obsidian=obsidian.mcp_client if obsidian is not None else None),
                 ),
                 "interval", minutes=mail_triage_interval_minutes, id="mail_triage_agent",
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),

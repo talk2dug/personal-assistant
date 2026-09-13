@@ -44,6 +44,43 @@ TRIAGE_SYSTEM = (
     "like [confirm turnaround time] for anything you cannot know from the message itself."
 )
 
+# Where the owner's actual recorded voice lives. This module has always asked for a draft
+# "written in his voice" while showing the model nothing whatsoever about what his voice
+# is -- so "his voice" meant whatever the model's default business-email register happens
+# to be. He has written his communication preferences down; they were simply never read.
+VOICE_NOTE = ("00-About Me", "Communication Preferences")
+VOICE_CHARS = 800
+
+
+def build_voice_note(obsidian) -> str:
+    """His recorded communication preferences, appended to the triage system prompt.
+
+    Read per triage pass rather than cached, unlike standing_digest: this is a `.chat()`
+    system message on a job that runs every 30 minutes, not the Claude CLI system prefix
+    that prompt-caches on an exact match, so there is no ~25k-token preamble to re-bill
+    here. Returns "" on anything unreadable -- a draft in a generic voice is worse than
+    one in his, but far better than no draft at all.
+    """
+    if obsidian is None:
+        return ""
+    try:
+        note = obsidian.read_note(*VOICE_NOTE)
+    except Exception:
+        logger.exception("could not read the communication preferences note")
+        return ""
+    if not isinstance(note, dict) or note.get("error"):
+        return ""
+    body = note.get("content") or ""
+    if body.startswith("---"):
+        end = body.find("\n---", 3)
+        if end >= 0:
+            body = body[end + 4:]
+    body = body.strip()
+    if not body:
+        return ""
+    return ("\n\nHIS OWN RECORDED COMMUNICATION PREFERENCES — this is what \"his voice\" "
+            "actually means, written by him. Draft to match it:\n" + body[:VOICE_CHARS])
+
 
 def _looks_automated(from_address: str) -> bool:
     addr = (from_address or "").lower()
@@ -66,7 +103,7 @@ def _parse_json_object(text: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def classify_and_draft(llm, message: dict) -> dict | None:
+def classify_and_draft(llm, message: dict, voice: str = "") -> dict | None:
     """Asks the LLM whether `message` (a dict shaped like MailClient.read_message's
     return value) warrants a reply, and if so, drafts one.
 
@@ -85,7 +122,7 @@ def classify_and_draft(llm, message: dict) -> dict | None:
     )
     response = llm.chat(
         messages=[
-            {"role": "system", "content": TRIAGE_SYSTEM},
+            {"role": "system", "content": TRIAGE_SYSTEM + voice},
             {"role": "user", "content": prompt},
         ],
         tools=None, think=False,
@@ -100,6 +137,7 @@ def classify_and_draft(llm, message: dict) -> dict | None:
 
 def run_mail_triage_once(
     db_path: str, llm, mail_client, owner_user_id: int, folder: str = "INBOX", limit: int = 15,
+    obsidian=None,
 ) -> dict:
     """Scans the most recent messages in `folder`, drafts replies for the ones that
     need one, and stores them for review.
@@ -110,6 +148,10 @@ def run_mail_triage_once(
     here ever sends anything.
     """
     mail_db.init_mail_db(db_path)
+    # Read once per pass, not once per message: every message in this run should be
+    # drafted against the same recorded voice, and re-reading the same file 15 times would
+    # be pure waste.
+    voice = build_voice_note(obsidian)
     listing = mail_client.list_recent(folder=folder, limit=limit)
     scanned = drafted = 0
     for header in listing.get("emails", []):
@@ -122,7 +164,7 @@ def run_mail_triage_once(
             logger.warning("mail triage: could not read uid %s: %s", uid, message["error"])
             continue
         try:
-            result = classify_and_draft(llm, message)
+            result = classify_and_draft(llm, message, voice=voice)
         except Exception:
             logger.exception("mail triage: classification failed for uid %s", uid)
             continue

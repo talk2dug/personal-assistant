@@ -32,6 +32,22 @@ MARKET_SUPPLEMENTAL_ID_MAP = {
     "ETHFI": "ETHFIUSD", "TIA": "TIAUSD", "JUP": "JUPUSD",
 }
 
+# Both watchdogs below reach the owner by synthesizing a prompt and pushing it through
+# handle_message -- which is exactly what makes them safe (they inherit the pending_actions
+# confirmation gate rather than routing around it), and was also quietly destroying
+# Jarvis's memory. handle_message persists every turn it handles as a real *user* turn,
+# db.recent_messages hands back only the last 20 rows (~10 exchanges), and the GitHub
+# watchdog polls every 180 seconds. Measured on the live database: 45 of the last 100
+# user turns were watchdog chatter. Roughly half of everything Jarvis could remember was
+# PR noise, so anything the owner said two hours earlier had already fallen out.
+#
+# Tagging the turn keeps the audit trail (the rows are still written, still readable with
+# include_background=True) while excluding it from the window. Dropping the rows outright
+# was the alternative and is worse: "did the watchdog ever actually nudge me about that?"
+# is a real question, and the only record that answers it is this one.
+REVIEW_WATCHDOG_SOURCE = "review_watchdog"
+GITHUB_WATCHDOG_SOURCE = "github_watchdog"
+
 
 def start(
     db_path: str, notify, poll_interval_seconds: int = 30,
@@ -858,6 +874,9 @@ def run_review_watchdog(db_path: str, llm, notify, hours: float = 2.0, tz_name: 
     shortcut around it. **context forwards whatever contexts start() was given (era,
     calendar, business, kroger, git_ops, ...) so the synthesized prompt has the same
     tool surface a typed chat message would.
+
+    The turn is persisted tagged REVIEW_WATCHDOG_SOURCE, so it stays a full audit trail
+    without counting toward Jarvis's memory window -- see db.recent_messages.
     """
     results = []
     users_by_id = {u["id"]: u for u in db.all_users(db_path)}
@@ -876,7 +895,8 @@ def run_review_watchdog(db_path: str, llm, notify, hours: float = 2.0, tz_name: 
             "Briefly let the owner know it's still waiting on his decision."
         )
         try:
-            reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name, **context)
+            reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name,
+                                   source=REVIEW_WATCHDOG_SOURCE, **context)
             if reply:
                 notify(owner["telegram_chat_id"], reply)
             results.append({"item_id": item["id"], "notified": bool(reply)})
@@ -902,6 +922,10 @@ def run_github_watchdog(db_path: str, git_ops_client, llm, notify, tz_name: str 
     it without the owner saying yes (git_merge_pr already sits in GIT_SENSITIVE_TOOLS,
     so this needed no new sensitive-tool-list entry, unlike docs/watchdog-system-design.md
     section 4's general caution for a brand new surface).
+
+    Turns are persisted tagged GITHUB_WATCHDOG_SOURCE. This is the noisier of the two by
+    a wide margin -- a 180s poll against a repo with open PRs -- and the main reason the
+    tag exists at all; see the note above that constant.
     """
     result = github_client.refresh(db_path, git_ops_client)
     if not result.get("ok"):
@@ -922,7 +946,8 @@ def run_github_watchdog(db_path: str, git_ops_client, llm, notify, tz_name: str 
             "Briefly let the owner know what changed and whether it needs his attention."
         )
         try:
-            reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name, **context)
+            reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name,
+                                   source=GITHUB_WATCHDOG_SOURCE, **context)
             if reply:
                 notify(owner["telegram_chat_id"], reply)
             results.append({"pr_number": change["pr_number"], "notified": bool(reply)})

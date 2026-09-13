@@ -37,6 +37,18 @@ CREATE TABLE IF NOT EXISTS conversations (
     user_id INTEGER NOT NULL REFERENCES users(id),
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content TEXT NOT NULL,
+    -- Who actually produced this turn. NULL is the owner really talking to Jarvis (chat,
+    -- voice, a location routine he armed) and is the only kind recent_messages() hands
+    -- back as working memory. Anything else names the machine that synthesized it --
+    -- 'review_watchdog', 'github_watchdog' -- and is kept purely as an audit trail.
+    --
+    -- This column exists because the watchdogs were eating his memory. Both synthesize a
+    -- prompt and push it through handle_message, which persists it as a real *user* turn;
+    -- the GitHub one polls every 180s. Measured on the live database before this landed:
+    -- 45 of the last 100 user turns were watchdog chatter, against a 20-row (~10 turn)
+    -- window -- so roughly half of everything Jarvis could remember was PR noise, and
+    -- something the owner said two hours ago had already fallen out of the window.
+    source TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -224,6 +236,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     charge_cols = {row[1] for row in conn.execute("PRAGMA table_info(era_recurring_charge_cache)")}
     if "excluded" not in charge_cols:
         conn.execute("ALTER TABLE era_recurring_charge_cache ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+
+    # Every row that predates this column is a real conversational turn, so NULL (the
+    # ADD COLUMN default) is already the right value for all of them -- with one honest
+    # caveat: the watchdog turns already sitting in the table stay indistinguishable and
+    # keep occupying the window until they age out naturally. Backfilling them by
+    # pattern-matching content was considered and rejected; guessing which historical
+    # rows were machine-written risks deleting something he actually said.
+    conversation_cols = {row[1] for row in conn.execute("PRAGMA table_info(conversations)")}
+    if "source" not in conversation_cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN source TEXT")
 
     _migrate_users_role_guest(conn)
 
@@ -684,24 +706,42 @@ def update_reminder_from_remote(db_path: str, reminder_id: int, text: str, due_a
 
 # --- conversations ---------------------------------------------------------------
 
-def add_message(db_path: str, user_id: int, role: str, content: str) -> None:
+def add_message(db_path: str, user_id: int, role: str, content: str,
+                source: str | None = None) -> None:
+    """Persist one conversational turn.
+
+    `source` is None for a turn the owner actually took part in, and a short machine name
+    ('review_watchdog', 'github_watchdog') for one a background job synthesized. Both are
+    stored; only the None ones come back from recent_messages(). See the column's own
+    comment in SCHEMA for the measurement that made this necessary.
+    """
     if role not in ("user", "assistant"):
         raise ValueError(f"invalid role: {role!r}")
     with closing(_connect(db_path)) as conn:
         conn.execute(
-            "INSERT INTO conversations (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, role, content, _now()),
+            "INSERT INTO conversations (user_id, role, content, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, role, content, source, _now()),
         )
         conn.commit()
 
 
-def recent_messages(db_path: str, user_id: int, limit: int = 20):
+def recent_messages(db_path: str, user_id: int, limit: int = 20, include_background: bool = False):
+    """Jarvis's entire working memory: the last `limit` rows of real conversation.
+
+    Machine-authored turns are filtered out by default, and that default is the whole
+    point of the source column. This window is ~10 exchanges wide; a watchdog polling
+    every 180 seconds will fill all of it with PR chatter within the hour and push out
+    everything the owner actually said. The rows are still there -- pass
+    include_background=True to read the full audit trail -- they just no longer get to
+    crowd out his own words.
+    """
+    sql = "SELECT role, content FROM conversations WHERE user_id = ?"
+    if not include_background:
+        sql += " AND source IS NULL"
+    sql += " ORDER BY id DESC LIMIT ?"
     with closing(_connect(db_path)) as conn:
-        rows = conn.execute(
-            """SELECT role, content FROM conversations WHERE user_id = ?
-               ORDER BY id DESC LIMIT ?""",
-            (user_id, limit),
-        ).fetchall()
+        rows = conn.execute(sql, (user_id, limit)).fetchall()
     return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
 

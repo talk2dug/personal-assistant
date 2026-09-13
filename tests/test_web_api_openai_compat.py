@@ -138,8 +138,12 @@ def test_ha_endpoint_gets_the_same_contexts_as_every_other_surface(cfg, monkeypa
     # viewing_context is per-turn like image_bytes (what's in the browser this instant,
     # not a wired integration) -- the HA voice endpoint has no browser/modal concept at
     # all, so there's nothing for it to pass.
+    # source is provenance, not a capability: it marks a turn as machine-synthesized so it
+    # stays out of Jarvis's memory window (see db.recent_messages). A person talking to the
+    # voice endpoint is the owner really talking, which is precisely the None case, so
+    # passing anything here would be wrong rather than merely unnecessary.
     non_contexts = {"db_path", "llm", "requesting_user_id", "user_text", "tz_name",
-                    "image_bytes", "max_tool_hops", "viewing_context"}
+                    "image_bytes", "max_tool_hops", "viewing_context", "source"}
     contexts = [p for p in inspect.signature(engine.handle_message).parameters
                 if p not in non_contexts]
 

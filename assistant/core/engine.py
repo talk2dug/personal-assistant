@@ -2074,7 +2074,7 @@ def handle_message(
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
     recipe: "RecipeContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
-    local_llm=None, viewing_context: str | None = None,
+    local_llm=None, viewing_context: str | None = None, source: str | None = None,
 ) -> str:
     """Runs one user turn through the LLM (with tool-calling), persists the
     conversation, and returns the reply text. image_bytes (a JPEG snapshot from the
@@ -2091,7 +2091,16 @@ def handle_message(
     balances and upcoming charges") is handled exactly like image_bytes -- folded into
     this one outgoing turn only, never written to the persisted conversation, so a modal
     the owner closed five messages ago doesn't linger as stale "currently looking at"
-    context on every later replay of this history."""
+    context on every later replay of this history.
+
+    source tags both halves of this turn in the conversations table. None means the owner
+    was really there (chat, voice, a routine he armed); a background caller that
+    synthesizes its own prompt passes its own name instead, which keeps the turn as an
+    audit trail without letting it occupy Jarvis's 20-row memory window. The two
+    watchdogs in scheduler.py are the callers this exists for -- see db.recent_messages.
+    Both halves are tagged deliberately: tagging only the question would leave its answer
+    in the window as an orphan, which reads worse than either keeping or dropping the
+    pair."""
     if (era is not None or phone is not None or mail is not None or home_assistant is not None
             or kroger is not None or ccxt is not None or letterstream is not None or git_ops is not None):
         pending = db.get_pending_action(db_path, requesting_user_id)
@@ -2105,11 +2114,11 @@ def handle_message(
         fast_reply = local_fast_path.try_home_assistant_fast_path(
             local_llm, home_assistant, db_path, requesting_user_id, user_text, tz_name=tz_name)
         if fast_reply is not None:
-            db.add_message(db_path, requesting_user_id, "user", user_text)
-            db.add_message(db_path, requesting_user_id, "assistant", fast_reply)
+            db.add_message(db_path, requesting_user_id, "user", user_text, source=source)
+            db.add_message(db_path, requesting_user_id, "assistant", fast_reply, source=source)
             return fast_reply
 
-    db.add_message(db_path, requesting_user_id, "user", user_text)
+    db.add_message(db_path, requesting_user_id, "user", user_text, source=source)
 
     history = db.recent_messages(db_path, requesting_user_id, limit=20)
     now = datetime.now(ZoneInfo(tz_name)).isoformat()
@@ -2138,7 +2147,7 @@ def handle_message(
         except Exception as e:
             reply = f"I couldn't reach my reasoning backend just then, sir — {e}"
         reply = (reply or "").strip() or "I seem to be at a loss for words there, sir — could you ask that again?"
-        db.add_message(db_path, requesting_user_id, "assistant", reply)
+        db.add_message(db_path, requesting_user_id, "assistant", reply, source=source)
         return reply
 
     messages = [
@@ -2177,7 +2186,7 @@ def handle_message(
                 continue
             if not reply:
                 reply = "I seem to be at a loss for words there, sir — could you ask that again?"
-            db.add_message(db_path, requesting_user_id, "assistant", reply)
+            db.add_message(db_path, requesting_user_id, "assistant", reply, source=source)
             return reply
 
         messages.append(message)
@@ -2192,7 +2201,7 @@ def handle_message(
             messages.append({"role": "tool", "content": result})
 
     reply = "Sorry, I got stuck trying to handle that — could you rephrase?"
-    db.add_message(db_path, requesting_user_id, "assistant", reply)
+    db.add_message(db_path, requesting_user_id, "assistant", reply, source=source)
     return reply
 
 

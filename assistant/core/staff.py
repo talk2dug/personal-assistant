@@ -529,7 +529,13 @@ def set_data_feeds(db_path: str, key: str, feeds: str) -> bool:
     # reads himself. Explicit for the same reason "paper" is: half this roster's job
     # descriptions mention crypto, and an inferred grant would fill his vault with
     # dev-team chatter nobody asked for. See crypto_journal.py.
-    valid = {"market", "paper", "journal"}
+    #
+    # "policy" is pure retrieval -- it reads the owner's four hand-written engineering
+    # policy notes into the prompt and writes nothing anywhere. It is explicit rather than
+    # inferred for consistency with the other two, not because a wrong grant is dangerous:
+    # the worst case is prompt budget spent on a policy that doesn't govern that role. See
+    # agent_policy.py.
+    valid = {"market", "paper", "journal", "policy"}
     wanted = [f.strip().lower() for f in (feeds or "").split(",") if f.strip()]
     unknown = [f for f in wanted if f not in valid]
     if unknown:
@@ -848,11 +854,15 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
     llm.engineer() instead, with real but narrowly-scoped tools (git, including reading
     the actual repo, and SSH/ops-plan), never the owner's full catalog.
 
-    `obsidian` is an ObsidianClient (setup.build_obsidian_context's .mcp_client), needed
-    only by employees holding the `journal` feed -- their prior notes are read into the
-    prompt before the call and this run's entry written after it, both by this function
-    rather than by the employee. Without one, a journalling employee still runs; it just
-    runs amnesiac, which is exactly the state this feature exists to end, so it is logged.
+    `obsidian` is an ObsidianClient (setup.build_obsidian_context's .mcp_client), needed by
+    employees holding either vault-backed feed:
+
+      * `journal` -- prior notes read into the prompt before the call, this run's entry
+        written after it, both by this function rather than by the employee. Without a
+        client a journalling employee still runs; it just runs amnesiac, which is exactly
+        the state that feature exists to end, so it is logged.
+      * `policy` -- the owner's own engineering policy notes read into the prompt. Read-only,
+        writes nothing, so a missing client costs context and nothing else.
 
     `timeout` is the ClaudeCLIClient subprocess's hard ceiling (config's
     staff_assignment_timeout_seconds) — real dev-team/coding assignments can legitimately
@@ -878,6 +888,13 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
         feeds = emp.get("data_feeds") or ""
         briefing = build_feed_briefing(db_path, feeds)
         prompt = assignment + build_colleague_briefing(db_path, emp.get("briefing_from")) + briefing
+        if "policy" in feeds:
+            # The owner's own standing engineering policy, read straight out of his vault.
+            # Pure retrieval -- see agent_policy.py. Placed with the other pre-fetched
+            # context for the same reason it exists at all: a scheduled employee has no
+            # tool loop, so anything it needs to know has to already be in the prompt.
+            from . import agent_policy
+            prompt += agent_policy.build_policy_briefing(obsidian)
         # A trader runs against a ledger; an analyst only reports. That distinction also
         # sets how often each journals -- see crypto_journal.record_run.
         role = "trader" if "paper" in feeds else "analyst"
@@ -885,6 +902,9 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
         if "journal" in feeds and obsidian is None:
             logger.warning("%s holds the journal feed but no vault client was wired; "
                            "this run has no memory", key)
+        if "policy" in feeds and obsidian is None:
+            logger.warning("%s holds the policy feed but no vault client was wired; "
+                           "this run cannot see the owner's standing policy", key)
         if journaling:
             from . import crypto_journal
             prompt += crypto_journal.build_prior_context(obsidian, emp["title"])

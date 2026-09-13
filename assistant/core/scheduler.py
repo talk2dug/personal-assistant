@@ -10,9 +10,9 @@ from datetime import date, datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import (
-    agents, business_db, db, github_client, kitchen_db, location, mail_bills, mail_db,
-    mail_debts, mail_importance, mail_triage, market_data, paper_trading, personal_agents,
-    personal_db, staff,
+    agents, business_db, crypto_journal, db, github_client, kitchen_db, location,
+    mail_bills, mail_db, mail_debts, mail_importance, mail_triage, market_data,
+    paper_trading, personal_agents, personal_db, staff,
 )
 from .mail_client import JUNK_FOLDER
 from .engine import handle_message
@@ -501,7 +501,11 @@ def start(
             logger.info("staff tick: running %s", [p["key"] for p in due])
             results = staff.run_due(db_path, llm, tz_name=tz_name, notify=_staff_alert,
                                     timeout=staff_assignment_timeout_seconds,
-                                    work_queue=business.work_queue)
+                                    work_queue=business.work_queue,
+                                    # Only used on the synchronous fallback path (no queue
+                                    # wired); with a queue, main.py hands the same client
+                                    # to the worker that actually calls assign().
+                                    obsidian=obsidian.mcp_client if obsidian is not None else None)
             for r in results:
                 logger.info("staff run %s queued=%s ok=%s alert=%s alerted=%s",
                             r["employee"], r.get("queued"), r["ok"], r["alert"], r["alerted"])
@@ -623,6 +627,28 @@ def start(
             _guarded_simple("market_supplemental", _market_supplemental_tick), "interval",
             seconds=market_supplemental_poll_seconds, id="market_supplemental",
             next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
+        )
+
+    if obsidian is not None:
+        # Keeps the crypto desk's running-summary notes bounded. They are re-read into
+        # every scheduled run's prompt, and write_note is append-only by design, so
+        # without this the one note meant to prevent prompt bloat becomes the prompt
+        # bloat. Deliberately not gated on market_api_key: this is vault housekeeping on
+        # notes that already exist, and it must keep working even if the price feed is
+        # off. Ticks every 6 hours but only rewrites a summary that has actually grown
+        # past its size threshold -- a quiet week should not force a rewrite, and a busy
+        # day should not have to wait for one (the design's open question 2).
+        def _journal_housekeeping_tick():
+            for result in crypto_journal.run_housekeeping(db_path, obsidian.mcp_client):
+                if result.get("compacted"):
+                    logger.info("crypto journal: compacted %s summary %s -> %s chars, "
+                                "archived to %s", result["employee"], result.get("was"),
+                                result.get("now"), result.get("archived"))
+
+        scheduler.add_job(
+            _guarded_simple("crypto_journal_compaction", _journal_housekeeping_tick),
+            "interval", hours=6, id="crypto_journal_compaction",
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
         )
 
     scheduler.start()

@@ -444,3 +444,37 @@ class TestHasPending:
         queue.submit(key_a, "task")
         assert queue.has_pending(key_a) is True
         assert queue.has_pending(key_b) is False
+
+
+class TestVaultReachesTheEmployee:
+    """This worker is the path a scheduled crypto run actually takes -- run_due only
+    enqueues. If the vault client stops at start_worker, the desk keeps no memory at all
+    and every unit test of the journal still passes, which is precisely the sort of open
+    loop this feature exists to close.
+    """
+
+    def test_the_obsidian_client_is_handed_to_staff_assign(self, queue, db_path, monkeypatch):
+        key = _hire(db_path)
+        sentinel = object()
+        seen = {}
+
+        def fake_assign(db, llm, employee_key, assignment, timeout=None, obsidian=None):
+            seen["obsidian"] = obsidian
+            return {"ok": True, "output": "done", "work_id": None}
+
+        monkeypatch.setattr(staff, "assign", fake_assign)
+        queue.submit(key, "do a thing")
+        queue.llm, queue.obsidian_client = FakeLLM(), sentinel
+        queue.tick()
+        assert seen["obsidian"] is sentinel
+
+    def test_start_worker_stores_the_vault_client(self, queue):
+        sentinel = object()
+        queue.start_worker(FakeLLM(), obsidian_client=sentinel)
+        try:
+            assert queue.obsidian_client is sentinel
+        finally:
+            queue.stop_worker()
+
+    def test_no_vault_is_the_safe_default(self, queue):
+        assert queue.obsidian_client is None

@@ -138,7 +138,10 @@ def main() -> None:
             timeout=cfg.staff_assignment_timeout_seconds,
             # So a finished coding task can report a PR's real, live CI status instead
             # of the employee's own unverified claim -- see work_queue._pr_status_line.
-            git_ops_client=git_ops.mcp_client if git_ops is not None else None)
+            git_ops_client=git_ops.mcp_client if git_ops is not None else None,
+            # The crypto desk's journal. This worker runs every scheduled employee, so
+            # this is where the vault has to reach staff.assign() -- see crypto_journal.py.
+            obsidian_client=obsidian.mcp_client if obsidian is not None else None)
     scheduler.start(
         cfg.db_path, notify, cfg.poll_interval_seconds,
         calendar=calendar, caldav_sync_interval_seconds=cfg.caldav_sync_interval_seconds,

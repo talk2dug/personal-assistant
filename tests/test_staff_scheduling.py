@@ -377,3 +377,216 @@ class TestHandleCadenceOutcome:
             notify=lambda h, b, u, p: notified.append(h))
         assert result["alerted"] is True
         assert notified == ["BTC -10%"]
+
+
+class TestPaperRecordInTheBriefing:
+    """The win rate was computed by paper_trading.performance() since the day that module
+    was written, and never once shown to the employee trading against it. The per-coin
+    split did not exist at all, so nothing here could answer "I have lost on this ticker
+    three times running" -- which the trade log shows happening repeatedly.
+    """
+
+    @pytest.fixture
+    def market_db(self, db):
+        import sqlite3
+        from datetime import datetime, timezone
+        from assistant.core import market_data
+        market_data.init_market_db(db)
+        conn = sqlite3.connect(db)
+        now = datetime.now(timezone.utc).isoformat()
+        for code, rate in (("BTC", 80_000.0), ("SOL", 200.0)):
+            conn.execute(
+                """INSERT INTO market_coins (code, name, rank, rate, present,
+                                             first_seen, last_seen, updated_at)
+                   VALUES (?,?,1,?,1,?,?,?)""", (code, code, rate, now, now, now))
+        conn.execute("INSERT INTO market_polls (ok, coins, at) VALUES (1, 2, ?)", (now,))
+        conn.commit()
+        conn.close()
+        return db
+
+    def _lose_on(self, db, code, crashed_to, back_to=None):
+        import sqlite3
+        from assistant.core import paper_trading
+        paper_trading.execute_orders(db, [{"side": "buy", "code": code, "usd": 100}])
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (crashed_to, code))
+        conn.commit()
+        conn.close()
+        paper_trading.execute_orders(db, [{"side": "sell", "code": code, "qty": "all"}])
+        if back_to is not None:
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (back_to, code))
+            conn.commit()
+            conn.close()
+
+    def test_the_win_rate_finally_reaches_the_employee(self, market_db):
+        self._lose_on(market_db, "SOL", 100.0)
+        out = staff.build_feed_briefing(market_db, "paper")
+        assert "YOUR RECORD SO FAR" in out
+        assert "1 closed round-trips" in out
+        assert "0.0% win rate" in out
+
+    def test_coins_it_has_repeatedly_lost_on_are_named(self, market_db):
+        for _ in range(3):
+            self._lose_on(market_db, "SOL", 100.0, back_to=200.0)
+        out = staff.build_feed_briefing(market_db, "paper")
+        assert "coins you have LOST money on" in out
+        assert "SOL" in out and "(0W/3L)" in out
+
+    def test_with_no_closed_trades_it_says_so_rather_than_implying_a_record(self, market_db):
+        out = staff.build_feed_briefing(market_db, "paper")
+        assert "no per-coin record to learn from" in out
+
+    def test_the_record_leads_the_briefing_and_the_movers_follow(self, market_db):
+        """Framing, not strategy: the first thing a trader read on every run used to be a
+        list of coins that had just jumped, before it had seen a single fact about its own
+        results. Both blocks are still present; the order changed."""
+        self._lose_on(market_db, "SOL", 100.0)
+        out = staff.build_feed_briefing(market_db, "market,paper")
+        assert out.index("YOUR RECORD SO FAR") < out.index("CRYPTO FEED")
+
+    def test_movers_are_no_longer_labelled_as_a_trade_shortlist(self, market_db):
+        out = staff.build_feed_briefing(market_db, "market")
+        assert "movers, last hour:" not in out
+
+
+class TestJournalLoop:
+    """The whole point: a lesson written on one run has to be readable on the next one.
+
+    Unit-testing the write alone would have passed while the loop stayed open -- which is
+    exactly the state this desk was already in, since paper_trading.performance() computed
+    a win rate nobody ever read.
+    """
+
+    @pytest.fixture
+    def market_db(self, db):
+        import sqlite3
+        from datetime import datetime, timezone
+        from assistant.core import market_data
+        market_data.init_market_db(db)
+        conn = sqlite3.connect(db)
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT INTO market_coins (code, name, rank, rate, present,
+                                         first_seen, last_seen, updated_at)
+               VALUES ('SOL','SOL',1,200.0,1,?,?,?)""", (now, now, now))
+        conn.execute("INSERT INTO market_polls (ok, coins, at) VALUES (1, 1, ?)", (now,))
+        conn.commit()
+        conn.close()
+        return db
+
+    @pytest.fixture
+    def vault(self, tmp_path):
+        """A temp vault. The real one is the owner's own notes."""
+        from assistant.core.obsidian_client import ObsidianClient
+        return ObsidianClient(str(tmp_path / "vault"))
+
+    @pytest.fixture
+    def trader(self, market_db):
+        key = staff.hire(market_db, "Desk Trader",
+                         "Fifteen years trading crypto markets across spot and derivatives.")["key"]
+        staff.set_data_feeds(market_db, key, "market,paper,journal")
+        return key
+
+    class ScriptedLLM:
+        def __init__(self, *responses):
+            self.responses = list(responses)
+            self.prompts = []
+
+        def research(self, prompt, system_prompt=None, timeout=None, **kwargs):
+            self.prompts.append(prompt)
+            return self.responses.pop(0)
+
+    def test_a_lesson_written_on_one_run_is_read_back_on_the_next(self, market_db, trader, vault):
+        llm = self.ScriptedLLM(
+            'Standing down today.\n```journal\n'
+            '{"kind": "lesson", "summary": "RAY whipsaws on thin volume",'
+            ' "direction_change": true, "tickers": ["RAY"], "detail": "Third stop-out.",'
+            ' "lesson": "Stop re-entering RAY after a stop-out."}\n```',
+            "Nothing today.")
+
+        staff.assign(market_db, llm, trader, "do your rounds", obsidian=vault)
+        staff.assign(market_db, llm, trader, "do your rounds", obsidian=vault)
+
+        assert "Stop re-entering RAY after a stop-out." in llm.prompts[1], \
+            "the second run must carry the first run's lesson -- this is the whole feature"
+        assert "YOUR OWN PRIOR NOTES" in llm.prompts[1]
+
+    def test_the_first_run_is_told_it_has_no_notes_yet(self, market_db, trader, vault):
+        llm = self.ScriptedLLM("Nothing today.")
+        staff.assign(market_db, llm, trader, "do your rounds", obsidian=vault)
+        assert "No journal entries on file yet" in llm.prompts[0]
+
+    def test_the_employee_is_asked_for_a_block_it_does_not_file_itself(self, market_db, trader, vault):
+        """Same split as the orders block: the agent proposes, code writes. A scheduled
+        run has no tool loop to call the vault with anyway."""
+        llm = self.ScriptedLLM("Nothing today.")
+        staff.assign(market_db, llm, trader, "do your rounds", obsidian=vault)
+        assert "```journal" in llm.prompts[0]
+        assert "write_note" not in llm.prompts[0]
+
+    def test_an_employee_without_the_feed_is_never_asked_for_a_block(self, market_db, vault):
+        key = staff.hire(market_db, "Plain Analyst",
+                         "Twenty years of markets research, macro and on-chain analysis.")["key"]
+        llm = self.ScriptedLLM("Nothing today.")
+        staff.assign(market_db, llm, key, "do your rounds", obsidian=vault)
+        assert "```journal" not in llm.prompts[0]
+
+    def test_the_journal_records_the_ledger_fill_not_the_model_claim(self, market_db, trader, vault):
+        """A model that says 'bought 10 BTC' after a $100 SOL order would otherwise write
+        a false trade history into the owner's vault, which is worse than none."""
+        from assistant.core import crypto_journal
+        llm = self.ScriptedLLM(
+            'I bought 10 BTC today, a huge position.\n'
+            '```journal\n{"summary": "loading up", "detail": "conviction buy"}\n```\n'
+            '```orders\n{"orders": [{"side": "buy", "code": "SOL", "usd": 100,'
+            ' "stop_loss": 180.0}]}\n```')
+        staff.assign(market_db, llm, trader, "do your rounds", obsidian=vault)
+
+        notes = vault.list_notes(crypto_journal.JOURNAL_FOLDER)["notes"]
+        body = vault.read_note(crypto_journal.JOURNAL_FOLDER, notes[0]["title"])["content"]
+        assert "BUY 0.5 SOL" in body
+        assert "10 BTC" not in body
+
+    def test_a_routine_trader_run_writes_nothing(self, market_db, trader, vault):
+        from assistant.core import crypto_journal
+        llm = self.ScriptedLLM(
+            'Quiet.\n```journal\n{"summary": "no change", "detail": "range intact"}\n```')
+        staff.assign(market_db, llm, trader, "do your rounds", obsidian=vault)
+        assert vault.list_notes(crypto_journal.JOURNAL_FOLDER)["notes"] == []
+
+    def test_a_journalling_employee_with_no_vault_still_delivers(self, market_db, trader):
+        """Memory is the feature; the run is the job. Losing the second to protect the
+        first would be the wrong trade."""
+        llm = self.ScriptedLLM("Nothing today.")
+        out = staff.assign(market_db, llm, trader, "do your rounds", obsidian=None)
+        assert out["ok"]
+        assert "```journal" not in llm.prompts[0]
+
+    def test_a_vault_write_failure_does_not_fail_the_run(self, market_db, trader):
+        class BrokenVault:
+            def read_note(self, *a, **k):
+                return {"error": "drive not ready"}
+
+            def list_notes(self, *a, **k):
+                return {"notes": []}
+
+            def write_note(self, *a, **k):
+                raise OSError("drive not ready")
+
+        llm = self.ScriptedLLM(
+            'Learned something.\n```journal\n{"summary": "x", "detail": "y",'
+            ' "lesson": "z"}\n```')
+        out = staff.assign(market_db, llm, trader, "do your rounds", obsidian=BrokenVault())
+        assert out["ok"], "the deliverable was already produced; a vault fault must not lose it"
+
+    def test_run_due_carries_the_vault_through_to_the_employee(self, market_db, trader, vault):
+        from assistant.core import crypto_journal
+        staff.set_shift(market_db, trader, cadence="interval", interval_minutes=5)
+        staff.set_standing_assignment(market_db, trader, "do your rounds")
+        llm = self.ScriptedLLM(
+            'Learned something.\n```journal\n{"summary": "RAY is untradeable for me",'
+            ' "detail": "third stop-out", "lesson": "Stop re-entering RAY."}\n```')
+        staff.run_due(market_db, llm, tz_name="UTC", obsidian=vault)
+        assert vault.list_notes(crypto_journal.JOURNAL_FOLDER)["notes"], \
+            "the scheduled path, not just a direct assign(), has to reach the vault"

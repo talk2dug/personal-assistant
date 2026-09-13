@@ -265,3 +265,102 @@ def test_order_instructions_template_survives_formatting():
         fee_pct=paper_trading.DEFAULT_FEE_PCT, max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
         cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS)
     assert '"side": "buy"' in out and "0.1" in out
+
+
+class TestPerCoinPerformance:
+    """The one question this ledger held every row to answer and could not: "have I lost
+    money on this ticker before?" The blended win rate in performance() averages that away
+    -- which is how the same codes kept being re-bought days after losing money on them.
+    """
+
+    def _move(self, db, code, rate):
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (rate, code))
+        conn.commit(); conn.close()
+
+    def test_no_closed_trades_means_no_record_rather_than_a_zero(self, db):
+        paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 1000}])
+        # An open position has no outcome yet. Counting its paper mark here would let an
+        # unrealised loss masquerade as a track record.
+        assert paper_trading.per_coin_performance(db) == []
+
+    def test_losses_and_wins_are_split_per_coin(self, db):
+        paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 1000}])
+        self._move(db, "SOL", 100.0)                       # halves
+        paper_trading.execute_orders(db, [{"side": "sell", "code": "SOL", "qty": "all"}])
+        paper_trading.execute_orders(db, [{"side": "buy", "code": "BTC", "usd": 1000}])
+        self._move(db, "BTC", 160_000.0)                   # doubles
+        paper_trading.execute_orders(db, [{"side": "sell", "code": "BTC", "qty": "all"}])
+
+        by_code = {c["code"]: c for c in paper_trading.per_coin_performance(db)}
+        assert by_code["SOL"]["realized"] < 0
+        assert by_code["SOL"]["wins"] == 0 and by_code["SOL"]["losses"] == 1
+        assert by_code["BTC"]["realized"] > 0
+        assert by_code["BTC"]["wins"] == 1 and by_code["BTC"]["win_rate_pct"] == 100.0
+
+    def test_worst_coin_comes_first(self, db):
+        for code, crash in (("SOL", 100.0), ("BTC", 8_000.0)):
+            paper_trading.execute_orders(db, [{"side": "buy", "code": code, "usd": 1000}])
+            self._move(db, code, crash)
+            paper_trading.execute_orders(db, [{"side": "sell", "code": code, "qty": "all"}])
+        # BTC lost 90%, SOL 50% -- the biggest loser leads, because that is the one the
+        # employee most needs in front of it before it proposes buying again.
+        assert [c["code"] for c in paper_trading.per_coin_performance(db)][0] == "BTC"
+
+    def test_repeated_losses_on_one_ticker_accumulate(self, db):
+        for _ in range(3):
+            paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 500}])
+            self._move(db, "SOL", 100.0)
+            paper_trading.execute_orders(db, [{"side": "sell", "code": "SOL", "qty": "all"}])
+            self._move(db, "SOL", 200.0)
+        sol = paper_trading.per_coin_performance(db)[0]
+        assert sol["code"] == "SOL"
+        assert sol["closed_trades"] == 3 and sol["losses"] == 3
+        assert sol["win_rate_pct"] == 0.0
+        # Fees count every trade in the code, not just the closing ones: churning a
+        # ticker is half the reason it lost money.
+        assert sol["fees_paid"] > 0
+
+    def test_last_buy_at_finds_the_open_of_the_position_being_closed(self, db):
+        assert paper_trading.last_buy_at(db, "SOL") is None
+        paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 500}])
+        opened = paper_trading.last_buy_at(db, "SOL")
+        assert opened and opened.startswith("20")
+        paper_trading.execute_orders(db, [{"side": "sell", "code": "SOL", "qty": "all"}])
+        # A sell must not become the "opening" timestamp a closing entry links back to.
+        assert paper_trading.last_buy_at(db, "SOL") == opened
+
+
+class TestFencedBlockScanning:
+    """A real bug with teeth, found the moment a second fenced block joined the reply.
+
+    The old pattern matched the label inline as ```(?:orders|json)?\\s*\\n. A fence it did
+    not recognise did not merely fail to match -- the scan resynchronised on that block's
+    CLOSING fence and swallowed the next block whole. One ```journal block above the
+    ```orders block was therefore enough to make parse_orders return nothing, silently, on
+    every run: no orders, no rejections, nothing in the log, a trading desk that had
+    quietly stopped trading.
+    """
+
+    ORDERS = '```orders\n{"orders": [{"side": "buy", "code": "SOL", "usd": 100}]}\n```'
+    JOURNAL = '```journal\n{"summary": "loading up", "detail": "conviction"}\n```'
+
+    def test_a_journal_block_above_the_orders_does_not_eat_them(self):
+        orders = paper_trading.parse_orders(f"prose\n{self.JOURNAL}\n{self.ORDERS}\n")
+        assert orders == [{"side": "buy", "code": "SOL", "usd": 100}]
+
+    def test_a_journal_block_below_the_orders_does_not_eat_them(self):
+        orders = paper_trading.parse_orders(f"prose\n{self.ORDERS}\n{self.JOURNAL}\n")
+        assert orders == [{"side": "buy", "code": "SOL", "usd": 100}]
+
+    def test_an_unrelated_code_fence_is_skipped_not_resynchronised_on(self):
+        text = f"prose\n```python\nprint('hi')\n```\n{self.ORDERS}\n"
+        assert paper_trading.parse_orders(text) == [{"side": "buy", "code": "SOL", "usd": 100}]
+
+    def test_a_journal_block_is_never_read_as_orders(self):
+        assert paper_trading.parse_orders(self.JOURNAL) == []
+
+    def test_unlabelled_and_json_fences_are_still_accepted(self):
+        bare = '```\n{"orders": [{"side": "sell", "code": "SOL", "qty": "all"}]}\n```'
+        assert paper_trading.parse_orders(bare)[0]["side"] == "sell"
+        assert paper_trading.fenced_blocks(bare, {""})

@@ -525,7 +525,11 @@ def _fmt_price(v) -> str:
 def set_data_feeds(db_path: str, key: str, feeds: str) -> bool:
     """Set which live feeds an employee receives. Explicit by design for anything that
     can act on the world, simulated or not -- see the note on PAPER inference above."""
-    valid = {"market", "paper"}
+    # "journal" grants persistent memory in the owner's real Obsidian vault -- notes he
+    # reads himself. Explicit for the same reason "paper" is: half this roster's job
+    # descriptions mention crypto, and an inferred grant would fill his vault with
+    # dev-team chatter nobody asked for. See crypto_journal.py.
+    valid = {"market", "paper", "journal"}
     wanted = [f.strip().lower() for f in (feeds or "").split(",") if f.strip()]
     unknown = [f for f in wanted if f not in valid]
     if unknown:
@@ -590,23 +594,73 @@ def build_colleague_briefing(db_path: str, briefing_from: str | None,
             + "\n--- end handoff ---\n")
 
 
+def _record_lines(db_path: str, snap: dict, worst: int = 6, best: int = 3) -> list[str]:
+    """The employee's own track record, per coin, in front of it before it proposes a trade.
+
+    This is the feedback half of "so they learn and get smarter". The blended win rate was
+    already being computed by paper_trading.performance() and simply never shown; the
+    per-coin split did not exist at all, so nothing in this system could answer "I have
+    lost on this ticker three times running" -- which is precisely the mistake the trade
+    log keeps recording.
+
+    Losers lead and are capped, because this is injected into every run: the full table
+    would be most of the prompt, and the tickers that keep costing money are the ones the
+    model needs in front of it. No conclusion is drawn for it here -- these are its own
+    realised numbers, and what to do about them is its judgement, not a rule imposed by
+    the briefing.
+    """
+    from . import paper_trading
+    rate = snap.get("win_rate_pct")
+    lines = [
+        f"  YOUR RECORD SO FAR: {snap.get('closed_trades', 0)} closed round-trips, "
+        f"{snap.get('wins', 0)} won "
+        f"({f'{rate}% win rate' if rate is not None else 'no closed trades yet'}), "
+        f"${snap.get('fees_paid', 0):,.2f} paid in fees, "
+        f"{snap.get('orders_rejected', 0)} orders rejected."
+    ]
+    per_coin = paper_trading.per_coin_performance(db_path)
+    losers = [c for c in per_coin if c["realized"] < 0][:worst]
+    winners = [c for c in reversed(per_coin) if c["realized"] > 0][:best]
+    if losers:
+        lines.append("  coins you have LOST money on (your own realised results, worst "
+                     "first -- not a forecast):")
+        for c in losers:
+            lines.append(f"    {c['code']} ${c['realized']:+,.2f} over {c['closed_trades']} "
+                         f"closed ({c['wins']}W/{c['losses']}L), fees ${c['fees_paid']:,.2f}")
+    if winners:
+        lines.append("  coins you have made money on: "
+                     + ", ".join(f"{c['code']} ${c['realized']:+,.2f} "
+                                 f"({c['wins']}W/{c['losses']}L)" for c in winners))
+    if not per_coin:
+        lines.append("  no closed round-trips yet, so you have no per-coin record to "
+                     "learn from -- say so rather than inferring one.")
+    return lines
+
+
 def build_feed_briefing(db_path: str, feeds: str | None) -> str:
     """Compact, current data for an employee that cannot fetch anything itself.
 
-    Deliberately pre-digested rather than a data dump: movers first because that is the
-    question a monitoring shift is actually asking, and feed health included because an
-    employee must be able to tell a quiet market from a dead feed. Reading the local
+    Deliberately pre-digested rather than a data dump, and feed health is included because
+    an employee must be able to tell a quiet market from a dead feed. Reading the local
     cache costs nothing, so this is attached on every run rather than on request.
+
+    ORDER MATTERS, and it changed: the market block used to come first, so the first thing
+    a trader read on every single run was a list of coins that had just jumped 2%+. That
+    frames the job as "find today's mover" before the model has seen a single fact about
+    its own results. Its own record -- equity, win rate, and the tickers it has repeatedly
+    lost on -- now leads, and the market follows as the thing to judge against that record.
+    Framing only; no selection rule is imposed here, and the same facts are present either
+    way.
     """
     if not feeds:
         return ""
-    parts = []
+    market_parts, paper_parts = [], []
     if "market" in feeds:
         try:
             from . import market_data
             status = market_data.feed_status(db_path)
             if status.get("stale"):
-                parts.append(
+                market_parts.append(
                     "CRYPTO FEED: STALE — the last poll was "
                     f"{status.get('seconds_since_poll')}s ago. Do NOT report market "
                     "conditions from this data, and say the feed is stale instead.")
@@ -622,7 +676,8 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                     lines.append(f"  {c['code']} {_fmt_price(c['price_usd'])} "
                                  f"1h {c['change_1h_pct']}% 24h {c['change_24h_pct']}%")
                 if movers:
-                    lines.append("  movers, last hour:")
+                    lines.append("  1h movers (context on what is in motion, not a "
+                                 "shortlist to trade):")
                     for m in movers:
                         lines.append(f"    {m['code']} {m['change_hour_pct']:+.2f}% "
                                      f"({_fmt_price(m['price_usd'])}, rank {m['rank']})")
@@ -648,14 +703,18 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 lines.append(f"  TRADEABLE ON THIS FEED ({len(tracked)} codes) -- propose "
                              "trades ONLY from this list, anything else will be rejected:")
                 lines.append("    " + ", ".join(tracked))
-                parts.append("\n".join(lines))
+                market_parts.append("\n".join(lines))
         except Exception as e:
-            parts.append(f"CRYPTO FEED: unavailable ({type(e).__name__}). "
-                         "Say so rather than guessing at prices.")
+            market_parts.append(f"CRYPTO FEED: unavailable ({type(e).__name__}). "
+                                "Say so rather than guessing at prices.")
     if "paper" in feeds:
         try:
             from . import paper_trading
-            snap = paper_trading.portfolio(db_path)
+            # performance() is portfolio() plus the closed-trade arithmetic. That
+            # arithmetic has existed since this module was written and was never once
+            # shown to the employee computing against it -- the win rate was calculated,
+            # stored, and kept from the only reader who could act on it.
+            snap = paper_trading.performance(db_path)
             lines = [f"PAPER PORTFOLIO '{snap['account']}' — simulated, no real money:",
                      f"  cash ${snap['cash']:,.2f} | holdings ${snap['holdings_value']:,.2f} "
                      f"| equity ${snap['equity']:,.2f} "
@@ -698,11 +757,13 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 lines.append("  orders REJECTED (these did not happen):")
                 for r in rejects:
                     lines.append(f"    {r['side']} {r['code']}: {r['reason']}")
-            parts.append("\n".join(lines))
+            lines += _record_lines(db_path, snap)
+            paper_parts.append("\n".join(lines))
         except Exception as e:
-            parts.append(f"PAPER PORTFOLIO: unavailable ({type(e).__name__}). "
-                         "Do not trade this run.")
+            paper_parts.append(f"PAPER PORTFOLIO: unavailable ({type(e).__name__}). "
+                               "Do not trade this run.")
 
+    parts = paper_parts + market_parts
     if not parts:
         return ""
     return ("\n\n--- LIVE DATA, captured just now. These figures are exact and "
@@ -711,17 +772,19 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
             + "\n--- end live data ---\n")
 
 
-def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> str:
-    """Fill any orders the employee proposed, and return a note for the work record."""
+def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> tuple[str, dict | None]:
+    """Fill any orders the employee proposed. Returns a note for the work record, and the
+    ledger's own result so the journal entry can be written from the real fills rather
+    than from the model's account of them (see crypto_journal.record_run)."""
     from . import paper_trading
     try:
         orders = paper_trading.parse_orders(output)
         if not orders:
-            return ""
+            return "", None
         result = paper_trading.execute_orders(db_path, orders, staff_key=staff_key)
     except Exception as e:
         logger.exception("paper order execution failed for %s", staff_key)
-        return f"\n\n[EXECUTION FAILED: {type(e).__name__}: {e} — no orders were filled]"
+        return f"\n\n[EXECUTION FAILED: {type(e).__name__}: {e} — no orders were filled]", None
 
     lines = ["\n\n--- EXECUTION REPORT (by the ledger, not the employee) ---"]
     for f in result["fills"]:
@@ -735,10 +798,46 @@ def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> str:
                  f"{p['total_return_pct']:+.2f}% since inception")
     logger.info("paper trades by %s: %d filled, %d rejected, equity $%.2f",
                 staff_key, len(result["fills"]), len(result["rejections"]), p["equity"])
-    return "\n".join(lines)
+    return "\n".join(lines), result
 
 
-def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800) -> dict:
+def _record_journal(db_path: str, obsidian, emp: dict, output: str,
+                    exec_result: dict | None, role: str) -> dict:
+    """File this run's journal entry into the vault.
+
+    Orchestrator-side on purpose, exactly like _apply_paper_orders above: the employee
+    proposes narrative, code writes it. A scheduled run has no tool loop to call the vault
+    with, and a model that writes its own history can write one that flatters it.
+
+    Never allowed to fail a run. The deliverable is already produced and recorded by the
+    time this is reached -- losing it because a vault lives on a disconnected drive would
+    trade the thing that matters for the thing that helps.
+    """
+    from . import crypto_journal
+    try:
+        entry = crypto_journal.parse_journal_entry(output)
+        fills = (exec_result or {}).get("fills") or []
+        stats = None
+        if role == "trader":
+            from . import paper_trading
+            stats = paper_trading.performance(db_path)
+        if entry is None and (role == "analyst" or fills):
+            # Visible, not silent: a run that was supposed to journal and didn't is the
+            # same class of event as a rejected order, and is logged like one.
+            logger.warning("%s produced no ```journal block on a run that needed one",
+                           emp["key"])
+        result = crypto_journal.record_run(obsidian, emp["title"], entry, role=role,
+                                           fills=fills, stats=stats, db_path=db_path)
+        logger.info("journal for %s: %s (%s)", emp["key"],
+                    "written" if result.get("journaled") else "skipped", result.get("reason"))
+        return result
+    except Exception as e:
+        logger.exception("journal write failed for %s", emp["key"])
+        return {"journaled": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
+           obsidian=None) -> dict:
     """Give an employee a piece of work and record what came back.
 
     Every tier but "execute" runs through llm.research(), which carries web search and,
@@ -748,6 +847,12 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800) -
     one tier that can act (see the note above CAPABILITY_TIERS) — it runs through
     llm.engineer() instead, with real but narrowly-scoped tools (git, including reading
     the actual repo, and SSH/ops-plan), never the owner's full catalog.
+
+    `obsidian` is an ObsidianClient (setup.build_obsidian_context's .mcp_client), needed
+    only by employees holding the `journal` feed -- their prior notes are read into the
+    prompt before the call and this run's entry written after it, both by this function
+    rather than by the employee. Without one, a journalling employee still runs; it just
+    runs amnesiac, which is exactly the state this feature exists to end, so it is logged.
 
     `timeout` is the ClaudeCLIClient subprocess's hard ceiling (config's
     staff_assignment_timeout_seconds) — real dev-team/coding assignments can legitimately
@@ -773,12 +878,26 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800) -
         feeds = emp.get("data_feeds") or ""
         briefing = build_feed_briefing(db_path, feeds)
         prompt = assignment + build_colleague_briefing(db_path, emp.get("briefing_from")) + briefing
+        # A trader runs against a ledger; an analyst only reports. That distinction also
+        # sets how often each journals -- see crypto_journal.record_run.
+        role = "trader" if "paper" in feeds else "analyst"
+        journaling = "journal" in feeds and obsidian is not None
+        if "journal" in feeds and obsidian is None:
+            logger.warning("%s holds the journal feed but no vault client was wired; "
+                           "this run has no memory", key)
+        if journaling:
+            from . import crypto_journal
+            prompt += crypto_journal.build_prior_context(obsidian, emp["title"])
         if "paper" in feeds:
             from . import paper_trading
             prompt += paper_trading.ORDER_INSTRUCTIONS.format(
                 fee_pct=paper_trading.DEFAULT_FEE_PCT,
                 max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
                 cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS)
+        if journaling:
+            # Last, so the output-order note it ends with (prose, journal, orders, verdict)
+            # is the final instruction the model reads about how to lay its reply out.
+            prompt += crypto_journal.journal_instructions(role)
 
         if emp["capability_tier"] == "execute":
             if not hasattr(llm, "engineer"):
@@ -798,12 +917,18 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800) -
                 tools=REQUEST_CAPABILITY_TOOLS, employee_key=emp["key"])
         status, error = "delivered", None
 
+        exec_result = None
         if "paper" in feeds and output:
             # The employee proposed; the ledger decides. What actually happened is
             # appended to the stored output, so the work record reflects the fills rather
             # than the intentions -- a model that says "bought SOL" after a rejected order
             # would otherwise leave a false trade history behind it.
-            output += _apply_paper_orders(db_path, output, emp["key"])
+            report, exec_result = _apply_paper_orders(db_path, output, emp["key"])
+            output += report
+        if journaling and output:
+            # After the orders, never before: the journal entry carries the ledger's real
+            # fills, and running this first would record intentions as history.
+            _record_journal(db_path, obsidian, emp, output, exec_result, role)
     except Exception as e:
         output, status, error = None, "failed", f"{type(e).__name__}: {e}"
 
@@ -1093,7 +1218,7 @@ def handle_cadence_outcome(db_path: str, person: dict, outcome: dict, notify=Non
 
 
 def run_due(db_path: str, llm, tz_name: str = "UTC", notify=None, timeout: int = 10800,
-            work_queue=None) -> list[dict]:
+            work_queue=None, obsidian=None) -> list[dict]:
     """Run every employee who is due and on shift. Called by the scheduler.
 
     With work_queue given, each due assignment is handed to it (kind='cadence') and this
@@ -1132,7 +1257,8 @@ def run_due(db_path: str, llm, tz_name: str = "UTC", notify=None, timeout: int =
                                 "queue_id": queue_id})
                 continue
 
-            outcome = assign(db_path, llm, person["key"], assignment, timeout=timeout)
+            outcome = assign(db_path, llm, person["key"], assignment, timeout=timeout,
+                             obsidian=obsidian)
             results.append(handle_cadence_outcome(db_path, person, outcome, notify))
         except Exception as e:
             logger.exception("employee %s failed to run", person["key"])

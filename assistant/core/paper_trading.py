@@ -308,6 +308,27 @@ def portfolio(db_path: str, name: str = "crypto") -> dict:
     }
 
 
+_FENCE = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.S)
+
+
+def fenced_blocks(text: str, labels: set[str]) -> list[str]:
+    """Bodies of every fenced block carrying one of `labels` (empty string = unlabelled).
+
+    Written this way after a real bug with teeth: the old pattern matched the label
+    inline as ```(?:orders|json)?\\s*\\n, so a fence it did NOT recognise did not simply
+    fail to match -- the scan resynchronised on that block's *closing* fence and swallowed
+    the next block whole. One ```journal block above the ```orders block was enough to
+    make parse_orders return nothing at all, silently, on every run: no orders, no
+    rejections, no error, a trading desk that had quietly stopped trading.
+
+    So: recognise every fence as a fence, then filter by label. An unknown language tag is
+    skipped, not treated as the absence of a fence.
+    """
+    if not text:
+        return []
+    return [body for label, body in _FENCE.findall(text) if label.lower() in labels]
+
+
 def parse_orders(text: str) -> list[dict]:
     """Pull the orders block out of an employee's response.
 
@@ -317,7 +338,7 @@ def parse_orders(text: str) -> list[dict]:
     """
     if not text:
         return []
-    blocks = re.findall(r"```(?:orders|json)?\s*\n(.*?)```", text, re.S | re.I)
+    blocks = fenced_blocks(text, {"", "orders", "json"})
     # Last block wins: a model that restates its orders puts the final answer last.
     for block in reversed(blocks):
         try:
@@ -558,6 +579,60 @@ def recent_rejections(db_path: str, name: str = "crypto", limit: int = 10) -> li
         return [dict(r) for r in conn.execute(
             "SELECT * FROM paper_rejections WHERE account_id = ? ORDER BY id DESC LIMIT ?",
             (acct["id"], limit))]
+
+
+def per_coin_performance(db_path: str, name: str = "crypto") -> list[dict]:
+    """Realised outcome per coin, worst first.
+
+    The one question this ledger could never answer, despite holding every row needed to:
+    "have I lost money on this ticker before?" `performance()` computes a single blended
+    win rate across every coin, which is exactly the number that hides a ticker the desk
+    has lost on four times running -- and the trade log shows that happening, with the
+    same codes re-bought days apart on a fresh momentum call.
+
+    Grouped over closed round-trips only (a sell carrying a realised figure). An open
+    position has no outcome yet, and counting its paper mark here would let an unrealised
+    loss masquerade as a track record.
+    """
+    acct = ensure_account(db_path, name)
+    with closing(_connect(db_path)) as conn:
+        rows = conn.execute(
+            """SELECT code,
+                      COUNT(*) AS closed,
+                      SUM(CASE WHEN realized > 0 THEN 1 ELSE 0 END) AS wins,
+                      COALESCE(SUM(realized), 0) AS realized
+                 FROM paper_trades
+                WHERE account_id = ? AND side = 'sell' AND realized IS NOT NULL
+                GROUP BY code""", (acct["id"],)).fetchall()
+        # Fees are charged on both sides, so they are summed over every trade in the code,
+        # not just the closing ones -- the cost of churning a ticker is half the story of
+        # why it lost money.
+        fees = {r["code"]: r["fees"] for r in conn.execute(
+            """SELECT code, COALESCE(SUM(fee), 0) AS fees FROM paper_trades
+                WHERE account_id = ? GROUP BY code""", (acct["id"],))}
+
+    out = []
+    for r in rows:
+        closed, wins = r["closed"], r["wins"] or 0
+        out.append({
+            "code": r["code"], "closed_trades": closed, "wins": wins,
+            "losses": closed - wins, "realized": round(r["realized"], 2),
+            "fees_paid": round(fees.get(r["code"], 0.0), 2),
+            "win_rate_pct": round(wins / closed * 100, 1) if closed else None,
+        })
+    out.sort(key=lambda c: c["realized"])
+    return out
+
+
+def last_buy_at(db_path: str, code: str, name: str = "crypto") -> str | None:
+    """When the most recent buy of `code` filled, or None. Used only to link a closing
+    journal entry back to the day the position was opened."""
+    acct = ensure_account(db_path, name)
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            """SELECT at FROM paper_trades WHERE account_id = ? AND code = ? AND side = 'buy'
+                ORDER BY id DESC LIMIT 1""", (acct["id"], code)).fetchone()
+    return row["at"] if row else None
 
 
 def performance(db_path: str, name: str = "crypto") -> dict:

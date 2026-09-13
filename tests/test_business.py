@@ -738,3 +738,45 @@ def test_deciding_a_pending_action_or_pr_card_from_chat_is_refused(db_path, ref_
 
     assert "error" in result
     assert business_db.get_review_item(db_path, 1, item_id)["status"] == "pending"
+
+
+def test_scheduler_registers_the_journal_compaction_job_when_a_vault_is_present(tmp_path):
+    """The running summary is re-read into every scheduled crypto run's prompt, and
+    write_note is append-only by design -- so without a compaction timer the one note
+    meant to prevent prompt bloat becomes the prompt bloat. Deliberately NOT gated on
+    market_api_key: this is housekeeping on notes that already exist, and it has to keep
+    working even when the price feed is off."""
+    from assistant.core import db, scheduler
+    from assistant.core.engine import ObsidianContext
+    from assistant.core.obsidian_client import ObsidianClient
+
+    path = str(tmp_path / "sched.db")
+    db.init_db(path)
+    business_db.init_business_db(path)
+    db.upsert_user(path, "111", "Dug", "owner")
+
+    # A temp vault, never the owner's real one.
+    obsidian = ObsidianContext(mcp_client=ObsidianClient(str(tmp_path / "vault")))
+    started = scheduler.start(
+        path, notify=lambda *a: None, poll_interval_seconds=3600, obsidian=obsidian)
+    try:
+        job = started.get_job("crypto_journal_compaction")
+        assert job is not None
+        assert job.trigger.interval.total_seconds() == 6 * 3600
+    finally:
+        started.shutdown(wait=False)
+
+
+def test_no_journal_compaction_job_without_a_vault(tmp_path):
+    from assistant.core import db, scheduler
+
+    path = str(tmp_path / "sched.db")
+    db.init_db(path)
+    business_db.init_business_db(path)
+    db.upsert_user(path, "111", "Dug", "owner")
+
+    started = scheduler.start(path, notify=lambda *a: None, poll_interval_seconds=3600)
+    try:
+        assert "crypto_journal_compaction" not in {j.id for j in started.get_jobs()}
+    finally:
+        started.shutdown(wait=False)

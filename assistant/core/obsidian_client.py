@@ -25,6 +25,14 @@ class ObsidianClient:
     def _note_path(self, folder: str, title: str) -> Path:
         return self.vault_path / folder / f"{_safe_filename(title)}.md"
 
+    def note_path(self, folder: str, title: str) -> Path:
+        """Where a note lives on disk. Public because housekeeping code has to rewrite a
+        note in place -- write_note below is append-only on purpose, which is right for
+        capture and wrong for a bounded, re-read summary (see crypto_journal.compact_summary).
+        Not reachable from call_tool, so this stays code-only: an agent still only ever
+        appends."""
+        return self._note_path(folder, title)
+
     def write_note(self, folder: str, title: str, content: str, tags: list[str] | None = None) -> dict:
         folder_dir = self.vault_path / folder
         folder_dir.mkdir(parents=True, exist_ok=True)

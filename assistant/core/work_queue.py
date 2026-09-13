@@ -123,6 +123,11 @@ class WorkQueue:
         # and always the case in tests that don't set it) just means that verification
         # step is skipped and the raw outcome text is reported instead.
         self.git_ops_client = None
+        # The vault client, handed to staff.assign for employees holding the `journal`
+        # feed. This worker is the path a scheduled crypto run actually takes (run_due
+        # only enqueues), so without it wired here the desk keeps no memory at all --
+        # the one thing worth checking if journal notes stop appearing.
+        self.obsidian_client = None
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
 
@@ -286,7 +291,8 @@ class WorkQueue:
         title = emp["title"] if emp else item["employee_key"]
         try:
             outcome = staff.assign(
-                self.db_path, self.llm, item["employee_key"], item["assignment"], timeout=self.timeout)
+                self.db_path, self.llm, item["employee_key"], item["assignment"],
+                timeout=self.timeout, obsidian=self.obsidian_client)
         except Exception as e:
             outcome = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -364,11 +370,12 @@ class WorkQueue:
             processed += 1
 
     def start_worker(self, llm, notify=None, cadence_notify=None, timeout: int = 10800,
-                      git_ops_client=None) -> None:
+                      git_ops_client=None, obsidian_client=None) -> None:
         if self._worker and self._worker.is_alive():
             return
         self.llm, self.notify, self.cadence_notify, self.timeout = llm, notify, cadence_notify, timeout
         self.git_ops_client = git_ops_client
+        self.obsidian_client = obsidian_client
 
         def _loop():
             while not self._stop.wait(self.poll_seconds):

@@ -640,17 +640,14 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 # tool exists for a research-tier employee to call), so 83 of 84 order
                 # rejections in one stretch were exactly this, wasting a third of every
                 # attempt. This is coverage, not a top-250-by-market-cap list: LiveCoinWatch
-                # is missing several real, large tokens entirely -- called out explicitly
-                # so "obviously top-100" isn't assumed to mean "on this feed".
+                # itself is missing several real, large tokens entirely -- TAO/WLD/AERO/
+                # MNT/ETHFI/TIA/JUP were long-standing gaps here, now filled by a
+                # supplemental Kraken poll (market_data.refresh_supplemental) so they show
+                # up in this same list rather than needing a separate carve-out sentence.
                 tracked = market_data.list_tracked_codes(db_path)
                 lines.append(f"  TRADEABLE ON THIS FEED ({len(tracked)} codes) -- propose "
                              "trades ONLY from this list, anything else will be rejected:")
                 lines.append("    " + ", ".join(tracked))
-                lines.append(
-                    "  KNOWN GAPS: TAO, WLD, AERO, MNT, ETHFI, TIA are real, large tokens "
-                    "but are NOT on this feed at any rank -- treat as watch-only, no matter "
-                    "the catalyst. 'JUP' on this feed is an unrelated $300K micro-coin, NOT "
-                    "the real Jupiter DEX token -- do not trade it expecting the latter.")
                 parts.append("\n".join(lines))
         except Exception as e:
             parts.append(f"CRYPTO FEED: unavailable ({type(e).__name__}). "

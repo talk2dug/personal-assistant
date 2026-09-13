@@ -20,6 +20,17 @@ from . import finance
 
 logger = logging.getLogger(__name__)
 
+# Our code -> Kraken pair, for market_data.refresh_supplemental(). These 7 are confirmed
+# (live, 2026-09-13) real, large tokens LiveCoinWatch does not list at any rank (or, for
+# JUP, resolves to an unrelated micro-coin) -- see market_data.py's own docstrings for
+# the full story. Kraken is already the exchange this deployment trusts for real trading
+# (config.json's ccxt_exchange), and this uses only its public, unauthenticated Ticker
+# endpoint -- no API key, no secret, nothing shared with that separate, credentialed path.
+MARKET_SUPPLEMENTAL_ID_MAP = {
+    "TAO": "TAOUSD", "WLD": "WLDUSD", "AERO": "AEROUSD", "MNT": "MNTUSD",
+    "ETHFI": "ETHFIUSD", "TIA": "TIAUSD", "JUP": "JUPUSD",
+}
+
 
 def start(
     db_path: str, notify, poll_interval_seconds: int = 30,
@@ -29,7 +40,7 @@ def start(
     business_agents_enabled: bool = False, home_assistant=None, phone=None, mail=None, obsidian=None,
     location_poll_seconds: int = 120, location_force_seconds: int = 600,
     market_api_key: str | None = None, market_poll_seconds: int = 60,
-    market_track_limit: int = 250,
+    market_track_limit: int = 250, market_supplemental_poll_seconds: int = 300,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None,
     personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
     mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
@@ -515,6 +526,25 @@ def start(
             _guarded_simple("paper_stop_loss", _check_stops_tick), "interval",
             seconds=market_poll_seconds, id="paper_stop_loss",
             next_run_time=datetime.now(timezone.utc) + timedelta(seconds=15),
+        )
+
+        # Supplements LiveCoinWatch with a handful of real, large tokens it does not list
+        # at any rank (TAO/WLD/AERO/MNT/ETHFI/TIA/JUP -- confirmed live against LCW's own
+        # feed), from Kraken's public, keyless Ticker endpoint -- no API key needed and no
+        # rate-limit budget to manage, so this rides its own slower cadence rather than the
+        # primary poll's. Gated on market_api_key like the primary poll above: there is no
+        # point tracking gap-coin prices if the main feed powering everything else isn't
+        # even running. Hardcoded id map to start -- promote to config only if the set of
+        # gap coins needs to change more often than a code deploy.
+        def _market_supplemental_tick():
+            result = market_data.refresh_supplemental(db_path, MARKET_SUPPLEMENTAL_ID_MAP)
+            if not result.get("ok"):
+                logger.warning("supplemental (Kraken) market poll failed: %s", result.get("error"))
+
+        scheduler.add_job(
+            _guarded_simple("market_supplemental", _market_supplemental_tick), "interval",
+            seconds=market_supplemental_poll_seconds, id="market_supplemental",
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
         )
 
     scheduler.start()

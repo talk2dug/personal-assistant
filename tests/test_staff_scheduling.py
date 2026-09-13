@@ -94,7 +94,26 @@ class TestFeedBriefingContent:
         out = staff.build_feed_briefing(market_db, "market")
         assert "TRADEABLE ON THIS FEED" in out
         assert "BTC" in out and "SOL" in out
-        assert "TAO" in out  # named explicitly as a known gap, not just absent
+
+    def test_market_briefing_includes_kraken_sourced_gap_coins_as_tradeable(self, market_db):
+        """TAO/WLD/AERO/etc. used to be called out as a permanent "KNOWN GAPS" watch-only
+        carve-out in this briefing. Now that a supplemental Kraken poll prices them
+        (source='kraken'), they must appear in the ordinary tradeable list like any other
+        coin -- no separate gap sentence, and no longer watch-only."""
+        import sqlite3
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(market_db)
+        conn.execute(
+            """INSERT INTO market_coins (code, name, rate, present, source,
+                                         first_seen, last_seen, updated_at)
+               VALUES ('TAO','TAO',237.5,1,'kraken',?,?,?)""", (now, now, now))
+        conn.commit()
+        conn.close()
+        out = staff.build_feed_briefing(market_db, "market")
+        assert "TAO" in out
+        assert "KNOWN GAPS" not in out
+        assert "watch-only" not in out
 
     def test_paper_briefing_shows_the_committed_stop_and_target(self, market_db):
         from assistant.core import paper_trading

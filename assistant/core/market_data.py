@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS market_coins (
     -- so they need "was it here last time", not "have we ever seen it" -- comparing
     -- against every code ever seen re-logs the same departure on every poll, forever.
     present INTEGER NOT NULL DEFAULT 1,
+    -- Which poller last wrote this row. LiveCoinWatch is missing several real, large
+    -- tokens at any rank; a supplemental Kraken poller (source='kraken') fills exactly
+    -- those gaps. LCW's own disappeared-listing diff must only compare against rows it
+    -- owns -- otherwise a Kraken-sourced row it never mentions looks like a departure on
+    -- every single LCW cycle. See refresh()'s use of this column below.
+    source TEXT NOT NULL DEFAULT 'livecoinwatch',
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -107,6 +113,9 @@ def init_market_db(db_path: str) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(market_coins)")}
         if "present" not in cols:
             conn.execute("ALTER TABLE market_coins ADD COLUMN present INTEGER NOT NULL DEFAULT 1")
+        if "source" not in cols:
+            conn.execute(
+                "ALTER TABLE market_coins ADD COLUMN source TEXT NOT NULL DEFAULT 'livecoinwatch'")
         conn.commit()
 
 
@@ -157,6 +166,27 @@ class LiveCoinWatch:
         return self._post("/coins/single", {"currency": currency, "code": code, "meta": True})
 
 
+KRAKEN_BASE_URL = "https://api.kraken.com/0/public"
+
+
+class KrakenGapFeed:
+    """Thin HTTP client for Kraken's public market-data endpoint -- no API key, no
+    secret, because ticker data needs neither. Exists only to fill a handful of real,
+    large tokens LiveCoinWatch does not list at any rank (see refresh_supplemental
+    below). This is a completely separate code path from the credentialed CCXT client
+    used for real trading (setup.py's build_ccxt_context) -- this class never touches
+    an API key/secret and never places an order, it only reads public ticker prices.
+    """
+
+    def __init__(self, timeout: float = 15.0):
+        self.timeout = timeout
+
+    def ticker(self, pairs: list[str]) -> dict:
+        url = f"{KRAKEN_BASE_URL}/Ticker?pair={','.join(pairs)}"
+        with urllib.request.urlopen(url, timeout=self.timeout) as resp:
+            return json.loads(resp.read())
+
+
 # --- polling ------------------------------------------------------------------
 
 def refresh(db_path: str, api_key: str, limit: int = 250,
@@ -186,9 +216,13 @@ def refresh(db_path: str, api_key: str, limit: int = 250,
     now = _now()
     seen_codes = set()
     with closing(_connect(db_path)) as conn:
-        previous = {r["code"] for r in
-                    conn.execute("SELECT code FROM market_coins WHERE present = 1")}
-        had_any = bool(conn.execute("SELECT 1 FROM market_coins LIMIT 1").fetchone())
+        # Scoped to this poller's own rows -- a Kraken-sourced supplemental row (see
+        # refresh_supplemental below) is never mentioned in an LCW response and must not
+        # be compared against it, or it looks like a fresh departure every LCW cycle.
+        previous = {r["code"] for r in conn.execute(
+            "SELECT code FROM market_coins WHERE present = 1 AND source = 'livecoinwatch'")}
+        had_any = bool(conn.execute(
+            "SELECT 1 FROM market_coins WHERE source = 'livecoinwatch' LIMIT 1").fetchone())
 
         rows, history = [], []
         for c in coins:
@@ -208,14 +242,15 @@ def refresh(db_path: str, api_key: str, limit: int = 250,
             """INSERT INTO market_coins
                    (code, name, rank, rate, volume, market_cap, liquidity,
                     delta_hour, delta_day, delta_week, delta_month, all_time_high,
-                    present, first_seen, last_seen, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)
+                    present, source, first_seen, last_seen, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,'livecoinwatch',?,?,?)
                ON CONFLICT(code) DO UPDATE SET
                    name=excluded.name, rank=excluded.rank, rate=excluded.rate,
                    volume=excluded.volume, market_cap=excluded.market_cap,
                    liquidity=excluded.liquidity, delta_hour=excluded.delta_hour,
                    delta_day=excluded.delta_day, delta_week=excluded.delta_week,
                    delta_month=excluded.delta_month, all_time_high=excluded.all_time_high,
+                   source='livecoinwatch',
                    last_seen=excluded.last_seen, updated_at=excluded.updated_at""",
             rows)
         conn.executemany(
@@ -257,6 +292,79 @@ def refresh(db_path: str, api_key: str, limit: int = 250,
 
     return {"ok": True, "coins": len(rows), "appeared": appeared,
             "disappeared": disappeared, "credits_remaining": remaining,
+            "took_ms": int((time.perf_counter() - started) * 1000)}
+
+
+def refresh_supplemental(db_path: str, id_map: dict[str, str]) -> dict:
+    """Fill a handful of real, large tokens LiveCoinWatch does not list at any rank, from
+    Kraken's public (keyless) Ticker endpoint -- the same venue this deployment already
+    trusts for real trading, so a future move off paper prices the same instruments off
+    the same source they would actually fill at.
+
+    `id_map` is {our code: Kraken pair}, e.g. {"TAO": "TAOUSD"}. One call regardless of
+    how many pairs are requested -- there is no per-call credit budget here (it's free
+    and keyless), but no reason to make more requests than needed either.
+
+    Only `rate`, `present`, and `last_seen` are load-bearing for paper_trading._prices();
+    the other LCW fields (rank/market_cap/liquidity/etc.) simply stay null for a
+    Kraken-sourced row. For the delta fields, Kraken's ticker gives today's opening price
+    (`o`) and last trade price (`c[0]`), from which a same-day change is derived as a
+    reasonable best-effort -- stored as delta_day using LCW's own multiplier convention
+    (last/open, e.g. 1.02 = +2%) so `pct()` reads it the same way regardless of source.
+    delta_hour/week/month are left null for these rows; they're used for movers()/briefing
+    color, not pricing, so leaving them unset here is a deliberate simplification, not an
+    oversight.
+
+    Upserted with source='kraken' so LiveCoinWatch's own disappeared-listing diff (scoped
+    to source='livecoinwatch') never mistakes these for vanishing on an LCW-only cycle. If
+    a code is already source='livecoinwatch' -- i.e. LCW itself has started covering it --
+    that row is left completely untouched here (guarded by the DO UPDATE's WHERE clause
+    below): LCW stays the single, authoritative, richer-fielded source for anything it
+    actually tracks, rather than the two pollers alternately overwriting one row with two
+    different exchanges' quotes every few minutes.
+    """
+    started = time.perf_counter()
+    client = KrakenGapFeed()
+    pairs = list(id_map.values())
+    try:
+        data = client.ticker(pairs)
+        if data.get("error"):
+            raise ValueError(f"kraken error: {data['error']}")
+        result = data.get("result") or {}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    now = _now()
+    rows = []
+    for code, pair in id_map.items():
+        info = result.get(pair)
+        if not info:
+            continue
+        try:
+            last_price = float(info["c"][0])
+            open_price = float(info["o"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        delta_day = (last_price / open_price) if open_price else None
+        rows.append((code, code, last_price, delta_day, now, now, now))
+
+    if not rows:
+        return {"ok": False, "error": "no supplemental pairs returned usable data"}
+
+    with closing(_connect(db_path)) as conn:
+        conn.executemany(
+            """INSERT INTO market_coins
+                   (code, name, rate, delta_day, present, source, first_seen, last_seen, updated_at)
+               VALUES (?,?,?,?,1,'kraken',?,?,?)
+               ON CONFLICT(code) DO UPDATE SET
+                   rate=excluded.rate, delta_day=excluded.delta_day, present=1,
+                   source=excluded.source,
+                   last_seen=excluded.last_seen, updated_at=excluded.updated_at
+               WHERE market_coins.source != 'livecoinwatch'""",
+            rows)
+        conn.commit()
+
+    return {"ok": True, "codes": [r[0] for r in rows],
             "took_ms": int((time.perf_counter() - started) * 1000)}
 
 

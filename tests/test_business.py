@@ -451,6 +451,50 @@ def test_scheduler_registers_the_stop_loss_enforcer_alongside_the_market_poll(tm
         job_ids = {j.id for j in started.get_jobs()}
         assert "market_poll" in job_ids
         assert "paper_stop_loss" in job_ids
+        assert "market_supplemental" in job_ids
+    finally:
+        started.shutdown(wait=False)
+
+
+def test_supplemental_market_job_runs_on_its_own_slower_cadence(tmp_path):
+    """The Kraken gap-coin poll is free and keyless, so there's no budget reason to run it
+    as often as the primary 60s LiveCoinWatch poll -- it should default to its own,
+    slower interval rather than inheriting market_poll_seconds."""
+    from assistant.core import db, scheduler
+
+    path = str(tmp_path / "sched.db")
+    db.init_db(path)
+    business_db.init_business_db(path)
+    db.upsert_user(path, "111", "Dug", "owner")
+
+    started = scheduler.start(
+        path, notify=lambda *a: None, poll_interval_seconds=3600,
+        market_api_key="fake-key", market_poll_seconds=60,
+    )
+    try:
+        job = started.get_job("market_supplemental")
+        assert job is not None
+        assert job.trigger.interval.total_seconds() == 300
+    finally:
+        started.shutdown(wait=False)
+
+
+def test_supplemental_market_job_is_not_registered_without_a_market_api_key(tmp_path):
+    """No point tracking gap-coin prices if the primary feed powering everything else
+    (movers, briefings, paper_trading._prices) isn't even running -- same gate as the
+    market_poll job it supplements."""
+    from assistant.core import db, scheduler
+
+    path = str(tmp_path / "sched.db")
+    db.init_db(path)
+    business_db.init_business_db(path)
+    db.upsert_user(path, "111", "Dug", "owner")
+
+    started = scheduler.start(path, notify=lambda *a: None, poll_interval_seconds=3600)
+    try:
+        job_ids = {j.id for j in started.get_jobs()}
+        assert "market_supplemental" not in job_ids
+        assert "market_poll" not in job_ids
     finally:
         started.shutdown(wait=False)
 

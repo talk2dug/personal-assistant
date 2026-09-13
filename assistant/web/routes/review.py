@@ -15,7 +15,7 @@ import pathlib
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from ...core import business_db, db, mail_db, vision
+from ...core import business_db, db, mail_db, personal_db, vision
 from ...core.business_tools import apply_review_decision
 from ...core.engine import execute_pending_action
 from ..auth import require_user
@@ -161,6 +161,36 @@ async def decide(item_id: int, request: Request):
             f"email_bills#{ref_id} -> {status}" if updated
             else f"email_bills#{ref_id} -> no such bill row"
         )
+    elif ref_table == "debts" and ref_id:
+        # A debt mail_debts.py found in his mail history. This is the PRIMARY confirmation
+        # path for the whole sweep -- the cards it files land here -- so the decision has
+        # to actually flip the debt, not just close the card: a proposal he approved that
+        # stayed 'proposed' would be invisible in every total, and he'd have no way to
+        # tell that his answer hadn't landed.
+        #
+        # Approving moves tracking_state 'proposed' -> 'tracked', which is the only thing
+        # that lets a classifier-found balance count toward his debt picture; rejecting
+        # moves it to 'dismissed' so a later statement can never resurrect it. Every
+        # balance observation the sweep collected stays attached either way -- that's the
+        # provenance. It does nothing to the messages, pays nothing, schedules nothing,
+        # and deliberately assigns no payoff priority: that stays his call.
+        #
+        # ref_id is None on the sweep's "which account is this?" cards, which is why this
+        # branch is guarded on it -- there is no debt row to write through to, and the
+        # answer to that question goes through record_debt_balance in chat instead.
+        debt = personal_db.get_debt(cfg.db_path, owner, ref_id)
+        if debt is None:
+            written_through = f"debts#{ref_id} -> no such debt row"
+        elif debt["tracking_state"] != "proposed":
+            written_through = f"debts#{ref_id} -> already {debt['tracking_state']}, left as it was"
+        else:
+            state = "tracked" if decision == "approved" else "dismissed"
+            personal_db.update_debt(cfg.db_path, owner, ref_id, tracking_state=state)
+            written_through = (
+                f"debts#{ref_id} -> {state} ({debt['creditor']}, "
+                f"{debt['observation_count']} observation"
+                f"{'s' if debt['observation_count'] != 1 else ''} kept)"
+            )
     elif ref_table == "email_importance_flags" and ref_id:
         # THE feedback loop (see mail_importance.py). This decision is not bookkeeping on
         # a card -- it is the training signal the whole feature exists to collect, so it

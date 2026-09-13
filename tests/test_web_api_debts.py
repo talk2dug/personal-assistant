@@ -434,3 +434,99 @@ def test_sweep_status_on_a_mailbox_never_swept_is_empty_not_an_error(db_path):
     status = _client(db_path).get("/api/debts/sweep-status").json()
     assert status["messages_judged"] == 0
     assert status["by_folder"] == []
+
+
+# --- deciding the sweep's card on the Review page ------------------------------------------
+# The sweep files its cards into the Review queue, so this is the PRIMARY path he will
+# actually use to confirm a debt. A card that closed without flipping the debt would leave
+# an approved proposal invisible in every total, with nothing to show his answer hadn't landed.
+
+def _decide(c, item_id, decision, note=None):
+    return c.post(f"/api/review/items/{item_id}/decide",
+                  json={"decision": decision, "note": note})
+
+
+def test_approving_the_review_card_actually_tracks_the_debt(db_path, owner_id):
+    debt_id = _proposal(db_path, owner_id)
+    c = _client(db_path)
+    item_id = business_db.list_review_items(db_path, owner_id, status="pending")[0]["id"]
+
+    assert _decide(c, item_id, "approved").status_code == 200
+
+    tracked = c.get("/api/debts").json()
+    assert [d["id"] for d in tracked] == [debt_id]
+    assert c.get("/api/debts/summary").json()["total_balance"] == 9999.0
+
+
+def test_approving_the_review_card_keeps_the_evidence_behind_it(db_path, owner_id):
+    debt_id = _proposal(db_path, owner_id)
+    c = _client(db_path)
+    item_id = business_db.list_review_items(db_path, owner_id, status="pending")[0]["id"]
+    _decide(c, item_id, "approved")
+
+    observations = c.get(f"/api/debts/{debt_id}/observations").json()
+    assert len(observations) == 1
+    assert observations[0]["source"] == "email"
+    assert observations[0]["source_ref"] == "INBOX:7"
+
+
+def test_rejecting_the_review_card_dismisses_the_debt_for_good(db_path, owner_id):
+    _proposal(db_path, owner_id)
+    c = _client(db_path)
+    item_id = business_db.list_review_items(db_path, owner_id, status="pending")[0]["id"]
+
+    assert _decide(c, item_id, "rejected").status_code == 200
+
+    assert c.get("/api/debts").json() == []
+    assert c.get("/api/debts/proposals").json() == []
+    assert personal_db.find_matching_debt(db_path, owner_id, "Some Collector", "")["debt_id"] is None
+
+
+def test_the_review_decision_never_assigns_a_payoff_priority(db_path, owner_id):
+    """Confirming that a debt is his is not the same as deciding when to pay it."""
+    debt_id = _proposal(db_path, owner_id)
+    c = _client(db_path)
+    item_id = business_db.list_review_items(db_path, owner_id, status="pending")[0]["id"]
+    _decide(c, item_id, "approved")
+
+    assert personal_db.get_debt(db_path, owner_id, debt_id)["priority"] is None
+    assert c.get("/api/debts/summary").json()["unprioritized_count"] == 1
+
+
+def test_the_review_decision_reports_what_it_wrote_through(db_path, owner_id):
+    _proposal(db_path, owner_id)
+    c = _client(db_path)
+    item_id = business_db.list_review_items(db_path, owner_id, status="pending")[0]["id"]
+
+    body = _decide(c, item_id, "approved").json()
+    assert "debts#" in str(body)
+    assert "tracked" in str(body)
+
+
+def test_a_debt_already_resolved_elsewhere_is_left_alone_by_the_card(db_path, owner_id):
+    """He may confirm in chat and only later get to the Review page -- the second decision
+    must not flip a debt he has since changed his mind about."""
+    debt_id = _proposal(db_path, owner_id)
+    c = _client(db_path)
+    item_id = business_db.list_review_items(db_path, owner_id, status="pending")[0]["id"]
+    c.post(f"/api/debts/{debt_id}/resolve", json={"verdict": "confirm"})
+    personal_db.update_debt(db_path, owner_id, debt_id, status="paid_off")
+
+    # The card was already closed by the resolve above, so this is a no-op either way.
+    _decide(c, item_id, "rejected")
+    debt = personal_db.get_debt(db_path, owner_id, debt_id)
+    assert debt["tracking_state"] == "tracked"
+    assert debt["status"] == "paid_off"
+
+
+def test_an_ambiguity_card_with_no_debt_row_decides_without_crashing(db_path, owner_id):
+    """The sweep's "which account is this?" card carries ref_id=None -- there is no debt
+    row to write through to, and the answer goes through chat instead."""
+    business_db.create_review_item(
+        db_path, owner_id, title="Which Capital One account is this?", kind="other",
+        source_agent="mail_debts", ref_table="debts", ref_id=None)
+    c = _client(db_path)
+    item_id = business_db.list_review_items(db_path, owner_id, status="pending")[0]["id"]
+
+    assert _decide(c, item_id, "approved").status_code == 200
+    assert c.get("/api/debts").json() == []

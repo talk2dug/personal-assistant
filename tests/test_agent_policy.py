@@ -205,3 +205,14 @@ def test_an_employee_with_the_feed_still_runs_with_no_vault_wired(db_path):
 
     assert result["ok"] is True
     assert "STANDING POLICY" not in llm.prompt
+
+
+def test_the_notes_own_h1_is_not_repeated_under_the_heading(vault):
+    """Every note write_note creates opens with '# Title'. Left in, the block renders as
+    '## Dev Pipeline Policy' immediately followed by '# Dev Pipeline Policy' -- confusing
+    to read and paid for out of a budget that is already tight."""
+    text = agent_policy.build_policy_briefing(vault)
+
+    assert "## Dev Pipeline Policy" in text
+    assert "# Dev Pipeline Policy\n# Dev Pipeline Policy" not in text
+    assert text.count("Dev Pipeline Policy") == 1

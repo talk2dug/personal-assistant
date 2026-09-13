@@ -56,15 +56,26 @@ POLICY_CONTEXT_CHARS = 2000
 MIN_USEFUL_SHARE = 120          # below this a note's excerpt says nothing; skip it instead
 
 
-def _strip_frontmatter(text: str) -> str:
+def _strip_frontmatter(text: str, title: str = "") -> str:
     """Same helper shape as crypto_journal._strip_frontmatter. YAML frontmatter is pure
     overhead here -- tags and timestamps spend the character budget without telling the
-    employee anything about the policy."""
+    employee anything about the policy.
+
+    The note's own `# Title` H1 goes too when it just repeats the heading this module
+    already prints. Every note written by write_note opens with one, so leaving it in
+    rendered as "## Dev Pipeline Policy" immediately followed by "# Dev Pipeline Policy"
+    -- confusing to read and paid for out of a budget that is already tight.
+    """
     if text.startswith("---"):
         end = text.find("\n---", 3)
         if end >= 0:
             text = text[end + 4:]
-    return text.strip()
+    text = text.strip()
+    if title:
+        heading = f"# {title}"
+        if text.startswith(heading):
+            text = text[len(heading):].lstrip()
+    return text
 
 
 def _head(text: str, limit: int) -> str:
@@ -128,7 +139,7 @@ def build_policy_briefing(obsidian, max_chars: int = POLICY_CONTEXT_CHARS) -> st
             logger.warning("policy note not found in the vault: %s/%s", folder, title)
             unreadable.append(title)
             continue
-        body = _strip_frontmatter(note.get("content") or "")
+        body = _strip_frontmatter(note.get("content") or "", title)
         if body:
             bodies.append((title, body))
 

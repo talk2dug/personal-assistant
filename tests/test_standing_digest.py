@@ -186,3 +186,11 @@ def test_mail_triage_still_works_with_no_vault():
     from assistant.core import mail_triage
 
     assert mail_triage.build_voice_note(None) == ""
+
+
+def test_the_notes_own_h1_is_not_repeated_under_the_heading(vault):
+    """Same duplication as agent_policy's, and it costs system-prompt bytes on every turn."""
+    text = standing_digest.build_digest(vault)
+
+    assert "## Communication Preferences" in text
+    assert text.count("Communication Preferences") == 1

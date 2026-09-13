@@ -59,12 +59,21 @@ DIGEST_CHARS = 6000
 PER_NOTE_CHARS = 1200
 
 
-def _strip_frontmatter(text: str) -> str:
+def _strip_frontmatter(text: str, title: str = "") -> str:
+    """Drop the YAML frontmatter, and the note's own `# Title` H1 when it merely repeats
+    the heading this module already prints. Every note write_note creates opens with one,
+    so leaving it in renders as "## Standing Rules" immediately followed by
+    "# Standing Rules" in the system prompt."""
     if text.startswith("---"):
         end = text.find("\n---", 3)
         if end >= 0:
             text = text[end + 4:]
-    return text.strip()
+    text = text.strip()
+    if title:
+        heading = f"# {title}"
+        if text.startswith(heading):
+            text = text[len(heading):].lstrip()
+    return text
 
 
 def build_digest(obsidian, max_chars: int = DIGEST_CHARS,
@@ -93,7 +102,7 @@ def build_digest(obsidian, max_chars: int = DIGEST_CHARS,
             # one. A missing note here is an absence, not a fault.
             logger.debug("standing note not present in the vault: %s/%s", folder, title)
             continue
-        body = _strip_frontmatter(note.get("content") or "")
+        body = _strip_frontmatter(note.get("content") or "", title)
         if not body:
             continue
         excerpt = body[: min(per_note, max_chars - used)]

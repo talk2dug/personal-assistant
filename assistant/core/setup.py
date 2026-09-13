@@ -172,7 +172,8 @@ def build_gpu_bridge(cfg):
     return bridge
 
 
-def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None) -> BusinessContext | None:
+def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None,
+                           obsidian=None) -> BusinessContext | None:
     """The business side is owner-only and entirely local, so unlike Era/mail/HA there's
     no network dependency to fail at startup — if a profile is configured and we know who
     the owner is, it works."""
@@ -192,7 +193,8 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     # work_queue.WorkQueue's docstring. BusinessClient only ever calls .submit() on it.
     queue = work_queue.WorkQueue(cfg.db_path)
     client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge,
-                            ssh_ops=ssh_ops, work_queue=queue)
+                            ssh_ops=ssh_ops, work_queue=queue,
+                            obsidian=obsidian.mcp_client if obsidian is not None else None)
     scheduled = cfg.business_agents_enabled and hasattr(llm, "research")
     logger.info(
         "Business: %s (%s), agents %s", cfg.business.name, cfg.business.location,

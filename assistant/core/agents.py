@@ -23,7 +23,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from . import business_db
+from . import agent_notes, business_db
 
 logger = logging.getLogger(__name__)
 
@@ -194,12 +194,18 @@ def run_trend_agent(db_path: str, llm, owner_user_id: int, profile) -> dict:
         return {"status": "error", "new": 0, "error": str(e)}
 
 
-def run_research_queue(db_path: str, llm, profile, limit: int = 2) -> dict:
+def run_research_queue(db_path: str, llm, profile, limit: int = 2, obsidian=None) -> dict:
     """Works through research the owner asked for in conversation.
 
     This is the "relay it to Jarvis and he looks into it" path: request_research puts a
     row in the queue during a chat turn, and this picks it up in the background so a
     genuinely deep question isn't bounded by how long the owner will sit and wait.
+
+    `obsidian` (an ObsidianClient) additionally files each completed brief into the vault's
+    agent folder. Optional, and a failure to write one never fails the run: the findings
+    are already committed by complete_research above it. Without a client the queue
+    behaves exactly as it did before -- which is the state that left nine completed briefs
+    sitting in SQLite while the vault's research folder went weeks without a new note.
     """
     queued = business_db.pending_research(db_path, limit=limit)
     if not queued:
@@ -222,6 +228,12 @@ def run_research_queue(db_path: str, llm, profile, limit: int = 2) -> dict:
             try:
                 findings = llm.research(prompt, system_prompt=RESEARCH_SYSTEM, timeout=900)
                 business_db.complete_research(db_path, item["id"], findings or "(no findings returned)")
+                # Vault write after the database write, never before: a brief that exists
+                # as a note but not as a completed row would be re-researched on the next
+                # tick and cost a second full web-search run.
+                agent_notes.write_research_brief(
+                    obsidian, item["topic"], findings or "",
+                    question=item.get("question"), source="business")
                 topics.append(item["topic"])
                 done += 1
             except Exception as e:

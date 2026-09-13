@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import business_db, db, mail_db, staff, ui_content, vision
+from . import business_db, db, mail_db, obsidian_client, staff, ui_content, vision
 from .git_ops import check_diff_scope
 from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
@@ -713,7 +713,10 @@ def _select_letterstream_tools(letterstream: "LetterStreamContext", user_text: s
     return LETTERSTREAM_TOOLS
 
 
-OBSIDIAN_FOLDERS = ["00-About Me", "01-Research", "02-Projects", "03-Areas", "04-Journal", "05-Archive"]
+# Aliased, never re-listed. The vault's folder set is defined once in obsidian_client, so
+# the enum the model is constrained to and the folders code can actually write cannot
+# drift apart -- they were two hand-maintained copies until 06-Agents was added.
+OBSIDIAN_FOLDERS = obsidian_client.FOLDERS
 
 OBSIDIAN_TOOLS = [
     {
@@ -787,7 +790,12 @@ OBSIDIAN_SYSTEM_NOTE = (
     "the user — the kind of thing a real assistant would just remember), '01-Research' (things "
     "you've looked into or been asked to research), '02-Projects' (active work with a goal and an "
     "endpoint), '03-Areas' (ongoing responsibilities with no end date, e.g. health/finance/home), "
-    "'04-Journal' (dated notes worth logging chronologically), '05-Archive' (inactive material). "
+    "'04-Journal' (dated notes worth logging chronologically), '05-Archive' (inactive material), "
+    "'06-Agents' (written by your agents and employees, not by him — research briefs, design "
+    "documents, employee journals). Read '06-Agents' freely; it is where your own side of the "
+    "vault lives. Do not file the user's own notes there, and do not file your agents' output "
+    "into his folders — keeping the two apart is his explicit instruction, so he never has to "
+    "wonder whether he wrote something or a machine did. "
     "Proactively call write_note — without being asked — whenever the user shares something durable "
     "and worth remembering: a preference, a fact about their life, an ongoing situation, or anything "
     "they ask you to research or save. Don't log small talk, one-off questions, or anything already "

@@ -475,8 +475,13 @@ def start(
         # would push queued research back again, and a few restarts in an afternoon
         # could starve it indefinitely (observed exactly that during development). Cheap
         # to run early — with an empty queue it returns without touching the LLM.
+        # obsidian is forwarded so a completed brief lands in the vault's agent folder as
+        # well as in SQLite. It was already in scope here and simply never passed down,
+        # which is why nine finished briefs existed that the vault had never heard of.
         scheduler.add_job(
-            _guarded("research", lambda: agents.run_research_queue(db_path, llm, profile)),
+            _guarded("research", lambda: agents.run_research_queue(
+                db_path, llm, profile,
+                obsidian=obsidian.mcp_client if obsidian is not None else None)),
             "interval", minutes=business_intervals["research_minutes"], id="research_agent",
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
         )
@@ -547,7 +552,9 @@ def start(
             scheduler.add_job(
                 _guarded_simple(
                     "personal_research",
-                    lambda: personal_agents.run_personal_research_queue(db_path, llm, owner["id"]),
+                    lambda: personal_agents.run_personal_research_queue(
+                        db_path, llm, owner["id"],
+                        obsidian=obsidian.mcp_client if obsidian is not None else None),
                 ),
                 "interval", minutes=personal_research_minutes, id="personal_research_agent",
                 # Starts a minute after boot, same reasoning as the business research

@@ -964,13 +964,18 @@ class BusinessClient:
     """Executes the business tools. Same call_tool shape as the other integrations."""
 
     def __init__(self, db_path: str, owner_user_id: int, llm=None, profile=None, bridge=None, ssh_ops=None,
-                 work_queue=None):
+                 work_queue=None, obsidian=None):
         self.db_path = db_path
         self.owner_user_id = owner_user_id
         self.llm = llm
         self.profile = profile
         self.bridge = bridge
         self.work_queue = work_queue
+        # An ObsidianClient, so a research run triggered from chat files its brief into the
+        # vault exactly like the scheduled one does. Without it the two paths would quietly
+        # disagree about whether a finished brief gets a note, which is the sort of
+        # difference nobody notices until they go looking for a note that was never written.
+        self.obsidian = obsidian
         # The ops-plan workflow's SSHOpsClient -- held here (not a separate engine.py
         # Context) since proposing/approving a plan is a business-tools concern like
         # hiring, and run_command is deliberately never exposed as its own callable tool
@@ -997,7 +1002,8 @@ class BusinessClient:
                 self.db_path, self.llm, self.owner_user_id, self.profile),
             "trend_scout": lambda: agents.run_trend_agent(
                 self.db_path, self.llm, self.owner_user_id, self.profile),
-            "research": lambda: agents.run_research_queue(self.db_path, self.llm, self.profile),
+            "research": lambda: agents.run_research_queue(
+                self.db_path, self.llm, self.profile, obsidian=self.obsidian),
             "product_creator": lambda: agents.run_product_creator(
                 self.db_path, self.llm, self.owner_user_id, self.profile),
             "art_director": lambda: agents.run_art_director(

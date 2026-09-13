@@ -68,7 +68,8 @@ def main() -> None:
     obsidian = build_obsidian_context(cfg)
     home_assistant = build_home_assistant_context(cfg)
     bridge = build_gpu_bridge(cfg)
-    business = build_business_context(cfg, owner_row["id"] if owner_row else None, llm=llm, bridge=bridge)
+    business = build_business_context(cfg, owner_row["id"] if owner_row else None, llm=llm, bridge=bridge,
+                                      obsidian=obsidian)
     airbnb = build_airbnb_context(cfg)
     ticketmaster = build_ticketmaster_context(cfg)
     kroger = build_kroger_context(cfg)

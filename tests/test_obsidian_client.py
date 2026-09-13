@@ -76,6 +76,52 @@ def test_list_notes_scoped_to_folder_excludes_index_files(client):
     assert titles == ["Health"]
 
 
+def _seed_index(client, folder):
+    index_path = client.vault_path / folder / "_Index.md"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(f"# {folder}\n\n## Notes\n\n", encoding="utf-8")
+    return index_path
+
+
+def test_a_folder_index_is_bounded_and_folds_its_oldest_links_into_an_archive(client):
+    """_Index.md is a file the owner actually reads, and _add_to_index appended one line
+    per note forever. The crypto desk alone adds ~2 notes/day, and research briefs plus
+    employee journals now write here too -- unbounded, that is 730+ lines a year in a file
+    whose only job is to be skimmable."""
+    from assistant.core import obsidian_client as oc
+
+    _seed_index(client, "06-Agents")
+    over = oc.INDEX_MAX_LINKS + 5
+    for i in range(over):
+        client.write_note("06-Agents", f"Brief {i:04d}", "Body.")
+
+    index_text = _index_text(client, "06-Agents")
+    links = [line for line in index_text.split("\n") if line.startswith("- [[")]
+    assert len(links) <= oc.INDEX_KEEP_ON_COMPACT + 10, "the index must stay bounded"
+
+    # Nothing was destroyed: the oldest links moved to a real archive note, and the index
+    # still points at it.
+    assert "Index Archive" in index_text
+    archived = client.list_notes("05-Archive")["notes"]
+    assert archived, "folded links must be archived, never dropped"
+    archive_body = client.read_note("05-Archive", archived[0]["title"])["content"]
+    assert "[[Brief 0000]]" in archive_body
+    # ...and every note itself is still right where it was.
+    assert len(client.list_notes("06-Agents")["notes"]) == over
+
+
+def test_a_small_index_is_left_completely_alone(client):
+    """The common path must stay a cheap line count with no rewriting and no archive note."""
+    _seed_index(client, "02-Projects")
+    for i in range(5):
+        client.write_note("02-Projects", f"Note {i}", "Body.")
+
+    index_text = _index_text(client, "02-Projects")
+    assert "Index Archive" not in index_text
+    assert client.list_notes("05-Archive")["notes"] == []
+    assert len([l for l in index_text.split("\n") if l.startswith("- [[")]) == 5
+
+
 def test_call_tool_dispatches_by_name(client):
     result = client.call_tool("write_note", {"folder": "04-Journal", "title": "Entry", "content": "Body text."})
     assert result["new"] is True

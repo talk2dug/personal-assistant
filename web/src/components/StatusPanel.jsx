@@ -37,7 +37,7 @@ function DaySummary({ label, items }) {
   )
 }
 
-function AgentsSection({ agents, error }) {
+export function AgentsSection({ agents, error }) {
   return (
     <section className="status-section">
       <span className="hud-label">Agents</span>
@@ -55,7 +55,7 @@ function AgentsSection({ agents, error }) {
   )
 }
 
-function CryptoSection({ book, hasTraders, error }) {
+export function CryptoSection({ book, hasTraders, error }) {
   return (
     <section className="status-section">
       <span className="hud-label">Crypto</span>
@@ -79,7 +79,7 @@ function CryptoSection({ book, hasTraders, error }) {
   )
 }
 
-function ScheduleSection({ schedule, error }) {
+export function ScheduleSection({ schedule, error }) {
   return (
     <section className="status-section">
       <span className="hud-label">Schedule</span>
@@ -94,7 +94,7 @@ function ScheduleSection({ schedule, error }) {
   )
 }
 
-function ReviewSection({ pending, error }) {
+export function ReviewSection({ pending, error }) {
   return (
     <section className="status-section">
       <span className="hud-label">Review</span>

@@ -57,7 +57,10 @@ function Shell() {
   return (
     <div className="app-shell">
       <nav className={`app-nav${menuOpen ? ' nav-open' : ''}`}>
-        <div className="app-title">Jarvis</div>
+        <div className="app-title">
+          <span className="app-title-badge">J</span>
+          Jarvis
+        </div>
         <button
           type="button"
           className="nav-toggle"

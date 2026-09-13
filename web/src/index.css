@@ -238,12 +238,32 @@ body::after {
 }
 
 .app-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-family: var(--font-display);
   font-size: 15px;
   letter-spacing: 0.14em;
   padding: 0 8px 8px;
   color: var(--cyan-bright);
   text-shadow: 0 0 12px var(--cyan-glow);
+}
+
+.app-title-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  background: linear-gradient(155deg, rgba(34, 232, 255, 0.22), rgba(34, 232, 255, 0.04));
+  border: 1px solid var(--cyan-dim);
+  color: var(--cyan-bright);
+  font-size: 14px;
+  text-shadow: none;
+  /* Rectangle with one corner angled off -- same geometric-HUD cut used on
+     .chat-modal/.office-panel, applied here as the sidebar's identity mark. */
+  clip-path: polygon(0 0, 78% 0, 100% 28%, 100% 100%, 0 100%);
 }
 
 .app-title::after {

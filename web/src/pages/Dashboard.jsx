@@ -3,24 +3,25 @@ import { api } from '../api'
 import HeroOrb from '../components/HeroOrb'
 import FinanceCard from '../components/dashboard/FinanceCard'
 import GpuCard from '../components/dashboard/GpuCard'
+import HeaderWeather from '../components/dashboard/HeaderWeather'
 import IntelligenceFeed from '../components/dashboard/IntelligenceFeed'
 import MediaCard from '../components/dashboard/MediaCard'
+import NetworkStatusPill from '../components/dashboard/NetworkStatusPill'
 import SshHealthPanel from '../components/dashboard/SshHealthPanel'
 import WeatherStrip from '../components/dashboard/WeatherStrip'
-import StatusPanel from '../components/StatusPanel'
+import { AgentsSection, CryptoSection, ReviewSection, ScheduleSection } from '../components/StatusPanel'
 import { useJarvis } from '../context/JarvisContext'
+import { useStatusPanel } from '../hooks/useStatusPanel'
 import './command-center.css'
 
 /**
  * The Command Center -- Jarvis's single landing screen (personal dashboard tasks: the
- * one-page redesign). Replaces the old split between a mostly-empty Dashboard and a
- * Chat page whose only content was a big audio-reactive canvas: everything real that
- * used to require navigating to a separate page (agents, crypto, schedule, review,
- * finance, media, SSH infra, GPU/inference) now lives here as small cards, each reusing
- * an already-working data source (see StatusPanel.jsx/IntelligenceFeed.jsx and friends)
- * rather than re-fetching or re-deriving anything. Voice/text chat state itself still
- * lives entirely in JarvisContext, unchanged -- this page is a view onto it, same as
- * the old orb page was.
+ * one-page redesign). Row-based card grid, hero centered in the first row, styled after
+ * the owner's reference image: everything real that used to require navigating to a
+ * separate page (agents, crypto, schedule, review, finance, media, SSH infra, GPU/
+ * inference) now lives here as its own small card, each reusing an already-working data
+ * source rather than re-fetching or re-deriving anything. Voice/text chat state itself
+ * still lives entirely in JarvisContext, unchanged -- this page is a view onto it.
  *
  * Focus Mode collapses this down to just the hero + voice bar -- the old orb page's
  * whole experience, reachable as a state of this one page rather than a separate route.
@@ -56,13 +57,22 @@ export default function Dashboard() {
   const [focusMode, setFocusMode] = useState(false)
   const now = useClock()
   const pendingReview = usePendingReviewCount()
+  const {
+    agents, agentsError,
+    book, cryptoTraders, cryptoError,
+    schedule, scheduleError,
+    pendingReview: reviewCount, reviewError,
+  } = useStatusPanel()
 
   return (
     <div className={`command-center ${focusMode ? 'is-focus' : ''}`}>
       <header className="cc-topbar">
-        <div className="cc-status-pill">
-          <span className="cc-status-dot" />
-          SYSTEM STATUS · OPTIMAL
+        <div className="cc-topbar-left">
+          <div className="cc-status-pill">
+            <span className="cc-status-dot" />
+            SYSTEM STATUS · OPTIMAL
+          </div>
+          <HeaderWeather />
         </div>
         <div className="cc-clock">
           {now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
@@ -78,29 +88,63 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <div className="cc-hero-row">
-        <HeroOrb size={focusMode ? 'large' : 'large'} />
-        <div className="cc-hero-caption">
-          <span className="cc-hero-mode">{MODE_LABEL[mode] || mode}</span>
-          <span className="cc-hero-text">{mediaError || caption}</span>
-        </div>
-      </div>
-
       {!focusMode && (
         <div className="cc-grid">
-          <StatusPanel />
-          <IntelligenceFeed />
-          <div className="cc-card-row">
+          <div className="cc-row cc-row-hero">
+            <div className="dash-panel cc-card-sm">
+              <AgentsSection agents={agents} error={agentsError} />
+            </div>
+            <div className="cc-hero-row">
+              <HeroOrb />
+              <div className="cc-hero-caption">
+                <span className="cc-hero-mode">{MODE_LABEL[mode] || mode}</span>
+                <span className="cc-hero-text">{mediaError || caption}</span>
+              </div>
+            </div>
+            <div className="dash-panel cc-card-md">
+              <IntelligenceFeed />
+            </div>
+          </div>
+
+          <div className="cc-row">
+            <div className="dash-panel cc-card-sm">
+              <CryptoSection book={book} hasTraders={cryptoTraders > 0} error={cryptoError} />
+            </div>
+            <div className="dash-panel cc-card-sm">
+              <ScheduleSection schedule={schedule} error={scheduleError} />
+            </div>
+            <div className="dash-panel cc-card-sm">
+              <ReviewSection pending={reviewCount} error={reviewError} />
+            </div>
+          </div>
+
+          <div className="cc-row">
             <FinanceCard />
             <MediaCard />
             <GpuCard />
           </div>
-          <SshHealthPanel />
+
+          <div className="cc-row cc-row-wide">
+            <SshHealthPanel />
+          </div>
+        </div>
+      )}
+
+      {focusMode && (
+        <div className="cc-hero-row cc-hero-row-focus">
+          <HeroOrb />
+          <div className="cc-hero-caption">
+            <span className="cc-hero-mode">{MODE_LABEL[mode] || mode}</span>
+            <span className="cc-hero-text">{mediaError || caption}</span>
+          </div>
         </div>
       )}
 
       <footer className="cc-footer">
-        <WeatherStrip />
+        <div className="cc-footer-side">
+          <WeatherStrip />
+          <NetworkStatusPill />
+        </div>
         <button
           type="button"
           className={`cc-talk-button ${recording ? 'is-recording' : ''}`}
@@ -108,11 +152,15 @@ export default function Dashboard() {
           disabled={transcribing}
         >
           <span className="cc-talk-dot" />
-          {recording ? 'Listening…' : transcribing ? 'Transcribing…' : 'Talk to Jarvis'}
+          <span className="cc-talk-label">
+            {recording ? 'Listening…' : transcribing ? 'Transcribing…' : 'Talk to Jarvis'}
+          </span>
         </button>
-        <button type="button" className="footer-pill footer-link" onClick={() => setModalOpen(true)}>
-          Message
-        </button>
+        <div className="cc-footer-side cc-footer-side-right">
+          <button type="button" className="footer-pill footer-link" onClick={() => setModalOpen(true)}>
+            Message
+          </button>
+        </div>
       </footer>
     </div>
   )

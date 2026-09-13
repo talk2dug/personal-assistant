@@ -304,7 +304,11 @@ KITCHEN_GATED_TOOLS = [
             "source": {
                 "type": "string",
                 "enum": ["fresh", "frozen_substitute", "frozen_premade", "batch_frozen", "leftover", "eating_out"],
-                "description": "Defaults to 'fresh'. Use frozen_substitute when swapping a fresh ingredient for frozen to cut delivery trips — always propose that swap and get his OK in conversation first, never set it silently.",
+                "description": "Defaults to 'fresh'. Use frozen_substitute when swapping a fresh ingredient for frozen to cut delivery trips — always propose that swap and get his OK in conversation first, never set it silently. Use batch_frozen for a meal pulled from a logged batch-cook session (see log_batch_cook_session/list_batch_frozen_inventory) — pair it with batch_session_id.",
+            },
+            "batch_session_id": {
+                "type": "integer",
+                "description": "Only meaningful when source='batch_frozen' — the batch_cook_sessions entry this meal is pulled from (from list_batch_frozen_inventory). Consumes exactly one portion from that session; ignored for any other source.",
             },
             "notes": {"type": "string"},
         }, "required": ["meal_plan_id", "plan_date", "meal_type", "title"]},
@@ -384,6 +388,62 @@ KITCHEN_GATED_TOOLS = [
         "parameters": {"type": "object", "properties": {
             "meal_plan_id": {"type": "integer"},
         }, "required": ["meal_plan_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "propose_shopping_days",
+        "description": (
+            "Gathers a finalized plan's entries (date/meal/source) plus its max_deliveries "
+            "cap — decides nothing itself. Look at which entries are 'fresh' (need buying "
+            "close to their own date) versus frozen/pantry-stable/leftover/eating-out "
+            "(no date pressure), then reason out and present up to max_deliveries shopping "
+            "dates spanning the pay period for him to confirm in chat. Never exceed "
+            "max_deliveries. This never schedules or saves anything on its own — the "
+            "shopping days you propose only exist once you've said them to him."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "meal_plan_id": {"type": "integer"},
+        }, "required": ["meal_plan_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "schedule_freezer_pulls",
+        "description": (
+            "Once a plan is finalized, creates a real reminder the evening before each "
+            "freezer-sourced entry's date ('pull X from the freezer tonight for tomorrow's "
+            "Y') for every entry whose source is frozen_substitute, frozen_premade, or "
+            "batch_frozen. Safe to call again after the plan changes — entries that "
+            "already have a reminder are left alone, only new/changed freezer entries get "
+            "one."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "meal_plan_id": {"type": "integer"},
+        }, "required": ["meal_plan_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "log_batch_cook_session",
+        "description": (
+            "Log a batch-cook-and-freeze session — he made a big batch of something and "
+            "vacuum-packed it into portions for lazy nights/workweek lunches. Use whenever "
+            "he mentions batch cooking, meal-prepping, or freezing portions of something "
+            "he just made. servings_made is the real number of freezer-ready portions it "
+            "made (not people served) — ask if it's not obvious from what he said."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string", "description": "e.g. 'Turkey chili' — required even if recipe_id is given."},
+            "servings_made": {"type": "integer", "description": "How many freezer portions this session produced."},
+            "cooked_date": {"type": "string", "description": "ISO date. Defaults to today if omitted."},
+            "recipe_id": {"type": "integer", "description": "A saved recipe, if this batch was one."},
+            "notes": {"type": "string"},
+        }, "required": ["title", "servings_made"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_batch_frozen_inventory",
+        "description": (
+            "What's currently in the freezer from past batch-cook sessions, and how many "
+            "portions of each are left. Use this before planning a batch_frozen meal (to "
+            "see what's actually available to pull from) or whenever he asks what's in "
+            "the freezer."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
     }},
 ]
 
@@ -466,6 +526,18 @@ KITCHEN_SYSTEM_NOTE = (
     "match_meal_plan_items_to_kroger then finds real products (and sale status) for that "
     "saved list; read the matches back to him and only call bulk_add_to_cart yourself "
     "once he's confirmed which ones to actually buy."
+    " Once a plan is finalized, propose_shopping_days gathers its entries so you can "
+    "reason out and present up to max_deliveries shopping dates (fresh entries need "
+    "buying close to their own date, frozen/pantry-stable/leftover/eating-out entries "
+    "don't) -- present the dates in chat, it saves nothing on its own. "
+    "schedule_freezer_pulls then creates a real reminder the evening before each "
+    "frozen_substitute/frozen_premade/batch_frozen entry so he's told what to pull that "
+    "night -- safe to call again any time the plan changes, already-covered entries are "
+    "left alone. For batch-cooked freezer meals: log_batch_cook_session whenever he "
+    "mentions batch cooking or freezing portions of something (capture the real number "
+    "of freezer portions it made), list_batch_frozen_inventory shows what's left before "
+    "planning a batch_frozen meal, and add_meal_plan_entry with source='batch_frozen' "
+    "plus batch_session_id consumes one portion from that session automatically."
 )
 
 
@@ -584,7 +656,7 @@ def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict, kroge
             db_path, owner_user_id, arguments["meal_plan_id"], arguments["plan_date"], arguments["meal_type"],
             arguments["title"], recipe_id=arguments.get("recipe_id"),
             servings_planned=arguments.get("servings_planned"), source=arguments.get("source", "fresh"),
-            notes=arguments.get("notes"))
+            batch_session_id=arguments.get("batch_session_id"), notes=arguments.get("notes"))
         if entry is None:
             return {"error": "meal plan not found"}
         return {"ok": True, "entry": entry}
@@ -624,5 +696,27 @@ def dispatch(db_path: str, owner_user_id: int, name: str, arguments: dict, kroge
         if result is None:
             return {"error": "meal plan not found"}
         return result
+
+    if name == "propose_shopping_days":
+        result = meal_plan_db.propose_shopping_days(db_path, owner_user_id, arguments["meal_plan_id"])
+        if result is None:
+            return {"error": "meal plan not found"}
+        return result
+
+    if name == "schedule_freezer_pulls":
+        result = meal_plan_db.schedule_freezer_pulls(db_path, owner_user_id, arguments["meal_plan_id"])
+        if result is None:
+            return {"error": "meal plan not found"}
+        return result
+
+    if name == "log_batch_cook_session":
+        session = meal_plan_db.log_batch_cook_session(
+            db_path, owner_user_id, arguments["title"], arguments["servings_made"],
+            cooked_date=arguments.get("cooked_date"), recipe_id=arguments.get("recipe_id"),
+            notes=arguments.get("notes"))
+        return {"ok": True, "session": session}
+
+    if name == "list_batch_frozen_inventory":
+        return {"batch_frozen_inventory": meal_plan_db.list_batch_cook_sessions(db_path, owner_user_id)}
 
     return {"error": f"unknown kitchen tool {name}"}

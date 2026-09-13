@@ -464,6 +464,87 @@ def test_match_meal_plan_items_to_kroger_without_kroger_configured(db_path, owne
     assert reply == "Kroger isn't set up, sir."
 
 
+def test_propose_shopping_days_via_chat(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.add_meal_plan_entry(db_path, owner_id, plan_id, "2026-09-16", "dinner", "Chili")
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "propose_shopping_days", "arguments": {"meal_plan_id": plan_id}}}
+        ]},
+        {"role": "assistant", "content": "I'd shop once, on the 15th."},
+    ])
+    reply = engine.handle_message(db_path, llm, owner_id, "when should I shop for this plan", personal=personal)
+    assert reply == "I'd shop once, on the 15th."
+
+
+def test_schedule_freezer_pulls_via_chat(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Frozen Lasagna", source="frozen_premade")
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "schedule_freezer_pulls", "arguments": {"meal_plan_id": plan_id}}}
+        ]},
+        {"role": "assistant", "content": "Set a reminder for the 15th to pull the lasagna."},
+    ])
+    reply = engine.handle_message(db_path, llm, owner_id, "set up freezer pull reminders for this plan", personal=personal)
+    assert reply == "Set a reminder for the 15th to pull the lasagna."
+
+    entries = meal_plan_db.list_meal_plan_entries(db_path, owner_id, plan_id)
+    assert entries[0]["freezer_pull_reminder_id"] is not None
+    assert len(db.list_reminders(db_path, owner_id)) == 1
+
+
+def test_log_and_list_batch_cook_session_via_chat(db_path, owner_id):
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "log_batch_cook_session", "arguments": {
+                "title": "Turkey Chili", "servings_made": 8, "notes": "triple batch",
+            }}}
+        ]},
+        {"role": "assistant", "content": "Logged 8 portions of turkey chili in the freezer."},
+    ])
+    reply = engine.handle_message(db_path, llm, owner_id, "I just batch cooked a triple batch of turkey chili, got 8 portions", personal=personal)
+    assert reply == "Logged 8 portions of turkey chili in the freezer."
+    sessions = meal_plan_db.list_batch_cook_sessions(db_path, owner_id)
+    assert sessions[0]["title"] == "Turkey Chili"
+    assert sessions[0]["portions_remaining"] == 8
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "list_batch_frozen_inventory", "arguments": {}}}
+        ]},
+        {"role": "assistant", "content": "You've got 8 portions of turkey chili in the freezer."},
+    ])
+    reply = engine.handle_message(db_path, llm, owner_id, "what's in the freezer from batch cooking", personal=personal)
+    assert reply == "You've got 8 portions of turkey chili in the freezer."
+
+
+def test_add_meal_plan_entry_batch_frozen_via_chat_decrements_portions(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    session = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Turkey Chili", 4)
+    personal = make_personal(db_path, owner_id)
+
+    llm = FakeLLM([
+        {"role": "assistant", "tool_calls": [
+            {"function": {"name": "add_meal_plan_entry", "arguments": {
+                "meal_plan_id": plan_id, "plan_date": "2026-09-16", "meal_type": "dinner",
+                "title": "Turkey Chili", "source": "batch_frozen", "batch_session_id": session["id"],
+            }}}
+        ]},
+        {"role": "assistant", "content": "Pulled turkey chili from the freezer for the 16th."},
+    ])
+    engine.handle_message(db_path, llm, owner_id, "let's do the frozen turkey chili on the 16th", personal=personal)
+
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, session["id"])["portions_remaining"] == 3
+
+
 def test_payday_keyword_alone_gates_in_meal_plan_tools(db_path, owner_id):
     personal = make_personal(db_path, owner_id)
     names = {t["function"]["name"] for t in engine.select_tools("when's my next payday", personal=personal)}

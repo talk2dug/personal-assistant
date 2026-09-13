@@ -12,7 +12,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from ...core import kitchen_db, kitchen_vision
+from ...core import kitchen_db, kitchen_vision, meal_plan_db
 from ..auth import require_owner
 
 router = APIRouter(prefix="/api/kitchen", tags=["kitchen"])
@@ -293,3 +293,24 @@ async def mark_shopping_list_item_purchased(item: str, request: Request):
     if not ok:
         raise HTTPException(404, "item not found (pending) on the shopping list")
     return {"ok": True}
+
+
+@router.get("/meal-plan/current")
+async def current_meal_plan_view(request: Request):
+    """Read-only combined view for the Kitchen page's Meal Plan tab: the current
+    draft/active plan with its entries, its saved shopping list (if any), and current
+    batch-frozen freezer inventory -- everything the tab needs in one call rather than
+    four. Building/editing a plan is still chat-only; this never writes anything. Returns
+    plan: null (not 404) when there's no current plan, since "nothing planned yet" is a
+    normal state for this tab to render, not an error."""
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    result = meal_plan_db.get_meal_plan_with_entries(cfg.db_path, user["id"])
+    if result is None:
+        return {"plan": None, "entries": [], "shopping_items": [], "batch_frozen_inventory": []}
+    return {
+        "plan": result["plan"],
+        "entries": result["entries"],
+        "shopping_items": meal_plan_db.list_meal_plan_shopping_items(cfg.db_path, user["id"], result["plan"]["id"]),
+        "batch_frozen_inventory": meal_plan_db.list_batch_cook_sessions(cfg.db_path, user["id"]),
+    }

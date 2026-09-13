@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from assistant.config import UserConfig
-from assistant.core import db, kitchen_db
+from assistant.core import db, kitchen_db, meal_plan_db
 from assistant.web.app import create_app
 
 
@@ -28,6 +28,7 @@ def db_path(tmp_path):
     path = str(tmp_path / "test.db")
     db.init_db(path)
     kitchen_db.init_kitchen_db(path)
+    meal_plan_db.init_meal_plan_db(path)
     db.upsert_user(path, "111", "Dug", "owner")
     db.upsert_user(path, "222", "Partner", "partner")
     return path
@@ -384,3 +385,43 @@ def test_low_stock_write_auto_populates_the_shopping_list(client):
     assert len(listed) == 1
     assert listed[0]["item"] == "eggs"
     assert listed[0]["reason"] == "low_stock_auto"
+
+
+# --- meal plan (read-only combined view, Phase 6) -----------------------------------
+
+def test_meal_plan_current_requires_login(cfg):
+    app = create_app(cfg, FakeLLM(), era=None, calendar=None, static_dir=None)
+    assert TestClient(app).get("/api/kitchen/meal-plan/current").status_code == 401
+
+
+def test_meal_plan_current_with_no_plan_returns_null_plan_not_404(client):
+    resp = client.get("/api/kitchen/meal-plan/current")
+    assert resp.status_code == 200
+    assert resp.json() == {"plan": None, "entries": [], "shopping_items": [], "batch_frozen_inventory": []}
+
+
+def test_meal_plan_current_combines_plan_entries_shopping_list_and_freezer_inventory(client, cfg):
+    owner_id = db.upsert_user(cfg.db_path, "111", "Dug", "owner")
+    plan_id = meal_plan_db.create_meal_plan(cfg.db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.add_meal_plan_entry(cfg.db_path, owner_id, plan_id, "2026-09-16", "dinner", "Chili")
+    meal_plan_db.save_meal_plan_shopping_items(
+        cfg.db_path, owner_id, plan_id, [{"item": "ground beef", "quantity_to_buy": "1 lb"}])
+    meal_plan_db.log_batch_cook_session(cfg.db_path, owner_id, "Turkey Soup", 4)
+
+    resp = client.get("/api/kitchen/meal-plan/current")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["plan"]["id"] == plan_id
+    assert body["entries"][0]["title"] == "Chili"
+    assert body["shopping_items"][0]["item"] == "ground beef"
+    assert body["batch_frozen_inventory"][0]["title"] == "Turkey Soup"
+    assert body["batch_frozen_inventory"][0]["portions_remaining"] == 4
+
+
+def test_meal_plan_current_is_owner_scoped(client, cfg):
+    other_owner_id = db.upsert_user(cfg.db_path, "333", "OtherOwner", "owner")
+    meal_plan_db.create_meal_plan(cfg.db_path, other_owner_id, "2026-09-15", "2026-09-30")
+
+    resp = client.get("/api/kitchen/meal-plan/current")
+    assert resp.json()["plan"] is None

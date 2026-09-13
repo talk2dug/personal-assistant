@@ -316,3 +316,208 @@ def test_match_meal_plan_items_to_kroger_with_no_saved_items_returns_empty(db_pa
     plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
     result = meal_plan_db.match_meal_plan_items_to_kroger(db_path, owner_id, plan_id, FakeKrogerMCPClient({}))
     assert result == {"meal_plan_id": plan_id, "matches": []}
+
+
+# --- Phase 4: shopping-day scheduling + freezer-pull reminders ---------------------
+
+def test_propose_shopping_days_gathers_entries_and_cap(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30", max_deliveries=1)
+    meal_plan_db.add_meal_plan_entry(db_path, owner_id, plan_id, "2026-09-16", "dinner", "Chili", source="fresh")
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-20", "dinner", "Frozen Pizza", source="frozen_premade")
+
+    result = meal_plan_db.propose_shopping_days(db_path, owner_id, plan_id)
+
+    assert result["meal_plan_id"] == plan_id
+    assert result["period_start"] == "2026-09-15"
+    assert result["period_end"] == "2026-09-30"
+    assert result["max_deliveries"] == 1
+    assert {(e["plan_date"], e["source"]) for e in result["entries"]} == {
+        ("2026-09-16", "fresh"), ("2026-09-20", "frozen_premade"),
+    }
+    assert "max_deliveries" in result["note"]
+
+
+def test_propose_shopping_days_writes_nothing(db_path, owner_id):
+    """Purely a gather -- no meal_plans/meal_plan_entries row changes as a result."""
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.add_meal_plan_entry(db_path, owner_id, plan_id, "2026-09-16", "dinner", "Chili")
+    before = meal_plan_db.get_meal_plan_with_entries(db_path, owner_id, plan_id)
+
+    meal_plan_db.propose_shopping_days(db_path, owner_id, plan_id)
+
+    assert meal_plan_db.get_meal_plan_with_entries(db_path, owner_id, plan_id) == before
+
+
+def test_propose_shopping_days_unknown_plan_returns_none(db_path, owner_id):
+    assert meal_plan_db.propose_shopping_days(db_path, owner_id, 999) is None
+
+
+def test_schedule_freezer_pulls_creates_reminder_evening_before_for_freezer_sources(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Frozen Lasagna", source="frozen_premade")
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-17", "lunch", "Fresh Salad", source="fresh")
+
+    result = meal_plan_db.schedule_freezer_pulls(db_path, owner_id, plan_id)
+
+    assert len(result["created"]) == 1
+    created = result["created"][0]
+    assert created["due_at"] == "2026-09-15T18:00:00"
+    assert "Frozen Lasagna" in created["text"]
+    assert "dinner" in created["text"]
+
+    reminders = db.list_reminders(db_path, owner_id)
+    assert len(reminders) == 1
+    assert reminders[0]["id"] == created["reminder_id"]
+
+    entries = meal_plan_db.list_meal_plan_entries(db_path, owner_id, plan_id)
+    lasagna = next(e for e in entries if e["title"] == "Frozen Lasagna")
+    assert lasagna["freezer_pull_reminder_id"] == created["reminder_id"]
+    salad = next(e for e in entries if e["title"] == "Fresh Salad")
+    assert salad["freezer_pull_reminder_id"] is None
+
+
+def test_schedule_freezer_pulls_is_idempotent(db_path, owner_id):
+    """Calling again after the plan changes must not duplicate reminders for entries
+    already covered."""
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Frozen Lasagna", source="frozen_premade")
+    meal_plan_db.schedule_freezer_pulls(db_path, owner_id, plan_id)
+
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-18", "dinner", "Frozen Pizza", source="frozen_premade")
+    second = meal_plan_db.schedule_freezer_pulls(db_path, owner_id, plan_id)
+
+    assert len(second["created"]) == 1
+    assert second["created"][0]["due_at"] == "2026-09-17T18:00:00"
+    assert len(db.list_reminders(db_path, owner_id)) == 2
+
+
+def test_schedule_freezer_pulls_unknown_plan_returns_none(db_path, owner_id):
+    assert meal_plan_db.schedule_freezer_pulls(db_path, owner_id, 999) is None
+
+
+# --- Phase 5: batch-cook-and-freeze tracking ----------------------------------------
+
+def test_log_and_list_batch_cook_session(db_path, owner_id):
+    session = meal_plan_db.log_batch_cook_session(
+        db_path, owner_id, "Turkey Chili", 8, cooked_date="2026-09-14", notes="triple batch")
+
+    assert session["title"] == "Turkey Chili"
+    assert session["servings_made"] == 8
+    assert session["portions_remaining"] == 8
+    assert session["cooked_date"] == "2026-09-14"
+
+    available = meal_plan_db.list_batch_cook_sessions(db_path, owner_id)
+    assert len(available) == 1
+    assert available[0]["id"] == session["id"]
+
+
+def test_log_batch_cook_session_defaults_cooked_date_to_today(db_path, owner_id):
+    session = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Soup", 4)
+    assert session["cooked_date"] == date.today().isoformat()
+
+
+def test_list_batch_cook_sessions_excludes_fully_consumed_by_default(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    session = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Soup", 1)
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "lunch", "Soup",
+        source="batch_frozen", batch_session_id=session["id"])
+
+    assert meal_plan_db.list_batch_cook_sessions(db_path, owner_id) == []
+    assert meal_plan_db.list_batch_cook_sessions(db_path, owner_id, only_available=False)[0]["portions_remaining"] == 0
+
+
+def test_add_meal_plan_entry_batch_frozen_decrements_session_portions(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    session = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Turkey Chili", 4)
+
+    entry = meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Turkey Chili",
+        source="batch_frozen", batch_session_id=session["id"])
+
+    assert entry["batch_session_id"] == session["id"]
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, session["id"])["portions_remaining"] == 3
+
+
+def test_add_meal_plan_entry_non_batch_source_drops_batch_session_id(db_path, owner_id):
+    """A batch_session_id given without source='batch_frozen' is meaningless and dropped
+    rather than stored as a dangling reference."""
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    session = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Turkey Chili", 4)
+
+    entry = meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Fresh Chili",
+        source="fresh", batch_session_id=session["id"])
+
+    assert entry["batch_session_id"] is None
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, session["id"])["portions_remaining"] == 4
+
+
+def test_add_meal_plan_entry_overwriting_batch_slot_restores_old_session_portion(db_path, owner_id):
+    """Re-planning a batch_frozen slot to a different session must restore the old
+    session's portion before decrementing the new one -- never leak or double-spend."""
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    chili = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Turkey Chili", 4)
+    soup = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Soup", 4)
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Turkey Chili",
+        source="batch_frozen", batch_session_id=chili["id"])
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, chili["id"])["portions_remaining"] == 3
+
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Soup",
+        source="batch_frozen", batch_session_id=soup["id"])
+
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, chili["id"])["portions_remaining"] == 4
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, soup["id"])["portions_remaining"] == 3
+
+
+def test_add_meal_plan_entry_overwriting_batch_slot_with_fresh_restores_portion(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    session = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Turkey Chili", 4)
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Turkey Chili",
+        source="batch_frozen", batch_session_id=session["id"])
+
+    meal_plan_db.add_meal_plan_entry(db_path, owner_id, plan_id, "2026-09-16", "dinner", "Order Pizza", source="eating_out")
+
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, session["id"])["portions_remaining"] == 4
+
+
+def test_remove_meal_plan_entry_restores_batch_session_portion(db_path, owner_id):
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    session = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Turkey Chili", 4)
+    entry = meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "dinner", "Turkey Chili",
+        source="batch_frozen", batch_session_id=session["id"])
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, session["id"])["portions_remaining"] == 3
+
+    assert meal_plan_db.remove_meal_plan_entry(db_path, owner_id, entry["id"]) is True
+
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, session["id"])["portions_remaining"] == 4
+
+
+def test_add_meal_plan_entry_batch_session_portions_never_go_negative(db_path, owner_id):
+    """Two entries pulling from a 1-portion session must clamp at 0, not go negative."""
+    plan_id = meal_plan_db.create_meal_plan(db_path, owner_id, "2026-09-15", "2026-09-30")
+    session = meal_plan_db.log_batch_cook_session(db_path, owner_id, "Soup", 1)
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-16", "lunch", "Soup", source="batch_frozen", batch_session_id=session["id"])
+
+    meal_plan_db.add_meal_plan_entry(
+        db_path, owner_id, plan_id, "2026-09-17", "lunch", "Soup", source="batch_frozen", batch_session_id=session["id"])
+
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, session["id"])["portions_remaining"] == 0
+
+
+def test_batch_cook_sessions_scoped_per_owner(db_path, owner_id):
+    other_owner_id = db.upsert_user(db_path, "222", "Other", "owner")
+    session = meal_plan_db.log_batch_cook_session(db_path, other_owner_id, "Soup", 4)
+
+    assert meal_plan_db.get_batch_cook_session(db_path, owner_id, session["id"]) is None
+    assert meal_plan_db.list_batch_cook_sessions(db_path, owner_id) == []

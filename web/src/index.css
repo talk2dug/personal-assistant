@@ -2693,6 +2693,13 @@ body::after {
 }
 .inventory-chip-remove:hover { color: var(--red); }
 
+.meal-plan-summary { margin-bottom: 16px; }
+.meal-plan-day { margin-bottom: 14px; }
+.meal-plan-day-label {
+  font-family: var(--font-mono); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 6px;
+}
+
 .kitchen-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
 .kitchen-tab {
   background: none; border: 1px solid var(--border-dim); padding: 8px 16px;

@@ -191,6 +191,8 @@ export const api = {
     return res.json()
   },
 
+  currentMealPlan: () => request('/api/kitchen/meal-plan/current'),
+
   shoppingList: (status = 'pending') => request(`/api/kitchen/shopping-list?status=${status}`),
   addToShoppingList: (item, quantityHint) =>
     request('/api/kitchen/shopping-list', { method: 'POST', body: JSON.stringify({ item, quantity_hint: quantityHint }) }),

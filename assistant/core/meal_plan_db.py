@@ -7,7 +7,7 @@ concept, not a natural extension of any existing table.
 """
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from . import db, finance, kitchen_db
 from .business_db import normalize_lead_name
@@ -64,6 +64,28 @@ CREATE TABLE IF NOT EXISTS meal_plan_shopping_items (
     kroger_product_id TEXT,
     on_sale INTEGER,
     status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'added_to_cart', 'skipped', 'already_have')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Phase 5: batch-cooked, vacuum-packed freezer meals for lazy nights/workweek lunches.
+-- servings_made/portions_remaining are real integers, not model-reasoned free text like
+-- meal_plan_shopping_items' quantities -- "how many portions did this batch make" is
+-- something the owner states directly at cook time, a fact this table can just store,
+-- not a judgment call to hand off. One portion is one freezer-ready unit regardless of
+-- how many people it feeds (a portion packed to feed the household is still "1 portion"
+-- for counting purposes) -- see add_meal_plan_entry, which always consumes exactly one
+-- portion per batch_frozen entry rather than tracking partial-portion usage, which would
+-- be false precision this table shouldn't pretend to have.
+CREATE TABLE IF NOT EXISTS batch_cook_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    recipe_id INTEGER REFERENCES recipes(id),   -- NULL for a freeform title with no saved recipe
+    title TEXT NOT NULL,                         -- denormalized display name, same convention as meal_plan_entries.title
+    cooked_date TEXT NOT NULL,                   -- ISO date
+    servings_made INTEGER NOT NULL,
+    portions_remaining INTEGER NOT NULL,         -- starts equal to servings_made, decrements as meal_plan_entries consume it
+    notes TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -188,12 +210,22 @@ def get_meal_plan_with_entries(db_path: str, owner_user_id: int, meal_plan_id: i
 def add_meal_plan_entry(
     db_path: str, owner_user_id: int, meal_plan_id: int, plan_date: str, meal_type: str, title: str, *,
     recipe_id: int | None = None, servings_planned: int | None = None,
-    source: str = "fresh", notes: str | None = None,
+    source: str = "fresh", batch_session_id: int | None = None, notes: str | None = None,
 ) -> dict | None:
     """Upserts on (meal_plan_id, plan_date, meal_type) -- re-planning a slot overwrites it
     in place rather than duplicating. Returns None (rather than raising) if meal_plan_id
     doesn't belong to this owner, the same quiet-no-op-on-a-bad-id shape list_meal_plan_entries
-    already uses."""
+    already uses.
+
+    batch_session_id only takes effect when source='batch_frozen' -- given with any other
+    source it's dropped rather than stored, since a dangling reference with nothing
+    consuming it would be misleading. Whether this call is replacing a previous
+    batch_frozen slot, creating a new one, or both, the old session's portion (if any) is
+    restored before the new one is decremented, so re-planning a slot back and forth
+    between batch sessions (or away from one) never leaks or double-spends a portion.
+    """
+    if source != "batch_frozen":
+        batch_session_id = None
     now = _now()
     with closing(_connect(db_path)) as conn:
         plan = conn.execute(
@@ -201,17 +233,32 @@ def add_meal_plan_entry(
         ).fetchone()
         if plan is None:
             return None
+
+        existing = conn.execute(
+            "SELECT source, batch_session_id FROM meal_plan_entries "
+            "WHERE meal_plan_id = ? AND plan_date = ? AND meal_type = ?",
+            (meal_plan_id, plan_date, meal_type),
+        ).fetchone()
+        if existing and existing["source"] == "batch_frozen" and existing["batch_session_id"] is not None:
+            _adjust_batch_session_portions(conn, owner_user_id, existing["batch_session_id"], 1)
+
         conn.execute(
             """INSERT INTO meal_plan_entries
                    (meal_plan_id, plan_date, meal_type, recipe_id, title, servings_planned,
-                    source, notes, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source, batch_session_id, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(meal_plan_id, plan_date, meal_type) DO UPDATE SET
                    recipe_id = excluded.recipe_id, title = excluded.title,
                    servings_planned = excluded.servings_planned, source = excluded.source,
+                   batch_session_id = excluded.batch_session_id,
                    notes = excluded.notes, updated_at = excluded.updated_at""",
-            (meal_plan_id, plan_date, meal_type, recipe_id, title, servings_planned, source, notes, now, now),
+            (meal_plan_id, plan_date, meal_type, recipe_id, title, servings_planned,
+             source, batch_session_id, notes, now, now),
         )
+
+        if source == "batch_frozen" and batch_session_id is not None:
+            _adjust_batch_session_portions(conn, owner_user_id, batch_session_id, -1)
+
         conn.commit()
         row = conn.execute(
             "SELECT * FROM meal_plan_entries WHERE meal_plan_id = ? AND plan_date = ? AND meal_type = ?",
@@ -222,6 +269,15 @@ def add_meal_plan_entry(
 
 def remove_meal_plan_entry(db_path: str, owner_user_id: int, entry_id: int) -> bool:
     with closing(_connect(db_path)) as conn:
+        entry = conn.execute(
+            """SELECT source, batch_session_id FROM meal_plan_entries WHERE id = ? AND meal_plan_id IN
+                   (SELECT id FROM meal_plans WHERE owner_user_id = ?)""",
+            (entry_id, owner_user_id),
+        ).fetchone()
+        if entry is None:
+            return False
+        if entry["source"] == "batch_frozen" and entry["batch_session_id"] is not None:
+            _adjust_batch_session_portions(conn, owner_user_id, entry["batch_session_id"], 1)
         cur = conn.execute(
             """DELETE FROM meal_plan_entries WHERE id = ? AND meal_plan_id IN
                    (SELECT id FROM meal_plans WHERE owner_user_id = ?)""",
@@ -239,6 +295,84 @@ def finalize_meal_plan(db_path: str, owner_user_id: int, meal_plan_id: int) -> b
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- Phase 4: shopping-day scheduling + freezer-pull reminders ---------------------
+
+def propose_shopping_days(db_path: str, owner_user_id: int, meal_plan_id: int) -> dict | None:
+    """Gathers a finalized plan's entries (date/meal/title/source) alongside its
+    max_deliveries cap for the model to reason a shopping-day schedule from -- decides
+    nothing itself, same propose-then-confirm shape as gather_meal_plan_ingredients.
+    Shelf-life/fresh-vs-frozen judgment is deliberately not reproduced here as a rule
+    table (see this module's own docstring): the model looks at which entries are fresh
+    and close to their plan_date vs. already frozen/pantry-stable, and proposes up to
+    max_deliveries shopping dates spanning the period for him to confirm in chat.
+    Nothing is written here -- there's no separate 'confirm' call, since a shopping-day
+    schedule is conversation output, not stored state (unlike the shopping list itself,
+    which save_meal_plan_shopping_items does persist). Returns None if the plan doesn't
+    exist/belong to this owner.
+    """
+    plan = get_meal_plan(db_path, owner_user_id, meal_plan_id)
+    if plan is None:
+        return None
+    entries = list_meal_plan_entries(db_path, owner_user_id, meal_plan_id)
+    return {
+        "meal_plan_id": meal_plan_id,
+        "period_start": plan["period_start"],
+        "period_end": plan["period_end"],
+        "max_deliveries": plan["max_deliveries"],
+        "entries": [
+            {"plan_date": e["plan_date"], "meal_type": e["meal_type"], "title": e["title"], "source": e["source"]}
+            for e in entries
+        ],
+        "note": (
+            "Never exceed max_deliveries shopping dates. 'fresh' entries need their "
+            "ingredients bought close to their own plan_date; frozen_substitute/"
+            "frozen_premade/batch_frozen/leftover/eating_out entries need nothing bought "
+            "close to their date at all, so they place no constraint on which days you "
+            "pick. Reason out a real shopping-day schedule from this and present it to "
+            "him for confirmation in chat -- this tool stores nothing itself."
+        ),
+    }
+
+
+_FREEZER_PULL_SOURCES = ("frozen_substitute", "frozen_premade", "batch_frozen")
+
+
+def schedule_freezer_pulls(db_path: str, owner_user_id: int, meal_plan_id: int) -> dict | None:
+    """Creates a private reminder the evening before each freezer-sourced entry's
+    plan_date ('pull X from the freezer tonight for tomorrow's Y'), via db.add_reminder,
+    and stores the created reminder's id back onto that entry's own
+    freezer_pull_reminder_id column. Idempotent: an entry that already has a reminder is
+    skipped rather than creating a duplicate, so this is safe to call again after the
+    plan changes (a newly added/changed freezer entry picks up a reminder; entries
+    already covered are left alone). Meant to be called once a plan is finalized.
+    Returns None if the plan doesn't exist/belong to this owner.
+    """
+    plan = get_meal_plan(db_path, owner_user_id, meal_plan_id)
+    if plan is None:
+        return None
+    entries = list_meal_plan_entries(db_path, owner_user_id, meal_plan_id)
+    created = []
+    for entry in entries:
+        if entry["source"] not in _FREEZER_PULL_SOURCES or entry["freezer_pull_reminder_id"] is not None:
+            continue
+        pull_date = date.fromisoformat(entry["plan_date"]) - timedelta(days=1)
+        due_at = f"{pull_date.isoformat()}T18:00:00"
+        text = f"Pull {entry['title']} from the freezer tonight for tomorrow's {entry['meal_type']}."
+        reminder_id = db.add_reminder(db_path, owner_user_id, text, due_at, scope="private")
+        _set_entry_freezer_pull_reminder(db_path, entry["id"], reminder_id)
+        created.append({"entry_id": entry["id"], "reminder_id": reminder_id, "due_at": due_at, "text": text})
+    return {"meal_plan_id": meal_plan_id, "created": created}
+
+
+def _set_entry_freezer_pull_reminder(db_path: str, entry_id: int, reminder_id: int) -> None:
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            "UPDATE meal_plan_entries SET freezer_pull_reminder_id = ?, updated_at = ? WHERE id = ?",
+            (reminder_id, _now(), entry_id),
+        )
+        conn.commit()
 
 
 # --- inventory-aware shopping list -------------------------------------------------
@@ -361,3 +495,68 @@ def match_meal_plan_items_to_kroger(db_path: str, owner_user_id: int, meal_plan_
         conn.commit()
 
     return {"meal_plan_id": meal_plan_id, "matches": matches}
+
+
+# --- Phase 5: batch-cook-and-freeze tracking ---------------------------------------
+
+def log_batch_cook_session(
+    db_path: str, owner_user_id: int, title: str, servings_made: int, *,
+    cooked_date: str | None = None, recipe_id: int | None = None, notes: str | None = None,
+) -> dict:
+    """Logs a batch-cook-and-freeze session (e.g. 'made a triple batch of chili, got 8
+    portions in the freezer'). portions_remaining starts equal to servings_made and
+    decrements by one each time a meal_plan_entry consumes this session (see
+    add_meal_plan_entry's batch_session_id handling). cooked_date defaults to today."""
+    now = _now()
+    cooked = cooked_date or date.today().isoformat()
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO batch_cook_sessions
+                   (owner_user_id, recipe_id, title, cooked_date, servings_made, portions_remaining,
+                    notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, recipe_id, title, cooked, servings_made, servings_made, notes, now, now),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM batch_cook_sessions WHERE id = ?", (cur.lastrowid,)).fetchone()
+        return dict(row)
+
+
+def get_batch_cook_session(db_path: str, owner_user_id: int, session_id: int) -> dict | None:
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM batch_cook_sessions WHERE id = ? AND owner_user_id = ?", (session_id, owner_user_id)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_batch_cook_sessions(db_path: str, owner_user_id: int, only_available: bool = True) -> list[dict]:
+    """What's in the freezer right now -- only_available=True (the default, and what the
+    list_batch_frozen_inventory chat tool uses) restricts to sessions that still have
+    portions left; pass False for the full cook history including fully-consumed ones."""
+    query = "SELECT * FROM batch_cook_sessions WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if only_available:
+        query += " AND portions_remaining > 0"
+    query += " ORDER BY cooked_date DESC, id DESC"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
+def _adjust_batch_session_portions(conn: sqlite3.Connection, owner_user_id: int, session_id: int, delta: int) -> None:
+    """Applies delta to one session's portions_remaining, clamped to [0, servings_made] --
+    a quiet no-op (not an error) if session_id doesn't exist or belong to this owner, the
+    same forgiving shape the rest of this module uses for a bad/foreign id. Takes an
+    already-open connection so the meal_plan_entries write and this portion adjustment
+    commit together as one transaction (see add_meal_plan_entry/remove_meal_plan_entry)."""
+    row = conn.execute(
+        "SELECT servings_made, portions_remaining FROM batch_cook_sessions WHERE id = ? AND owner_user_id = ?",
+        (session_id, owner_user_id),
+    ).fetchone()
+    if row is None:
+        return
+    new_remaining = max(0, min(row["servings_made"], row["portions_remaining"] + delta))
+    conn.execute(
+        "UPDATE batch_cook_sessions SET portions_remaining = ?, updated_at = ? WHERE id = ?",
+        (new_remaining, _now(), session_id),
+    )

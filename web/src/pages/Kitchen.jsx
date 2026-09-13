@@ -535,6 +535,115 @@ function ShoppingListPanel() {
   )
 }
 
+const MEAL_PLAN_SOURCE_LABELS = {
+  fresh: 'fresh',
+  frozen_substitute: 'frozen substitute',
+  frozen_premade: 'frozen premade',
+  batch_frozen: 'batch frozen',
+  leftover: 'leftover',
+  eating_out: 'eating out',
+}
+
+/** Read-only: the current draft/active meal plan, its shopping list, and current
+ *  batch-frozen freezer inventory. Building/editing a plan is chat-only (see
+ *  kitchen_tools.py's meal-plan tools) -- this tab is purely "what's the plan look
+ *  like right now", so it has no forms or mutation buttons of its own. */
+function MealPlanPanel() {
+  const [data, setData] = useState(null)
+
+  useEffect(() => {
+    api.currentMealPlan().then(setData)
+  }, [])
+
+  if (data === null) return <p className="empty-hint">Loading…</p>
+
+  const { plan, entries, shopping_items: shoppingItems, batch_frozen_inventory: batchFrozenInventory } = data
+
+  if (!plan) {
+    return (
+      <section>
+        <h3>Meal Plan</h3>
+        <p className="empty-hint">
+          No meal plan yet — ask Jarvis to plan meals for the current pay period to get started.
+        </p>
+      </section>
+    )
+  }
+
+  const byDate = {}
+  for (const entry of entries) {
+    if (!byDate[entry.plan_date]) byDate[entry.plan_date] = []
+    byDate[entry.plan_date].push(entry)
+  }
+  const dates = Object.keys(byDate).sort()
+
+  return (
+    <section>
+      <h3>Meal Plan</h3>
+      <div className="task-meta meal-plan-summary">
+        <span>{plan.period_start} – {plan.period_end}</span>
+        <span>{plan.status}</span>
+        <span>up to {plan.max_deliveries} {plan.max_deliveries === 1 ? 'delivery' : 'deliveries'}</span>
+      </div>
+
+      <h4>Planned Meals</h4>
+      {dates.length === 0 && <p className="empty-hint">No meals planned yet in this plan.</p>}
+      {dates.map((planDate) => (
+        <div key={planDate} className="meal-plan-day">
+          <div className="meal-plan-day-label">{planDate}</div>
+          <ul className="task-list">
+            {byDate[planDate].map((entry) => (
+              <li key={entry.id} className="task-row">
+                <div className="task-body">
+                  <div className="task-text">{entry.meal_type}: {entry.title}</div>
+                  <div className="task-meta">
+                    <span>{MEAL_PLAN_SOURCE_LABELS[entry.source] || entry.source}</span>
+                    {entry.servings_planned ? <span>{entry.servings_planned} servings</span> : null}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+
+      <h4>Shopping List</h4>
+      {shoppingItems.length === 0 ? (
+        <p className="empty-hint">No shopping list saved for this plan yet.</p>
+      ) : (
+        <ul className="task-list">
+          {shoppingItems.map((item) => (
+            <li key={item.id} className="task-row">
+              <div className="task-body">
+                <div className="task-text">{item.item}</div>
+                <div className="task-meta">
+                  {item.quantity_to_buy ? <span>{item.quantity_to_buy}</span> : null}
+                  {item.category ? <span>{item.category}</span> : null}
+                  <span>{item.status}</span>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <h4>Batch-Frozen Inventory</h4>
+      {batchFrozenInventory.length === 0 ? (
+        <p className="empty-hint">Nothing batch-cooked and frozen right now.</p>
+      ) : (
+        <div className="inventory-grid">
+          {batchFrozenInventory.map((session) => (
+            <div key={session.id} className="inventory-chip">
+              <span className="inventory-chip-name">{session.title}</span>
+              <span className="inventory-chip-qty">{session.portions_remaining}/{session.servings_made} portions left</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
 export default function Kitchen() {
   const [tab, setTab] = useState('recipes')
 
@@ -550,10 +659,14 @@ export default function Kitchen() {
         <button className={`kitchen-tab ${tab === 'shopping' ? 'active' : ''}`} onClick={() => setTab('shopping')}>
           Shopping List
         </button>
+        <button className={`kitchen-tab ${tab === 'mealplan' ? 'active' : ''}`} onClick={() => setTab('mealplan')}>
+          Meal Plan
+        </button>
       </div>
       {tab === 'recipes' && <RecipesPanel />}
       {tab === 'inventory' && <InventoryBoard />}
       {tab === 'shopping' && <ShoppingListPanel />}
+      {tab === 'mealplan' && <MealPlanPanel />}
     </div>
   )
 }

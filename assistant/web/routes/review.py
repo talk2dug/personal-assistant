@@ -161,6 +161,28 @@ async def decide(item_id: int, request: Request):
             f"email_bills#{ref_id} -> {status}" if updated
             else f"email_bills#{ref_id} -> no such bill row"
         )
+    elif ref_table == "email_importance_flags" and ref_id:
+        # THE feedback loop (see mail_importance.py). This decision is not bookkeeping on
+        # a card -- it is the training signal the whole feature exists to collect, so it
+        # writes a labelled example the next classification run reads back into its
+        # prompt. The note he typed is carried with it and matters more than the verdict:
+        # "not important, that account is closed" is a rule in his own words.
+        #
+        # It still does nothing to the message. Approving does not archive, read, file or
+        # reply to anything; rejecting does not delete anything. Only what Jarvis has
+        # learned changes.
+        flag = mail_db.record_importance_verdict(
+            cfg.db_path, owner, ref_id, important=(decision == "approved"), note=(note or ""),
+        )
+        if flag is None:
+            written_through = f"email_importance_flags#{ref_id} -> no such flag row"
+        else:
+            stats = mail_db.importance_stats(cfg.db_path, owner)
+            written_through = (
+                f"email_importance_flags#{ref_id} -> {flag['status']}, recorded as a labelled "
+                f"example ({stats['examples_positive']} important / "
+                f"{stats['examples_negative']} not, feeding the next scan)"
+            )
     else:
         business = request.app.state.business
         ssh_ops = getattr(business.mcp_client, "ssh_ops", None) if business is not None else None

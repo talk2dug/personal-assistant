@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import (
     agents, business_db, db, github_client, kitchen_db, location, mail_bills, mail_db,
-    mail_triage, market_data, paper_trading, personal_agents, personal_db, staff,
+    mail_importance, mail_triage, market_data, paper_trading, personal_agents, personal_db, staff,
 )
 from .mail_client import JUNK_FOLDER
 from .engine import handle_message
@@ -46,6 +46,9 @@ def start(
     mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
     mail_triage_interval_minutes: int = 30, mail_triage_scan_limit: int = 15,
     mail_bills_interval_minutes: int = 180, mail_bills_scan_limit: int = 20,
+    mail_importance_interval_minutes: int = 240, mail_importance_scan_limit: int = 20,
+    mail_importance_confidence_threshold: float = mail_importance.DEFAULT_CONFIDENCE_THRESHOLD,
+    mail_importance_max_flags_per_run: int = mail_importance.DEFAULT_MAX_FLAGS_PER_RUN,
     kroger_sync_interval_seconds: int = 3600,
     task_watchdog_interval_seconds: int = 60,
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
@@ -193,6 +196,28 @@ def start(
                 ),
                 "interval", minutes=mail_bills_interval_minutes, id="mail_bills_agent",
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+            )
+
+        # Provisional importance flagging + the feedback loop (see mail_importance.py).
+        # Same gate and same reasoning again (mail + a plain .chat()-capable llm, outside
+        # business_agents_enabled). The slowest mail cadence of the three on purpose:
+        # every card it raises is a QUESTION for the owner, so the cost of running it
+        # often isn't LLM spend, it's his attention -- and a per-run cap
+        # (mail_importance_max_flags_per_run) bounds that further. It writes only
+        # email_importance_flags/_scans and a review card; it cannot send, move, read,
+        # or delete anything, and it never creates a reminder.
+        if owner is not None:
+            scheduler.add_job(
+                _guarded_simple(
+                    "mail_importance",
+                    lambda: mail_importance.run_mail_importance_scan_once(
+                        db_path, llm, mail.mcp_client, owner["id"],
+                        limit=mail_importance_scan_limit,
+                        threshold=mail_importance_confidence_threshold,
+                        max_flags=mail_importance_max_flags_per_run),
+                ),
+                "interval", minutes=mail_importance_interval_minutes, id="mail_importance_agent",
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
             )
 
     if business is not None and llm is not None:

@@ -70,6 +70,14 @@ class Config:
     # real-world false-positive/negative rates only show up once real mail is flowing.
     mail_junk_scan_interval_seconds: int = 900
     mail_junk_score_threshold: float = 4.0
+    # The two brakes on provisional importance flagging (see mail_importance.py): the
+    # model's own 0-1 confidence a message must clear before it becomes a review card,
+    # and how many cards one pass may raise at all. Tunable for the same reason the junk
+    # threshold is -- the right bar only shows up once real mail is flowing -- but with a
+    # different cost model: over-flagging here spends the owner's attention rather than a
+    # Junk-folder round trip, so both start deliberately conservative.
+    mail_importance_confidence_threshold: float = 0.75
+    mail_importance_max_flags_per_run: int = 3
     # How often kitchen_db.sync_kroger_orders runs (see scheduler.py's kroger_sync job).
     # No documented Kroger rate limit exists anywhere in kroger-mcp or its API docs, so
     # this mirrors Era's real-world default rather than inventing a number.
@@ -321,6 +329,8 @@ def load_config(path: str = "config.json") -> Config:
         # is that it doesn't wait on a chat confirmation for every scan.
         mail_junk_scan_interval_seconds=data.get("mail_junk_scan_interval_seconds", 900),
         mail_junk_score_threshold=data.get("mail_junk_score_threshold", 4.0),
+        mail_importance_confidence_threshold=data.get("mail_importance_confidence_threshold", 0.75),
+        mail_importance_max_flags_per_run=data.get("mail_importance_max_flags_per_run", 3),
         kroger_sync_interval_seconds=data.get("kroger_sync_interval_seconds", 3600),
         task_watchdog_interval_seconds=data.get("task_watchdog_interval_seconds", 60),
         review_watchdog_interval_seconds=data.get("review_watchdog_interval_seconds", 900),

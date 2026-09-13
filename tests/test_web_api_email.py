@@ -327,3 +327,93 @@ def test_bills_503_when_mail_is_not_configured(db_path):
 def test_bills_requires_owner(db_path):
     c = _client(db_path, mail=FakeMailContext(FakeMailClient()), login_as="Partner")
     assert c.get("/api/email/bills").status_code == 403
+
+
+# --- importance: provisional flags + how the learning loop is actually doing ---------
+# (mail_importance.py). Read-only: the verdict that trains it is given in the Review
+# queue, so nothing on this endpoint can change a flag or touch a message.
+
+def _record_flag(db_path, **overrides):
+    from assistant.core import db as core_db, mail_db
+    mail_db.init_mail_db(db_path)
+    owner = core_db.get_user_by_chat_id(db_path, "111")["id"]
+    kwargs = dict(
+        folder="INBOX", uid="1", from_address="service@mortgage.example",
+        subject="Payment returned", received_at="2026-09-13",
+        category="personal_finances", confidence=0.91,
+        reason="Your mortgage servicer says a payment was returned.",
+    )
+    kwargs.update(overrides)
+    return owner, mail_db.create_importance_flag(db_path, owner, **kwargs)
+
+
+def test_importance_returns_flags_with_the_models_reason(db_path):
+    _record_flag(db_path)
+    c = _client(db_path, mail=FakeMailContext(FakeMailClient()))
+    resp = c.get("/api/email/importance")
+    assert resp.status_code == 200
+    flags = resp.json()["flags"]
+    assert len(flags) == 1
+    assert flags[0]["category"] == "personal_finances"
+    assert flags[0]["confidence"] == 0.91
+    assert flags[0]["status"] == "flagged"
+    assert "payment was returned" in flags[0]["reason"]
+
+
+def test_importance_reports_the_accuracy_summary_from_his_own_verdicts(db_path):
+    from assistant.core import mail_db
+    owner, flag_id = _record_flag(db_path)
+    _record_flag(db_path, uid="2", subject="Second thing")
+    mail_db.mark_importance_scanned(db_path, owner, "INBOX", "1", flagged=True)
+    mail_db.mark_importance_scanned(db_path, owner, "INBOX", "2", flagged=True)
+    mail_db.mark_importance_scanned(db_path, owner, "INBOX", "3", flagged=False)
+    mail_db.record_importance_verdict(db_path, owner, flag_id, important=True, note="yes, my mortgage")
+
+    stats = _client(db_path, mail=FakeMailContext(FakeMailClient())).get("/api/email/importance").json()["stats"]
+    assert stats["messages_judged"] == 3
+    assert stats["flagged_total"] == 2
+    assert stats["confirmed"] == 1 and stats["rejected"] == 0
+    assert stats["awaiting_verdict"] == 1
+    assert stats["precision"] == 1.0
+    assert stats["examples_total"] == 1 and stats["examples_positive"] == 1
+
+
+def test_importance_precision_is_null_rather_than_zero_before_any_verdict(db_path):
+    """0-of-0 rendered as 0% would read as "this thing is always wrong" on day one."""
+    _record_flag(db_path)
+    stats = _client(db_path, mail=FakeMailContext(FakeMailClient())).get("/api/email/importance").json()["stats"]
+    assert stats["precision"] is None
+
+
+def test_importance_can_be_filtered_by_status(db_path):
+    from assistant.core import mail_db
+    owner, flag_id = _record_flag(db_path)
+    mail_db.record_importance_verdict(db_path, owner, flag_id, important=False, note="nope")
+    c = _client(db_path, mail=FakeMailContext(FakeMailClient()))
+    assert c.get("/api/email/importance?status=flagged").json()["flags"] == []
+    assert len(c.get("/api/email/importance?status=rejected").json()["flags"]) == 1
+
+
+def test_importance_empty_when_nothing_flagged(db_path):
+    c = _client(db_path, mail=FakeMailContext(FakeMailClient()))
+    resp = c.get("/api/email/importance")
+    assert resp.status_code == 200
+    assert resp.json()["flags"] == [] and resp.json()["stats"]["flagged_total"] == 0
+
+
+def test_importance_does_not_touch_the_mailbox(db_path):
+    client = FakeMailClient()
+    _record_flag(db_path)
+    c = _client(db_path, mail=FakeMailContext(client))
+    assert c.get("/api/email/importance").status_code == 200
+    assert client.calls == []
+
+
+def test_importance_503_when_mail_is_not_configured(db_path):
+    c = _client(db_path, mail=None)
+    assert c.get("/api/email/importance").status_code == 503
+
+
+def test_importance_requires_owner(db_path):
+    c = _client(db_path, mail=FakeMailContext(FakeMailClient()), login_as="Partner")
+    assert c.get("/api/email/importance").status_code == 403

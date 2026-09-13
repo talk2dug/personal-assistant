@@ -172,6 +172,10 @@ def main() -> None:
         # interval, independent of business_agents_enabled (see scheduler.py's
         # docstring for why this isn't gated behind that switch).
         mail_junk_scan_interval_seconds=cfg.mail_junk_scan_interval_seconds,
+        # Provisional importance flagging: both brakes come from config, because the
+        # cost of getting them wrong is the owner ignoring the review queue.
+        mail_importance_confidence_threshold=cfg.mail_importance_confidence_threshold,
+        mail_importance_max_flags_per_run=cfg.mail_importance_max_flags_per_run,
         kroger_sync_interval_seconds=cfg.kroger_sync_interval_seconds,
         # Watchdog: notices a due personal task or a Review item nobody came back to,
         # instead of the owner only finding out when he happens to ask or check the page.

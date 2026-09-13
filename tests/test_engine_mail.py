@@ -206,3 +206,89 @@ def test_list_mail_folders_executes_immediately_without_confirmation(db_path, ow
 
     assert client.calls == [("list_mail_folders", {})]
     assert db.get_pending_action(db_path, owner_id) is None
+
+
+# --- mark_email_importance: the conversational half of mail_importance.py's loop ------
+# Records what the owner SAID about a message. It is in MAIL_TOOLS for discoverability,
+# but it is not a mail operation: it must never reach the mailbox to change anything.
+
+def _dispatch(db_path, owner_id, mail, arguments):
+    import json as _json
+    return _json.loads(engine._dispatch_tool_call(
+        db_path, "America/New_York", owner_id, "mark_email_importance", arguments,
+        None, None, mail=mail))
+
+
+def test_marking_a_message_important_in_chat_records_a_training_example(db_path, owner_id):
+    from assistant.core import mail_db
+    mail, client = make_mail()
+
+    result = _dispatch(db_path, owner_id, mail, {
+        "uid": "101", "important": True, "note": "anything from my sister is important"})
+
+    assert result["ok"] is True and result["recorded"] == "important"
+    examples = mail_db.list_importance_examples(db_path, owner_id)
+    assert len(examples) == 1
+    assert examples[0]["label"] == 1 and examples[0]["source"] == "chat"
+    assert examples[0]["note"] == "anything from my sister is important"
+    # The only mailbox call allowed is the read that fetches the sender/subject, which is
+    # what makes the example usable as a few-shot line. Nothing mutating.
+    assert [name for name, _ in client.calls] == ["read_email"]
+
+
+def test_marking_a_message_not_important_records_a_negative_example(db_path, owner_id):
+    from assistant.core import mail_db
+    mail, _ = make_mail()
+
+    result = _dispatch(db_path, owner_id, mail, {
+        "uid": "101", "important": False, "note": "that account is closed"})
+
+    assert result["recorded"] == "not important"
+    assert mail_db.list_importance_examples(db_path, owner_id, label=False)[0]["label"] == 0
+
+
+def test_a_chat_verdict_about_an_already_flagged_message_updates_that_flag(db_path, owner_id):
+    from assistant.core import mail_db
+    mail_db.init_mail_db(db_path)
+    flag_id = mail_db.create_importance_flag(
+        db_path, owner_id, folder="INBOX", uid="101", from_address="a@b.example",
+        subject="A thing", received_at="d", category="personal_business",
+        confidence=0.9, reason="Looked like an account problem.")
+    mail, client = make_mail()
+
+    _dispatch(db_path, owner_id, mail, {"uid": "101", "important": False, "note": "nope"})
+
+    assert mail_db.get_importance_flag(db_path, owner_id, flag_id)["status"] == "rejected"
+    # No mailbox call at all here: the flag row already carries the sender and subject.
+    assert client.calls == []
+
+
+def test_the_verdict_survives_a_failed_header_read(db_path, owner_id):
+    """A mail server hiccup must not cost him the verdict he just gave."""
+    from assistant.core import mail_db
+
+    class BrokenMailClient:
+        calls = []
+
+        def call_tool(self, name, arguments):
+            raise RuntimeError("IMAP down")
+
+    mail = engine.MailContext(mcp_client=BrokenMailClient(), sensitive_tools=set())
+    result = _dispatch(db_path, owner_id, mail, {"uid": "101", "important": True})
+
+    assert result["ok"] is True
+    assert len(mail_db.list_importance_examples(db_path, owner_id)) == 1
+
+
+def test_mark_email_importance_needs_a_uid_and_a_verdict(db_path, owner_id):
+    mail, _ = make_mail()
+    assert "error" in _dispatch(db_path, owner_id, mail, {"important": True})
+    assert "error" in _dispatch(db_path, owner_id, mail, {"uid": "101"})
+
+
+def test_mark_email_importance_is_not_a_sensitive_tool(db_path, owner_id):
+    """It records what he already told us. Staging a confirmation for "yes that mattered"
+    would make the loop more annoying than the flagging it exists to improve."""
+    mail, _ = make_mail()
+    _dispatch(db_path, owner_id, mail, {"uid": "101", "important": True})
+    assert db.get_pending_action(db_path, owner_id) is None

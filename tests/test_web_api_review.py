@@ -468,3 +468,63 @@ def test_a_detected_bill_shows_up_in_the_personal_lane(client, db_path, owner_id
     _detected_bill(db_path, owner_id)
     item = client.get("/api/review/items").json()["items"][0]
     assert item["pipeline"] == "personal"
+
+
+# --- importance flags (mail_importance.py): the decision IS the training signal -------
+
+def _importance_flag(db_path, owner_id):
+    from assistant.core import mail_db
+    mail_db.init_mail_db(db_path)
+    flag_id = mail_db.create_importance_flag(
+        db_path, owner_id, folder="INBOX", uid="1", from_address="service@mortgage.example",
+        subject="Payment returned", received_at="2026-09-13", category="personal_finances",
+        confidence=0.91, reason="Your mortgage servicer says a payment was returned.")
+    item_id = business_db.create_review_item(
+        db_path, owner_id, "Important? Payment returned", kind="other",
+        ref_table="email_importance_flags", ref_id=flag_id)
+    return flag_id, item_id
+
+
+def test_approving_an_importance_flag_records_a_positive_training_example(client, db_path, owner_id):
+    from assistant.core import mail_db
+    flag_id, item_id = _importance_flag(db_path, owner_id)
+
+    resp = client.post(
+        f"/api/review/items/{item_id}/decide",
+        json={"decision": "approved", "note": "yes — that's my mortgage servicer"})
+    assert resp.status_code == 200
+    assert f"email_importance_flags#{flag_id}" in (resp.json()["written_through"] or "")
+
+    assert mail_db.get_importance_flag(db_path, owner_id, flag_id)["status"] == "confirmed"
+    examples = mail_db.list_importance_examples(db_path, owner_id)
+    assert len(examples) == 1 and examples[0]["label"] == 1
+    # His note is the highest-signal field and has to survive into the training set.
+    assert examples[0]["note"] == "yes — that's my mortgage servicer"
+
+
+def test_rejecting_an_importance_flag_records_a_negative_training_example(client, db_path, owner_id):
+    from assistant.core import mail_db
+    flag_id, item_id = _importance_flag(db_path, owner_id)
+
+    client.post(
+        f"/api/review/items/{item_id}/decide",
+        json={"decision": "rejected", "note": "that account is closed"})
+
+    assert mail_db.get_importance_flag(db_path, owner_id, flag_id)["status"] == "rejected"
+    examples = mail_db.list_importance_examples(db_path, owner_id, label=False)
+    assert len(examples) == 1 and examples[0]["note"] == "that account is closed"
+
+
+def test_deciding_an_importance_flag_does_nothing_to_the_message(client, db_path, owner_id):
+    """The verdict changes what Jarvis has learned and nothing else -- no mailbox call of
+    any kind is made, in either direction."""
+    _, item_id = _importance_flag(db_path, owner_id)
+    client.post(f"/api/review/items/{item_id}/decide", json={"decision": "approved"})
+    mail = client.app.state.mail
+    assert mail is None or getattr(mail.mcp_client, "calls", []) == []
+
+
+def test_an_importance_flag_shows_up_in_the_personal_lane(client, db_path, owner_id):
+    _importance_flag(db_path, owner_id)
+    item = client.get("/api/review/items").json()["items"][0]
+    assert item["pipeline"] == "personal"

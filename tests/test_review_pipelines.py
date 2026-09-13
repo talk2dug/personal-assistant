@@ -45,6 +45,13 @@ def test_detected_bills_are_personal_not_mail():
     assert business_db.classify_pipeline({"kind": "other", "ref_table": "email_bills"}) == "personal"
 
 
+def test_importance_flags_are_personal_not_mail():
+    """Same reasoning again, and more so: an importance flag asks about his finances,
+    relationships and personal business -- the mail is only how it arrived."""
+    assert business_db.classify_pipeline(
+        {"kind": "other", "ref_table": "email_importance_flags"}) == "personal"
+
+
 @pytest.mark.parametrize("ref_table", ["personal_tasks", "dispute_items", "dispute_letters"])
 def test_personal_life_ref_tables_are_personal(ref_table):
     """No real create_review_item call site sets these ref_tables today (grepped every

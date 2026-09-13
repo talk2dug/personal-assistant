@@ -116,6 +116,92 @@ CREATE TABLE IF NOT EXISTS email_bill_scans (
     scanned_at TEXT NOT NULL,
     UNIQUE(owner_user_id, folder, uid)
 );
+
+-- Provisional importance flags (mail_importance.py) -- project 13's "flags important
+-- emails touching personal finances, relationships, or personal business".
+--
+-- These three tables exist to serve a FEEDBACK LOOP, not a classifier. The owner was
+-- asked where he'd draw the line on "important" and deliberately refused to name one:
+-- "if thres a way to flag something as important and let the AI start to learn. Or if it
+-- can tempo flag something as important and then i can say if it was or was not and
+-- continue learning". So a flag here is a QUESTION ("I think this mattered -- did it?"),
+-- and his answer is the actual product: it becomes a labelled example that steers the
+-- next run's prompt. Nothing in this feature reads these tables to act on mail.
+--
+-- confidence is the model's own 0.0-1.0 self-rating, stored exactly as it gave it and
+-- never re-scored here (same discipline as email_bills.confidence). It is NULL when the
+-- model returned something that wasn't a plain 0-1 number, and a NULL confidence never
+-- clears the threshold -- unreadable certainty fails closed, i.e. no flag.
+CREATE TABLE IF NOT EXISTS email_importance_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    folder TEXT NOT NULL DEFAULT 'INBOX',
+    uid TEXT NOT NULL,
+    from_address TEXT,
+    subject TEXT,
+    received_at TEXT,
+    category TEXT,             -- personal_finances | relationships | personal_business | other
+    confidence REAL,           -- the model's own 0.0-1.0, as given
+    reason TEXT,               -- one sentence, read back to him verbatim on the review card
+    status TEXT NOT NULL DEFAULT 'flagged'
+        CHECK (status IN ('flagged', 'confirmed', 'rejected')),
+    verdict_note TEXT,         -- whatever he typed on the Review decision, real signal
+    decided_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner_user_id, folder, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_email_importance_flags_status
+    ON email_importance_flags(owner_user_id, status, created_at);
+
+-- The importance scan's "already judged this one" ledger, negatives included -- same
+-- reasoning as email_bill_scans above (one LLM round trip per message, ever). It carries
+-- category/confidence as well as the yes/no, so a near-miss that scored just under the
+-- threshold is still visible when the threshold needs tuning: without that, the only
+-- evidence for "the bar is too high" would be mail nobody ever hears about again.
+CREATE TABLE IF NOT EXISTS email_importance_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    folder TEXT NOT NULL DEFAULT 'INBOX',
+    uid TEXT NOT NULL,
+    flagged INTEGER NOT NULL DEFAULT 0,
+    category TEXT,
+    confidence REAL,
+    scanned_at TEXT NOT NULL,
+    UNIQUE(owner_user_id, folder, uid)
+);
+
+-- The labelled training set: one row per message the OWNER has actually ruled on. This
+-- is the only thing in the feature that is ground truth rather than a model opinion, and
+-- it is what mail_importance.select_examples feeds back into the next run's prompt.
+--
+-- Deliberately its own table rather than a column on email_importance_flags, for one
+-- concrete reason: the most valuable label is the one no flag exists for. "That one WAS
+-- important" about a message the scan quietly passed over is a false negative -- exactly
+-- the case a flags-only store can never represent, and exactly what the chat tool
+-- (mark_email_importance) records. flag_id is therefore nullable.
+--
+-- UNIQUE(owner,folder,uid) with an upsert: a later verdict about the same message
+-- replaces the earlier one. He is allowed to change his mind, and the training set must
+-- hold what he believes now, not an average of every answer he's ever given.
+CREATE TABLE IF NOT EXISTS email_importance_examples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    folder TEXT NOT NULL DEFAULT 'INBOX',
+    uid TEXT NOT NULL,
+    from_address TEXT,
+    subject TEXT,
+    category TEXT,             -- the category the model claimed, '' when he volunteered the label
+    model_reason TEXT,         -- why the model thought so, '' for a chat-volunteered label
+    label INTEGER NOT NULL,    -- 1 = he said it WAS important, 0 = he said it was NOT
+    note TEXT,                 -- his own words on the decision: the highest-signal field here
+    source TEXT NOT NULL DEFAULT 'review' CHECK (source IN ('review', 'chat')),
+    flag_id INTEGER,           -- the flag he was answering, NULL when he volunteered it
+    created_at TEXT NOT NULL,
+    UNIQUE(owner_user_id, folder, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_email_importance_examples_label
+    ON email_importance_examples(owner_user_id, label, created_at);
 """
 
 
@@ -408,3 +494,225 @@ def update_bill_status(db_path: str, owner_user_id: int, bill_id: int, status: s
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- provisional importance flags + the owner's labelled verdicts ---------------------
+# (see the three email_importance_* schema comments above, and mail_importance.py)
+
+IMPORTANCE_STATUSES = ("flagged", "confirmed", "rejected")
+
+
+def has_scanned_for_importance(db_path: str, owner_user_id: int, folder: str, uid: str) -> bool:
+    """Whether the importance scan has already judged this message -- flagged or not."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM email_importance_scans WHERE owner_user_id = ? AND folder = ? AND uid = ?",
+            (owner_user_id, folder, uid),
+        ).fetchone()
+        return row is not None
+
+
+def mark_importance_scanned(
+    db_path: str, owner_user_id: int, folder: str, uid: str, flagged: bool,
+    category: str = "", confidence: float | None = None,
+) -> None:
+    """Records that this uid has been judged, and what the model thought even when that
+    wasn't enough to surface anything. Only ever called after a real answer from the
+    model -- a message that couldn't be read, or that blew up mid-classification, is
+    deliberately left unmarked so the next pass retries it (same rule as bills)."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO email_importance_scans
+                   (owner_user_id, folder, uid, flagged, category, confidence, scanned_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(owner_user_id, folder, uid) DO NOTHING""",
+            (owner_user_id, folder, uid, int(flagged), category, confidence, _now()),
+        )
+        conn.commit()
+
+
+def create_importance_flag(
+    db_path: str, owner_user_id: int, folder: str, uid: str, from_address: str, subject: str,
+    received_at: str, category: str, confidence: float | None, reason: str,
+) -> int:
+    """Returns the flag's id -- the existing one if this uid was already flagged (a later
+    scan never overwrites a row he may already have ruled on), otherwise the new row."""
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO email_importance_flags
+                   (owner_user_id, folder, uid, from_address, subject, received_at,
+                    category, confidence, reason, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'flagged', ?, ?)
+               ON CONFLICT(owner_user_id, folder, uid) DO NOTHING""",
+            (owner_user_id, folder, uid, from_address, subject, received_at,
+             category, confidence, reason, now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM email_importance_flags WHERE owner_user_id = ? AND folder = ? AND uid = ?",
+            (owner_user_id, folder, uid),
+        ).fetchone()
+        return row["id"]
+
+
+def list_importance_flags(db_path: str, owner_user_id: int, status: str | None = None, limit: int = 50):
+    query = "SELECT * FROM email_importance_flags WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
+def get_importance_flag(db_path: str, owner_user_id: int, flag_id: int):
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM email_importance_flags WHERE id = ? AND owner_user_id = ?",
+            (flag_id, owner_user_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_importance_flag_by_uid(db_path: str, owner_user_id: int, folder: str, uid: str):
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM email_importance_flags WHERE owner_user_id = ? AND folder = ? AND uid = ?",
+            (owner_user_id, folder, uid),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def record_importance_example(
+    db_path: str, owner_user_id: int, folder: str, uid: str, from_address: str, subject: str,
+    category: str, model_reason: str, label: bool, note: str = "", source: str = "review",
+    flag_id: int | None = None,
+) -> int:
+    """Writes (or replaces) the owner's verdict about one message as a labelled example.
+
+    An upsert on purpose: he is allowed to change his mind, and the training set has to
+    hold what he believes NOW. Returns the example's id.
+    """
+    if source not in ("review", "chat"):
+        raise ValueError(f"invalid source: {source!r}")
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO email_importance_examples
+                   (owner_user_id, folder, uid, from_address, subject, category, model_reason,
+                    label, note, source, flag_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(owner_user_id, folder, uid) DO UPDATE SET
+                   label = excluded.label,
+                   note = excluded.note,
+                   source = excluded.source,
+                   flag_id = COALESCE(excluded.flag_id, email_importance_examples.flag_id),
+                   category = CASE WHEN excluded.category != '' THEN excluded.category
+                                   ELSE email_importance_examples.category END,
+                   model_reason = CASE WHEN excluded.model_reason != '' THEN excluded.model_reason
+                                       ELSE email_importance_examples.model_reason END,
+                   created_at = excluded.created_at""",
+            (owner_user_id, folder, uid, from_address, subject, category, model_reason,
+             int(bool(label)), note, source, flag_id, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM email_importance_examples WHERE owner_user_id = ? AND folder = ? AND uid = ?",
+            (owner_user_id, folder, uid),
+        ).fetchone()
+        return row["id"]
+
+
+def record_importance_verdict(
+    db_path: str, owner_user_id: int, flag_id: int, important: bool, note: str = "",
+) -> dict | None:
+    """The owner's answer to one flag: stamps the flag row AND files the labelled example
+    in one call, so the Review page and the chat tool can never drift into recording a
+    verdict the next run's prompt won't see. Returns the updated flag, or None if there
+    is no such flag.
+
+    Nothing about a verdict here touches the message itself -- it is not archived, read,
+    moved or replied to. The only thing that changes is what Jarvis has learned.
+    """
+    flag = get_importance_flag(db_path, owner_user_id, flag_id)
+    if flag is None:
+        return None
+    status = "confirmed" if important else "rejected"
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """UPDATE email_importance_flags
+               SET status = ?, verdict_note = ?, decided_at = ?, updated_at = ?
+               WHERE id = ? AND owner_user_id = ?""",
+            (status, note, _now(), _now(), flag_id, owner_user_id),
+        )
+        conn.commit()
+    record_importance_example(
+        db_path, owner_user_id, folder=flag["folder"], uid=flag["uid"],
+        from_address=flag["from_address"] or "", subject=flag["subject"] or "",
+        category=flag["category"] or "", model_reason=flag["reason"] or "",
+        label=important, note=note or "", source="review", flag_id=flag_id,
+    )
+    return get_importance_flag(db_path, owner_user_id, flag_id)
+
+
+def list_importance_examples(
+    db_path: str, owner_user_id: int, label: bool | None = None, limit: int = 10,
+) -> list[dict]:
+    """Most recent verdicts first. mail_importance.select_examples owns the actual
+    selection strategy (balance, backfill, cap) -- this is only the query."""
+    query = "SELECT * FROM email_importance_examples WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if label is not None:
+        query += " AND label = ?"
+        params.append(int(bool(label)))
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
+def importance_stats(db_path: str, owner_user_id: int) -> dict:
+    """How the flagging is actually doing, straight from his own verdicts -- what the
+    Email page's Important tab shows. precision is confirmed / (confirmed + rejected),
+    and is None until he has ruled on at least one flag: a 0-of-0 rendered as "0%" would
+    read as "this thing is always wrong" on its first day."""
+    with closing(_connect(db_path)) as conn:
+        counts = dict(conn.execute(
+            """SELECT
+                   COUNT(*) AS flagged_total,
+                   SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed,
+                   SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                   SUM(CASE WHEN status = 'flagged' THEN 1 ELSE 0 END) AS awaiting_verdict
+               FROM email_importance_flags WHERE owner_user_id = ?""",
+            (owner_user_id,),
+        ).fetchone())
+        scanned = conn.execute(
+            "SELECT COUNT(*) AS n FROM email_importance_scans WHERE owner_user_id = ?",
+            (owner_user_id,),
+        ).fetchone()["n"]
+        examples = dict(conn.execute(
+            """SELECT
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN label = 1 THEN 1 ELSE 0 END) AS positive,
+                   SUM(CASE WHEN label = 0 THEN 1 ELSE 0 END) AS negative
+               FROM email_importance_examples WHERE owner_user_id = ?""",
+            (owner_user_id,),
+        ).fetchone())
+
+    confirmed = counts["confirmed"] or 0
+    rejected = counts["rejected"] or 0
+    decided = confirmed + rejected
+    return {
+        "messages_judged": scanned,
+        "flagged_total": counts["flagged_total"] or 0,
+        "confirmed": confirmed,
+        "rejected": rejected,
+        "awaiting_verdict": counts["awaiting_verdict"] or 0,
+        "precision": round(confirmed / decided, 3) if decided else None,
+        "examples_total": examples["total"] or 0,
+        "examples_positive": examples["positive"] or 0,
+        "examples_negative": examples["negative"] or 0,
+    }

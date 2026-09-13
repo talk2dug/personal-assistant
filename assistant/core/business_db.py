@@ -941,7 +941,10 @@ def classify_pipeline(item: dict, pending_tool_name: str | None = None) -> str:
                   the owner's own email ('email_bills' -- mail_bills.py; it arrives BY
                   mail, but it's his money and his due date, so it belongs in the lane
                   his finances already live in rather than the mail-hygiene lane a
-                  drafted reply sits in), a linked personal
+                  drafted reply sits in), a provisionally-important email awaiting his
+                  verdict ('email_importance_flags' -- mail_importance.py; same
+                  reasoning again, and more so: the card asks about his finances,
+                  relationships and personal business, not about the mailbox), a linked personal
                   task or credit-dispute item/letter ('personal_tasks', 'dispute_items',
                   'dispute_letters' -- no real call site sets these ref_tables today, but
                   the mapping is here for when one does), and every other pending_actions
@@ -967,8 +970,8 @@ def classify_pipeline(item: dict, pending_tool_name: str | None = None) -> str:
         return "dev_ops"
     if ref_table == "email_drafts":
         return "mail"
-    if ref_table in ("unknown_faces", "email_bills", "personal_tasks", "dispute_items",
-                     "dispute_letters"):
+    if ref_table in ("unknown_faces", "email_bills", "email_importance_flags",
+                     "personal_tasks", "dispute_items", "dispute_letters"):
         return "personal"
     if ref_table == "pending_actions":
         if pending_tool_name in _DEV_OPS_ACTION_TOOLS:

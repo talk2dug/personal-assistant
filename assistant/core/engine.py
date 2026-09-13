@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import business_db, db, staff, ui_content, vision
+from . import business_db, db, mail_db, staff, ui_content, vision
 from .git_ops import check_diff_scope
 from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
@@ -580,6 +580,38 @@ MAIL_TOOLS = [
             "name": "list_mail_folders",
             "description": "List every real IMAP folder on this account, e.g. to find the exact name of Archive/Trash/Junk.",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mark_email_importance",
+            "description": (
+                "Record the user's own verdict that one email WAS or WAS NOT important to him, so "
+                "future importance flagging calibrates to his judgement. Call this whenever he says "
+                "something like 'that one was important', 'that wasn't important', or 'stop flagging "
+                "things like that' about a specific message. Records only: it never reads, moves, "
+                "archives, deletes or replies to the message."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "The email's uid, from list_emails/search_emails results."},
+                    "important": {
+                        "type": "boolean",
+                        "description": "true if he said it WAS important to him, false if he said it wasn't.",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": (
+                            "His own words on why, as close to verbatim as possible (e.g. 'that account is "
+                            "closed, never flag those'). This is the highest-value part of the record."
+                        ),
+                    },
+                    "folder": {"type": "string", "description": "IMAP folder name (default 'INBOX')."},
+                },
+                "required": ["uid", "important"],
+            },
         },
     },
 ]
@@ -1177,7 +1209,13 @@ MAIL_SYSTEM_NOTE = (
     "delete_email only moves a message to Trash — it is not a permanent wipe — but still always requires "
     "confirmation, the same as archive_email; never treat either as safe to run without asking first, no "
     "matter how confident you are about which message the user means. mark_email_read and "
-    "list_mail_folders are not sensitive and run immediately. After any read tool call, answer using the "
+    "list_mail_folders are not sensitive and run immediately. A background pass also tentatively flags "
+    "emails that look important to the user (personal finances, relationships, personal business) and "
+    "asks him in the review queue whether they really were — if he tells you in conversation that a "
+    "particular message was or wasn't important, or that you should stop flagging that sort of thing, "
+    "call mark_email_importance with its uid so his answer trains the next pass. Capture his own "
+    "wording in the note. That tool only records what he said; it never touches the message. After any "
+    "read tool call, answer using the "
     "actual data returned — state it in plain language, as if you already knew it. Never describe the "
     "tool call itself."
 )
@@ -1586,6 +1624,52 @@ def _dispatch_tool_call(
             return json.dumps(phone.mcp_client.call_tool(name, arguments))
         except Exception as e:
             return json.dumps({"error": str(e)})
+
+    if mail is not None and name == "mark_email_importance":
+        # The conversational half of mail_importance.py's feedback loop: the same
+        # labelled example the Review card produces, volunteered in chat instead. Handled
+        # here rather than falling through to MailClient below because it writes the
+        # local training set and touches no mailbox at all -- it is in MAIL_TOOLS for
+        # discoverability, not because it is a mail operation.
+        #
+        # This is the one path that can record the most valuable label of all: "that WAS
+        # important" about a message the scan never flagged (a false negative), which no
+        # flag row exists for and the review queue therefore can never ask about.
+        uid = str(arguments.get("uid") or "").strip()
+        if not uid:
+            return json.dumps({"error": "uid is required"})
+        if "important" not in arguments:
+            return json.dumps({"error": "important (true/false) is required"})
+        important = bool(arguments["important"])
+        folder = arguments.get("folder") or "INBOX"
+        note = (arguments.get("note") or "").strip()
+        mail_db.init_mail_db(db_path)
+
+        flag = mail_db.get_importance_flag_by_uid(db_path, requesting_user_id, folder, uid)
+        if flag is not None:
+            mail_db.record_importance_verdict(
+                db_path, requesting_user_id, flag["id"], important=important, note=note)
+        else:
+            # No flag for this message, so the sender/subject that make an example useful
+            # as a few-shot line have to come from the mailbox. A read-only call, and a
+            # best-effort one: a failure here must not cost him the verdict itself.
+            header = {}
+            try:
+                header = mail.mcp_client.call_tool("read_email", {"uid": uid, "folder": folder}) or {}
+            except Exception:
+                logger.exception("mark_email_importance: could not read uid %s for its header", uid)
+            mail_db.record_importance_example(
+                db_path, requesting_user_id, folder=folder, uid=uid,
+                from_address=str(header.get("from") or ""), subject=str(header.get("subject") or ""),
+                category="", model_reason="", label=important, note=note, source="chat",
+            )
+        stats = mail_db.importance_stats(db_path, requesting_user_id)
+        return json.dumps({
+            "ok": True,
+            "recorded": "important" if important else "not important",
+            "examples_important": stats["examples_positive"],
+            "examples_not_important": stats["examples_negative"],
+        })
 
     if mail is not None and name in mail.tool_names:
         if name in mail.sensitive_tools:

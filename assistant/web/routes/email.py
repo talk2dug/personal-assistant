@@ -154,6 +154,26 @@ async def bills(request: Request, limit: int = 50, status: str | None = None):
     return {"bills": mail_db.list_bills(cfg.db_path, owner["id"], status=status, limit=limit)}
 
 
+@router.get("/importance")
+async def importance(request: Request, limit: int = 50, status: str | None = None):
+    """What the importance scan (mail_importance.py) has provisionally flagged, plus how
+    it is actually doing against the owner's own verdicts so far.
+
+    Read-only like /bills and /junk-log: answering a flag happens in the Review queue,
+    where the verdict becomes a labelled example. The stats block is the point of this
+    endpoint -- a learning loop nobody can see the accuracy of is one nobody will trust,
+    and "flagged 12, you confirmed 9" is the only honest way to show whether the
+    threshold is set anywhere near right."""
+    owner = require_owner(request)
+    _mail(request)  # 503s the same as every other mail route when mail isn't configured
+    cfg = request.app.state.cfg
+    mail_db.init_mail_db(cfg.db_path)
+    return {
+        "flags": mail_db.list_importance_flags(cfg.db_path, owner["id"], status=status, limit=limit),
+        "stats": mail_db.importance_stats(cfg.db_path, owner["id"]),
+    }
+
+
 @router.get("/junk-log")
 async def junk_log(request: Request, limit: int = 50):
     """Read-only audit trail of what the autonomous junk-scan has actually done (see

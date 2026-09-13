@@ -153,6 +153,11 @@ export const api = {
     if (status) params.set('status', status)
     return request(`/api/email/bills?${params.toString()}`)
   },
+  mailImportance: (limit = 50, status) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (status) params.set('status', status)
+    return request(`/api/email/importance?${params.toString()}`)
+  },
 
   activeWork: () => request('/api/active-work'),
   sshHostsStatus: () => request('/api/infra/ssh-hosts'),

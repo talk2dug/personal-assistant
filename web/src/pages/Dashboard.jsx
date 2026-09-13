@@ -9,6 +9,11 @@ import MediaCard from '../components/dashboard/MediaCard'
 import NetworkStatusPill from '../components/dashboard/NetworkStatusPill'
 import SshHealthPanel from '../components/dashboard/SshHealthPanel'
 import WeatherStrip from '../components/dashboard/WeatherStrip'
+import AgentsModal from '../components/modals/AgentsModal'
+import CryptoModal from '../components/modals/CryptoModal'
+import FinanceModal from '../components/modals/FinanceModal'
+import MediaModal from '../components/modals/MediaModal'
+import ScheduleModal from '../components/modals/ScheduleModal'
 import { AgentsSection, CryptoSection, ReviewSection, ScheduleSection } from '../components/StatusPanel'
 import { useJarvis } from '../context/JarvisContext'
 import { useStatusPanel } from '../hooks/useStatusPanel'
@@ -55,6 +60,10 @@ const MODE_LABEL = { idle: 'Standing by', listening: 'Listening', thinking: 'Thi
 export default function Dashboard() {
   const { mode, caption, recording, transcribing, mediaError, toggleRecording, setModalOpen } = useJarvis()
   const [focusMode, setFocusMode] = useState(false)
+  // Which detail modal (if any) is open -- 'agents' | 'crypto' | 'schedule' | 'finance'
+  // | 'media' | null. One piece of state for all five rather than five booleans, since
+  // only one can ever be open at a time.
+  const [openModal, setOpenModal] = useState(null)
   const now = useClock()
   const pendingReview = usePendingReviewCount()
   const {
@@ -91,7 +100,12 @@ export default function Dashboard() {
       {!focusMode && (
         <div className="cc-grid">
           <div className="cc-row cc-row-hero">
-            <div className="dash-panel cc-card-sm">
+            <div
+              className="dash-panel cc-card-sm is-clickable"
+              role="button" tabIndex={0}
+              onClick={() => setOpenModal('agents')}
+              onKeyDown={(e) => e.key === 'Enter' && setOpenModal('agents')}
+            >
               <AgentsSection agents={agents} error={agentsError} />
             </div>
             <div className="cc-hero-row">
@@ -107,10 +121,20 @@ export default function Dashboard() {
           </div>
 
           <div className="cc-row">
-            <div className="dash-panel cc-card-sm">
+            <div
+              className="dash-panel cc-card-sm is-clickable"
+              role="button" tabIndex={0}
+              onClick={() => setOpenModal('crypto')}
+              onKeyDown={(e) => e.key === 'Enter' && setOpenModal('crypto')}
+            >
               <CryptoSection book={book} hasTraders={cryptoTraders > 0} error={cryptoError} />
             </div>
-            <div className="dash-panel cc-card-sm">
+            <div
+              className="dash-panel cc-card-sm is-clickable"
+              role="button" tabIndex={0}
+              onClick={() => setOpenModal('schedule')}
+              onKeyDown={(e) => e.key === 'Enter' && setOpenModal('schedule')}
+            >
               <ScheduleSection schedule={schedule} error={scheduleError} />
             </div>
             <div className="dash-panel cc-card-sm">
@@ -119,8 +143,8 @@ export default function Dashboard() {
           </div>
 
           <div className="cc-row">
-            <FinanceCard />
-            <MediaCard />
+            <FinanceCard onClick={() => setOpenModal('finance')} />
+            <MediaCard onClick={() => setOpenModal('media')} />
             <GpuCard />
           </div>
 
@@ -162,6 +186,12 @@ export default function Dashboard() {
           </button>
         </div>
       </footer>
+
+      {openModal === 'agents' && <AgentsModal onClose={() => setOpenModal(null)} />}
+      {openModal === 'crypto' && <CryptoModal onClose={() => setOpenModal(null)} />}
+      {openModal === 'schedule' && <ScheduleModal onClose={() => setOpenModal(null)} />}
+      {openModal === 'finance' && <FinanceModal onClose={() => setOpenModal(null)} />}
+      {openModal === 'media' && <MediaModal onClose={() => setOpenModal(null)} />}
     </div>
   )
 }

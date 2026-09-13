@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { api } from '../../api'
 import { fmtBytes } from '../../lib/format'
 
 const POLL_MS = 60000
 
-export default function MediaCard() {
+export default function MediaCard({ onClick }) {
   const [summary, setSummary] = useState(null)
   const [error, setError] = useState(null)
 
@@ -21,7 +20,7 @@ export default function MediaCard() {
   }, [])
 
   return (
-    <Link to="/media" className="dash-card">
+    <button type="button" className="dash-card" onClick={onClick}>
       <span className="hud-label">Media</span>
       {error && <p className="dash-card-error">{error}</p>}
       {!error && !summary && <p className="dash-card-loading">Loading…</p>}
@@ -33,6 +32,6 @@ export default function MediaCard() {
           </div>
         </>
       )}
-    </Link>
+    </button>
   )
 }

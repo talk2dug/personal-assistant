@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { api } from '../../api'
 import { fmtUsd } from '../../lib/format'
 
 const POLL_MS = 30000
 
-export default function FinanceCard() {
+export default function FinanceCard({ onClick }) {
   const [summary, setSummary] = useState(null)
   const [error, setError] = useState(null)
 
@@ -21,7 +20,7 @@ export default function FinanceCard() {
   }, [])
 
   return (
-    <Link to="/finance" className="dash-card">
+    <button type="button" className="dash-card" onClick={onClick}>
       <span className="hud-label">Finance</span>
       {error && <p className="dash-card-error">{error}</p>}
       {!error && !summary && <p className="dash-card-loading">Loading…</p>}
@@ -31,6 +30,6 @@ export default function FinanceCard() {
           <div className="dash-card-sub">{(summary.accounts || []).length} accounts</div>
         </>
       )}
-    </Link>
+    </button>
   )
 }

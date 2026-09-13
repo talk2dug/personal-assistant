@@ -274,6 +274,29 @@ export const api = {
     request('/api/finance/safety-buffer', { method: 'PUT', body: JSON.stringify({ safety_buffer: safetyBuffer }) }),
   financeInsights: () => request('/api/finance/insights'),
   financeNetWorth: () => request('/api/finance/net-worth'),
+
+  // Debts. listDebts defaults to tracked-only: a debt the mail sweep found in his history
+  // is a PROPOSAL until he confirms it, and must never be shown as money he owes.
+  listDebts: ({ status, includeProposed } = {}) => {
+    const params = new URLSearchParams()
+    if (status) params.set('status', status)
+    if (includeProposed) params.set('include_proposed', 'true')
+    const qs = params.toString()
+    return request(`/api/debts${qs ? `?${qs}` : ''}`)
+  },
+  debtSummary: () => request('/api/debts/summary'),
+  debtProposals: () => request('/api/debts/proposals'),
+  debtSweepStatus: () => request('/api/debts/sweep-status'),
+  createDebt: (debt) => request('/api/debts', { method: 'POST', body: JSON.stringify(debt) }),
+  updateDebt: (id, patch) =>
+    request(`/api/debts/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  setDebtPriority: (id, priority) =>
+    request(`/api/debts/${id}/priority`, { method: 'PUT', body: JSON.stringify({ priority }) }),
+  debtObservations: (id) => request(`/api/debts/${id}/observations`),
+  addDebtObservation: (id, observation) =>
+    request(`/api/debts/${id}/observations`, { method: 'POST', body: JSON.stringify(observation) }),
+  resolveDebtProposal: (id, verdict, note) =>
+    request(`/api/debts/${id}/resolve`, { method: 'POST', body: JSON.stringify({ verdict, note }) }),
 }
 
 export { ApiError }

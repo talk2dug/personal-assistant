@@ -162,6 +162,49 @@ class MailClient:
         finally:
             conn.logout()
 
+    def search_uids(self, terms: list, folder: str = "INBOX", limit: int = 500) -> dict:
+        """UIDs in `folder` matching ANY of `terms`, newest-first — the narrowing step in
+        front of an LLM classification pass (see mail_debts.py).
+
+        `terms` is a list of (criterion, value) pairs, e.g. ("TEXT", "minimum payment"),
+        ("SUBJECT", "statement"), ("FROM", "capitalone.com"), letting a caller mix
+        whole-message phrase matches with sender-domain matches in one go.
+
+        Deliberately returns UIDs ONLY, no headers. A historical sweep across a mailbox
+        with tens of thousands of messages shortlists thousands of candidates but then
+        skips most of them against its own ledger, so fetching a header for every hit
+        would be IMAP round trips spent almost entirely on messages it has already judged.
+        The caller fetches only what it is actually about to read.
+
+        One connection for every term rather than one per term (the older search() opens
+        its own), and each term is issued as its own UID SEARCH rather than being folded
+        into a nested IMAP OR expression: a 40-term OR is one server round trip instead of
+        40, but it is also one malformed byte away from matching nothing at all, silently,
+        against a real mailbox nothing here is allowed to test against. A term the server
+        rejects is skipped so the rest of the sweep still runs.
+
+        Read-only: the mailbox is selected readonly=True, and no flag, move or delete is
+        possible from here.
+        """
+        conn = self._imap()
+        try:
+            conn.select(folder, readonly=True)
+            found: set[str] = set()
+            for criterion, value in terms:
+                try:
+                    typ, data = conn.uid("search", None, criterion, f'"{value}"')
+                except imaplib.IMAP4.error:
+                    continue
+                if typ != "OK" or not data or not data[0]:
+                    continue
+                found.update(raw.decode() for raw in data[0].split())
+            # Newest first: UIDs ascend with arrival, so the most recent statements — the
+            # ones whose balances are still true — are what a capped run spends itself on.
+            ordered = sorted(found, key=lambda u: int(u) if u.isdigit() else 0, reverse=True)
+            return {"folder": folder, "uids": ordered[:limit], "matched": len(found)}
+        finally:
+            conn.logout()
+
     def read_message(self, uid: str, folder: str = "INBOX", max_chars: int = 4000) -> dict:
         conn = self._imap()
         try:

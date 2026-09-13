@@ -16,7 +16,11 @@ already is -- the sensitive_tools/pending_actions gate on LetterStreamContext, p
 test_engine_letterstream.py -- so a dispute letter can only ever actually be mailed after
 the owner explicitly confirms the recipient, the letter text, and the quoted cost.
 """
-from . import db, finance, kitchen_tools, meal_plan_db, personal_db
+import logging
+
+from . import business_db, db, finance, kitchen_tools, meal_plan_db, personal_db
+
+logger = logging.getLogger(__name__)
 
 # The three national bureaus' published dispute-processing addresses, so the model isn't
 # asked to know or guess them and the owner isn't asked to type them every time. These
@@ -384,6 +388,147 @@ PERSONAL_TOOLS = [
         "description": "The current safety-buffer cushion used by get_safe_to_spend (defaults to $0 until he sets one).",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
+
+    # --- debts ------------------------------------------------------------------------
+    # He has no written list of his debts and isn't going to make one: "most of the debt is
+    # in there [his email] and i dont have it written down, also when text messages come in
+    # ill let jarvis kow and he can add them as well". These tools ARE that second channel.
+    # A balance that arrived by text, a figure he read off a statement, a collections call
+    # he took -- he says it, and it lands against the right creditor.
+    {"type": "function", "function": {
+        "name": "list_debts",
+        "description": (
+            "List the debts he's tracking — creditor, current balance and when it was last "
+            "observed, rate, minimum payment, his payoff priority, and where each number "
+            "came from. Balances are dated observations, so 'current' always means 'as of' "
+            "a date. Use this before recording a balance so you know which accounts exist."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "status": {"type": "string", "enum": ["active", "paid_off", "in_dispute", "closed"]},
+            "include_proposed": {
+                "type": "boolean",
+                "description": (
+                    "Also include debts found in his email that he hasn't confirmed yet. "
+                    "Default false — unconfirmed finds are guesses and are not part of his "
+                    "debt picture. Never present a proposed debt as one he owes."
+                ),
+            },
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "record_debt_balance",
+        "description": (
+            "Record a debt balance he just told you — the main way debt gets into the "
+            "tracker apart from the email sweep. Use it whenever he states a balance, "
+            "however casually ('got a text from Capital One, balance is $4,200', 'the "
+            "Navient loan is down to 18k'). It matches an existing debt where one "
+            "plausibly matches, creates one where it doesn't, and — this matters — returns "
+            "needs_disambiguation instead of guessing when he has more than one account "
+            "with that creditor and hasn't said which. When that happens, ASK him which "
+            "account he means and call this again with debt_id; do not pick one. Record "
+            "only figures he actually states: never estimate a balance, and never carry a "
+            "number over from an older statement as if he'd just said it."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "creditor": {"type": "string", "description": "Who the money is owed to, e.g. 'Capital One'."},
+            "balance": {"type": "number", "description": "The outstanding balance owed, as a plain number."},
+            "balance_text": {
+                "type": "string",
+                "description": (
+                    "Use INSTEAD of balance when what he said isn't one clear number "
+                    "('somewhere between 800 and 1200'). Stored as his words, with no "
+                    "figure invented from it."
+                ),
+            },
+            "debt_id": {"type": "integer", "description": "Target a specific tracked debt — use after a needs_disambiguation answer."},
+            "account_last4": {"type": "string", "description": "Last 4 of the account only, if he says it. Never a full account number."},
+            "apr": {"type": "number", "description": "Interest rate as a percentage, e.g. 24.99 — only if he states it."},
+            "minimum_payment": {"type": "number"},
+            "kind": {
+                "type": "string",
+                "enum": ["credit_card", "loan", "student_loan", "auto", "mortgage", "medical", "collections", "other"],
+                "description": "Only used when this creates a new debt.",
+            },
+            "observed_on": {"type": "string", "description": "Local ISO date the figure was true; defaults to today."},
+            "notes": {"type": "string", "description": "Anything he said about it that the numbers don't capture."},
+        }, "required": ["creditor"]},
+    }},
+    {"type": "function", "function": {
+        "name": "update_debt",
+        "description": (
+            "Correct or update a tracked debt's details — the creditor's name, the account "
+            "ending, what kind of debt it is, its due day, notes, or its status (mark it "
+            "paid_off when he says it's cleared, in_dispute when he's disputing it, closed "
+            "when the account is gone). This never changes a balance: a balance is a dated "
+            "observation, so record a new one with record_debt_balance instead — that's "
+            "what makes the trend real."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "debt_id": {"type": "integer"},
+            "creditor": {"type": "string"},
+            "account_last4": {"type": "string"},
+            "kind": {
+                "type": "string",
+                "enum": ["credit_card", "loan", "student_loan", "auto", "mortgage", "medical", "collections", "other"],
+            },
+            "status": {"type": "string", "enum": ["active", "paid_off", "in_dispute", "closed"]},
+            "due_day": {"type": "integer", "description": "Day of the month the payment is due, 1-31."},
+            "notes": {"type": "string"},
+        }, "required": ["debt_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "set_debt_priority",
+        "description": (
+            "Set HIS payoff priority for one debt (1 = pay this off first), or clear it "
+            "with priority 0. Only ever call this for an order he actually states. He was "
+            "explicit that assigning payoff priorities is a joint, ongoing effort, so "
+            "suggest and discuss freely — get_debt_summary gives you both standard "
+            "strategies ranked — but never assign an order yourself and never present a "
+            "suggestion as a decided plan."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "debt_id": {"type": "integer"},
+            "priority": {"type": "integer", "description": "1 = first. 0 clears the priority."},
+        }, "required": ["debt_id", "priority"]},
+    }},
+    {"type": "function", "function": {
+        "name": "get_debt_summary",
+        "description": (
+            "The whole debt picture: total owed, total minimum payments, estimated monthly "
+            "interest, which debt is costing the most, how many balances aren't known, and "
+            "BOTH standard payoff orderings (avalanche = highest rate first, cheapest "
+            "overall; snowball = smallest balance first, easiest to sustain) as "
+            "suggestions. Present them as options for him to pick between, never as an "
+            "assigned plan. Say plainly that the total is a floor when unknown_balance_count "
+            "is above zero — he's assembling this picture precisely because he doesn't know it."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "list_debt_proposals",
+        "description": (
+            "Debts found in his email history by the mail sweep that he hasn't confirmed "
+            "yet. These are guesses, not his debts — they're excluded from every total "
+            "until he confirms one. Walk him through them when he asks what the scanner "
+            "found."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "resolve_debt_proposal",
+        "description": (
+            "Record his verdict on a debt found in his email: confirm it (it becomes a "
+            "tracked debt, keeping every balance observation the sweep found for it) or "
+            "dismiss it (it's wrong, or not his). Only ever call this on an explicit answer "
+            "from him — confirming a guess on his behalf puts money in his debt picture "
+            "that he never agreed was there."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "debt_id": {"type": "integer"},
+            "verdict": {"type": "string", "enum": ["confirm", "dismiss"]},
+            "note": {"type": "string", "description": "Anything he said about why."},
+        }, "required": ["debt_id", "verdict"]},
+    }},
     {"type": "function", "function": {
         "name": "set_safety_buffer",
         "description": (
@@ -431,6 +576,22 @@ PERSONAL_SYSTEM_NOTE = (
     "projected balance will hit before his next payday, minus his safety buffer "
     "(get_safety_buffer/set_safety_buffer) — a real pay-period-aware answer, not a flat "
     "category cap."
+    " You also keep his DEBT tracker, and you should understand why it works the way it "
+    "does: he has no written list of his debts and isn't going to make one — most of it "
+    "sits in his email, and the rest arrives as texts and physical mail. So the picture "
+    "gets assembled. The email sweep proposes debts it finds in his mail history and you "
+    "walk him through them (list_debt_proposals, resolve_debt_proposal); anything he tells "
+    "you directly goes straight in with record_debt_balance. Use that tool any time he "
+    "states a balance, however offhand — that is the whole second channel. If it comes "
+    "back needs_disambiguation he has more than one account with that creditor: ask him "
+    "which, never guess, because attaching one card's balance to another card's history "
+    "corrupts both and can't be spotted afterwards. Balances are dated observations, never "
+    "overwritten, so always say what a number is 'as of' and never present an old balance "
+    "as current. Never estimate a balance, a rate or a payoff figure he hasn't given you. "
+    "Payoff priority is HIS: get_debt_summary ranks both standard strategies for you to "
+    "put to him, but only set_debt_priority — on an order he actually states — decides "
+    "anything. He confirmed assigning priorities is a joint, ongoing effort, so keep "
+    "raising it, and keep it a conversation rather than a plan you hand him."
 )
 
 
@@ -585,10 +746,170 @@ class PersonalClient:
             db.set_setting(db_path, db.FINANCE_SAFETY_BUFFER_SETTING, str(float(value)))
             return {"ok": True, "safety_buffer": float(value)}
 
+        if name == "list_debts":
+            include_proposed = bool(arguments.get("include_proposed"))
+            return {"debts": personal_db.list_debts(
+                db_path, owner, tracking_state=None if include_proposed else "tracked",
+                status=arguments.get("status"))}
+        if name == "record_debt_balance":
+            return self._record_debt_balance(arguments)
+        if name == "update_debt":
+            return self._update_debt(arguments)
+        if name == "set_debt_priority":
+            # 0 clears rather than ranking something first -- there is no "priority zero",
+            # and a tool schema can't express "an integer or null".
+            priority = arguments.get("priority")
+            ok = personal_db.set_debt_priority(
+                db_path, owner, arguments["debt_id"], None if not priority else int(priority))
+            return {"ok": ok} if ok else {"error": "debt not found"}
+        if name == "get_debt_summary":
+            return personal_db.debt_summary(db_path, owner)
+        if name == "list_debt_proposals":
+            proposals = personal_db.list_debts(db_path, owner, tracking_state="proposed")
+            return {
+                "proposals": proposals,
+                "note": (
+                    "These were read out of his email and he has NOT confirmed them. They "
+                    "are excluded from every debt total until he does. Do not present them "
+                    "as debts he owes."
+                ),
+            }
+        if name == "resolve_debt_proposal":
+            return self._resolve_debt_proposal(arguments)
+
         if name in _KITCHEN_TOOL_NAMES:
             return kitchen_tools.dispatch(db_path, owner, name, arguments, kroger_mcp_client=self.kroger)
 
         return {"error": f"unknown personal tool {name}"}
+
+    # --- debts ---------------------------------------------------------------------
+
+    @staticmethod
+    def _stated_amount(arguments: dict, number_key: str, text_key: str | None = None) -> tuple:
+        """(text, value) for a figure he stated. A plain number keeps a rendered text form
+        alongside it; free text he gave instead ("between 800 and 1200") is stored as his
+        words with the numeric column left NULL rather than having a figure invented from
+        it -- the same paired text/typed discipline mail_bills.py established."""
+        raw_text = str(arguments.get(text_key) or "").strip() if text_key else ""
+        value = arguments.get(number_key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            value = None
+        if value is not None:
+            return (raw_text or f"{float(value):,.2f}"), float(value)
+        return raw_text, None
+
+    def _record_debt_balance(self, arguments: dict) -> dict:
+        db_path, owner = self.db_path, self.owner_user_id
+        creditor = str(arguments.get("creditor") or "").strip()
+        account_last4 = personal_db.sanitize_account_last4(arguments.get("account_last4"))
+        balance_text, balance = self._stated_amount(arguments, "balance", "balance_text")
+        apr_text, apr = self._stated_amount(arguments, "apr")
+        if apr is not None:
+            apr_text = f"{apr}%"
+        minimum_text, minimum = self._stated_amount(arguments, "minimum_payment")
+
+        if not creditor and arguments.get("debt_id") is None:
+            return {"error": "creditor is required unless a debt_id is given"}
+        if not balance_text and minimum is None:
+            return {"error": (
+                "nothing to record — give the balance he actually stated, or use "
+                "balance_text for wording that isn't a single number"
+            )}
+
+        kind = arguments.get("kind") or "credit_card"
+        if kind not in personal_db.DEBT_KINDS:
+            return {"error": f"kind must be one of {sorted(personal_db.DEBT_KINDS)}"}
+
+        debt_id = arguments.get("debt_id")
+        created = False
+        if debt_id is not None:
+            if personal_db.get_debt(db_path, owner, debt_id) is None:
+                return {"error": "debt not found"}
+        else:
+            match = personal_db.find_matching_debt(db_path, owner, creditor, account_last4)
+            if match["ambiguous"]:
+                # The one case where guessing does damage that can't be spotted later, so
+                # nothing is written and the question goes back to him.
+                candidates = [
+                    {"debt_id": d["id"], "creditor": d["creditor"],
+                     "account_last4": d["account_last4"],
+                     "current_balance": d["current_balance"],
+                     "current_balance_observed_on": d["current_balance_observed_on"]}
+                    for d in personal_db.list_debts(db_path, owner, tracking_state=None)
+                    if d["creditor_key"] == personal_db.normalize_creditor(creditor)
+                ]
+                return {
+                    "needs_disambiguation": True, "reason": match["reason"],
+                    "candidates": candidates,
+                    "message": (
+                        "Nothing recorded. Ask him which of these accounts he means and "
+                        "call record_debt_balance again with that debt_id — do not pick one."
+                    ),
+                }
+            debt_id = match["debt_id"]
+            if debt_id is None:
+                # He told Jarvis about it directly, so it is tracked from the start: a
+                # thing he said is not a guess awaiting his confirmation.
+                debt_id = personal_db.create_debt(
+                    db_path, owner, creditor, account_last4=account_last4, kind=kind,
+                    tracking_state="tracked", origin="chat",
+                    origin_detail="he told Jarvis directly", notes=arguments.get("notes"))
+                created = True
+            elif match.get("learned_account_last4"):
+                personal_db.update_debt(
+                    db_path, owner, debt_id, account_last4=match["learned_account_last4"])
+
+        observation_id = personal_db.add_debt_observation(
+            db_path, debt_id, observed_on=arguments.get("observed_on"),
+            balance_text=balance_text, balance=balance, apr_text=apr_text, apr=apr,
+            minimum_payment_text=minimum_text, minimum_payment=minimum,
+            source="chat", source_detail="he told Jarvis directly",
+            confirmed=True, notes=arguments.get("notes"),
+        )
+        return {
+            "ok": True, "debt_id": debt_id, "created_debt": created,
+            "observation_id": observation_id, "match_reason": None if created else "matched an existing debt",
+            "debt": personal_db.get_debt(db_path, owner, debt_id),
+        }
+
+    def _update_debt(self, arguments: dict) -> dict:
+        fields = {k: arguments.get(k) for k in
+                  ("creditor", "account_last4", "kind", "status", "due_day", "notes")}
+        try:
+            ok = personal_db.update_debt(self.db_path, self.owner_user_id, arguments["debt_id"], **fields)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        if not ok:
+            return {"error": "debt not found, or nothing to change"}
+        return {"ok": True, "debt": personal_db.get_debt(self.db_path, self.owner_user_id, arguments["debt_id"])}
+
+    def _resolve_debt_proposal(self, arguments: dict) -> dict:
+        db_path, owner = self.db_path, self.owner_user_id
+        debt_id = arguments["debt_id"]
+        verdict = arguments.get("verdict")
+        if verdict not in ("confirm", "dismiss"):
+            return {"error": "verdict must be 'confirm' or 'dismiss'"}
+        debt = personal_db.get_debt(db_path, owner, debt_id)
+        if debt is None:
+            return {"error": "debt not found"}
+        if debt["tracking_state"] != "proposed":
+            return {"error": f"that debt is already {debt['tracking_state']}, not awaiting a verdict"}
+
+        state = "tracked" if verdict == "confirm" else "dismissed"
+        personal_db.update_debt(db_path, owner, debt_id, tracking_state=state)
+        # Clear the card too, or the same question sits on the Review page forever -- the
+        # exact dangling-card problem get_review_item_by_ref exists to solve.
+        try:
+            card = business_db.get_review_item_by_ref(db_path, owner, "debts", debt_id)
+            if card is not None and card["status"] == "pending":
+                business_db.decide_review_item(
+                    db_path, owner, card["id"],
+                    "approved" if verdict == "confirm" else "rejected",
+                    note=arguments.get("note"))
+        except Exception:
+            logger.exception("failed to close the review card for debt %s", debt_id)
+        return {"ok": True, "debt_id": debt_id, "tracking_state": state,
+                "debt": personal_db.get_debt(db_path, owner, debt_id)}
 
     def _draft_dispute_letter(self, arguments: dict) -> dict:
         db_path, owner = self.db_path, self.owner_user_id

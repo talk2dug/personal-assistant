@@ -9,6 +9,7 @@ import RecurringCharges from '../components/finance/RecurringCharges'
 import SafeToSpendBanner from '../components/finance/SafeToSpendBanner'
 import InsightsPanel from '../components/finance/InsightsPanel'
 import NetWorthChart from '../components/finance/NetWorthChart'
+import DebtsPanel from '../components/finance/DebtsPanel'
 
 export default function Finance() {
   const [summary, setSummary] = useState(null)
@@ -45,6 +46,14 @@ export default function Finance() {
         investmentBalance={summary.investment_balance}
         liabilityBalance={summary.liability_balance}
       />
+
+      {/* Sits directly under the balances, above everything else: a debt picture that is
+          three scrolls down is one he won't look at, and this is the thing he actually
+          asked to be able to see. */}
+      <section>
+        <h3>Debts</h3>
+        <DebtsPanel />
+      </section>
 
       <section>
         <h3>Recurring bills &amp; income</h3>

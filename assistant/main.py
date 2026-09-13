@@ -176,6 +176,12 @@ def main() -> None:
         # cost of getting them wrong is the owner ignoring the review queue.
         mail_importance_confidence_threshold=cfg.mail_importance_confidence_threshold,
         mail_importance_max_flags_per_run=cfg.mail_importance_max_flags_per_run,
+        # The historical debt sweep: a slow backlog pass over his mail history, bounded
+        # per run because it is working through tens of thousands of messages and is
+        # always behind by design.
+        mail_debts_interval_minutes=cfg.mail_debts_interval_minutes,
+        mail_debts_per_run_limit=cfg.mail_debts_per_run_limit,
+        mail_debts_shortlist_limit=cfg.mail_debts_shortlist_limit,
         kroger_sync_interval_seconds=cfg.kroger_sync_interval_seconds,
         # Watchdog: notices a due personal task or a Review item nobody came back to,
         # instead of the owner only finding out when he happens to ask or check the page.

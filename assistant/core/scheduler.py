@@ -11,7 +11,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import (
     agents, business_db, db, github_client, kitchen_db, location, mail_bills, mail_db,
-    mail_importance, mail_triage, market_data, paper_trading, personal_agents, personal_db, staff,
+    mail_debts, mail_importance, mail_triage, market_data, paper_trading, personal_agents,
+    personal_db, staff,
 )
 from .mail_client import JUNK_FOLDER
 from .engine import handle_message
@@ -49,6 +50,9 @@ def start(
     mail_importance_interval_minutes: int = 240, mail_importance_scan_limit: int = 20,
     mail_importance_confidence_threshold: float = mail_importance.DEFAULT_CONFIDENCE_THRESHOLD,
     mail_importance_max_flags_per_run: int = mail_importance.DEFAULT_MAX_FLAGS_PER_RUN,
+    mail_debts_interval_minutes: int = 360,
+    mail_debts_per_run_limit: int = mail_debts.DEFAULT_PER_RUN_LIMIT,
+    mail_debts_shortlist_limit: int = mail_debts.DEFAULT_SHORTLIST_LIMIT,
     kroger_sync_interval_seconds: int = 3600,
     task_watchdog_interval_seconds: int = 60,
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
@@ -218,6 +222,35 @@ def start(
                 ),
                 "interval", minutes=mail_importance_interval_minutes, id="mail_importance_agent",
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
+            )
+
+        # The historical debt sweep (see mail_debts.py). Same gate as the three above, and
+        # the same safety properties -- read-only, no reminder, no recurring charge -- but
+        # a fundamentally different job shape: the other three look at recent mail, and
+        # the owner's debt is not in his recent mail, it's in his history ("most of the
+        # debt is in there and i dont have it written down").
+        #
+        # So this is a BACKLOG pass, and the cadence reflects that rather than any
+        # urgency: a six-hourly tick with a small per-run cap works steadily backwards
+        # through a mailbox of tens of thousands of messages, shortlisting by IMAP search
+        # before it classifies anything and skipping everything its ledger has already
+        # judged. There is no run in which it is behind -- that is the normal state -- so
+        # a slow interval costs nothing, while a fast one would just spend LLM calls
+        # sooner on the same finite backlog.
+        #
+        # Everything it finds is PROPOSED (tracking_state='proposed') plus a review card.
+        # Nothing it finds enters his debt totals, and it never writes a payoff priority.
+        if owner is not None:
+            scheduler.add_job(
+                _guarded_simple(
+                    "mail_debts",
+                    lambda: mail_debts.run_debt_mail_sweep_once(
+                        db_path, llm, mail.mcp_client, owner["id"],
+                        per_run_limit=mail_debts_per_run_limit,
+                        shortlist_limit=mail_debts_shortlist_limit),
+                ),
+                "interval", minutes=mail_debts_interval_minutes, id="mail_debts_agent",
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=4),
             )
 
     if business is not None and llm is not None:

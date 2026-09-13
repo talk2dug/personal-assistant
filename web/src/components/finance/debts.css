@@ -1,0 +1,347 @@
+/* Debt tracker panel (Finance page). Follows the same HUD language as the rest of the
+   app -- cyan on dark, angled card corners, mono figures -- with red reserved for the two
+   things that should feel bad: a balance going the wrong way, and what the interest costs
+   him every month. */
+
+.debts-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.debt-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.debt-total-card {
+  flex: 1 1 200px;
+}
+
+/* The total is a floor, not a truth -- he is assembling this picture precisely because he
+   doesn't know it, so the caveat sits directly under the number rather than in a tooltip. */
+.debt-total-caveat {
+  margin-top: 6px;
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.debt-total-interest .card-amount {
+  color: var(--red);
+  text-shadow: 0 0 14px rgba(255, 77, 77, 0.35);
+}
+
+/* --- one tracked debt --- */
+
+.debt-row {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-left: 2px solid var(--border);
+  padding: 12px 14px;
+}
+
+.debt-row.inactive {
+  opacity: 0.55;
+  border-left-color: var(--text-faint);
+}
+
+.debt-row-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.debt-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 200px;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.debt-creditor {
+  font-family: var(--font-hud);
+  font-size: 16px;
+  letter-spacing: 0.04em;
+  color: var(--cyan-bright);
+}
+
+.debt-acct {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.debt-kind,
+.debt-status {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  padding: 1px 6px;
+}
+
+.debt-status {
+  color: var(--amber);
+  border-color: rgba(255, 176, 32, 0.35);
+}
+
+.debt-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+
+.debt-figure {
+  display: flex;
+  flex-direction: column;
+  min-width: 92px;
+}
+
+.debt-figure-label {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.debt-figure-value {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  color: var(--cyan-bright);
+}
+
+.debt-figure-cost .debt-figure-value {
+  color: var(--red);
+}
+
+/* Provenance: every figure says when it was true and who said so, because "this came from
+   a statement email" and "he told me this directly" are not the same claim. */
+.debt-asof {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.debt-trend {
+  flex: 0 1 160px;
+  min-width: 120px;
+}
+
+.debt-trend-delta {
+  display: block;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.debt-trend.falling .debt-trend-delta {
+  color: var(--cyan);
+}
+
+.debt-trend.rising .debt-trend-delta {
+  color: var(--red);
+}
+
+.debt-trend-empty {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.debt-priority {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.debt-priority select {
+  min-width: 80px;
+}
+
+/* --- expanded: the provenance trail --- */
+
+.debt-detail {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-dim);
+}
+
+.debt-record {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.debt-record label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.debt-group-label {
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.debt-observation {
+  display: grid;
+  grid-template-columns: 96px 110px 120px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-dim);
+  font-size: 12px;
+}
+
+.debt-observation-date,
+.debt-observation-balance {
+  font-family: var(--font-mono);
+  color: var(--cyan-bright);
+}
+
+.debt-observation-source {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.debt-observation-source.src-email {
+  color: var(--amber);
+}
+
+.debt-observation-detail {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- proposals: guesses, visually separated from what he actually owes --- */
+
+.debt-proposals {
+  border: 1px dashed rgba(255, 176, 32, 0.4);
+  padding: 12px 14px;
+}
+
+.debt-proposals .debt-group-label {
+  color: var(--amber);
+}
+
+.debt-proposal {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.debt-proposal:last-child {
+  border-bottom: none;
+}
+
+.debt-proposal-what {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.debt-proposal-figure {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  color: var(--amber);
+}
+
+.debt-proposal-origin {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.debt-proposal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.debt-confirm {
+  border-color: var(--cyan);
+  color: var(--cyan-bright);
+}
+
+/* --- suggested payoff order: an offer, never a plan --- */
+
+.debt-suggestions {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  padding: 12px 14px;
+}
+
+.debt-strategy-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.debt-strategy-toggle button.active {
+  border-color: var(--cyan);
+  color: var(--cyan-bright);
+}
+
+.debt-strategy-why {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.debt-suggested-order {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.debt-suggested-order li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  font-family: var(--font-hud);
+  letter-spacing: 0.04em;
+  color: var(--cyan-bright);
+}
+
+.debt-suggested-figure {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+@media (max-width: 720px) {
+  .debt-observation {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .debt-observation-detail {
+    grid-column: 1 / -1;
+  }
+}

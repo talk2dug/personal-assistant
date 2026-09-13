@@ -202,6 +202,35 @@ CREATE TABLE IF NOT EXISTS email_importance_examples (
 );
 CREATE INDEX IF NOT EXISTS idx_email_importance_examples_label
     ON email_importance_examples(owner_user_id, label, created_at);
+
+-- The historical debt sweep's "already judged this one" ledger (mail_debts.py). Same
+-- reasoning as email_bill_scans -- one LLM round trip per message, ever, negatives
+-- included -- but here it is doing considerably more work than saving money.
+--
+-- mail_bills.py only ever looks at the most recent messages, and the owner's debt is not
+-- in his recent messages, it is in his history: "most of the debt is in there and i dont
+-- have it written down". So the sweep runs BACKWARDS through a mailbox with tens of
+-- thousands of messages, across every folder, and cannot finish in one pass. This table
+-- is what makes that bounded and resumable: each run shortlists candidates by IMAP
+-- search, skips everything already in here, classifies up to a per-run cap, and stops.
+-- Run it again and it picks up where it left off. Interrupt it mid-run and the messages
+-- it already judged stay judged.
+--
+-- folder is part of the key because the same UID means different messages in different
+-- folders. That also means the SAME statement filed in both INBOX and an archive folder
+-- is legitimately judged twice -- deduplicating THAT is a separate job, done on the debt
+-- side by personal_db.has_equivalent_observation, not here.
+CREATE TABLE IF NOT EXISTS email_debt_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    folder TEXT NOT NULL DEFAULT 'INBOX',
+    uid TEXT NOT NULL,
+    is_debt INTEGER NOT NULL DEFAULT 0,
+    debt_id INTEGER,           -- the debts row this message became evidence for, if any
+    scanned_at TEXT NOT NULL,
+    UNIQUE(owner_user_id, folder, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_email_debt_scans_debt ON email_debt_scans(debt_id);
 """
 
 
@@ -715,4 +744,71 @@ def importance_stats(db_path: str, owner_user_id: int) -> dict:
         "examples_total": examples["total"] or 0,
         "examples_positive": examples["positive"] or 0,
         "examples_negative": examples["negative"] or 0,
+    }
+
+
+# --- the historical debt sweep's scan ledger (see email_debt_scans above, mail_debts.py) --
+
+def has_scanned_for_debt(db_path: str, owner_user_id: int, folder: str, uid: str) -> bool:
+    """Whether the debt sweep has already judged this message -- debt or not. This is the
+    whole resumability mechanism: a run shortlists thousands of candidates and skips
+    everything already in here, so repeated runs make progress through a backlog instead
+    of re-doing the front of it."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM email_debt_scans WHERE owner_user_id = ? AND folder = ? AND uid = ?",
+            (owner_user_id, folder, uid),
+        ).fetchone()
+        return row is not None
+
+
+def scanned_debt_uids(db_path: str, owner_user_id: int, folder: str) -> set:
+    """Every uid in `folder` this sweep has already judged, in one query.
+
+    The per-uid check above is one round trip per candidate, and a shortlist can run to
+    thousands of candidates of which nearly all are already judged -- on a resumed run
+    that is thousands of queries to decide to do nothing. This is the same answer as a set.
+    """
+    with closing(_connect(db_path)) as conn:
+        return {
+            row["uid"] for row in conn.execute(
+                "SELECT uid FROM email_debt_scans WHERE owner_user_id = ? AND folder = ?",
+                (owner_user_id, folder),
+            )
+        }
+
+
+def mark_debt_scanned(
+    db_path: str, owner_user_id: int, folder: str, uid: str, is_debt: bool,
+    debt_id: int | None = None,
+) -> None:
+    """Records that this uid has been judged. Only ever called after a real answer from the
+    model -- a message that couldn't be read, or that blew up mid-classification, is left
+    unmarked on purpose so a later run retries it instead of losing it forever. In a sweep
+    whose whole job is a one-time pass over his history, "lost forever" is literal."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO email_debt_scans (owner_user_id, folder, uid, is_debt, debt_id, scanned_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(owner_user_id, folder, uid) DO NOTHING""",
+            (owner_user_id, folder, uid, int(is_debt), debt_id, _now()),
+        )
+        conn.commit()
+
+
+def debt_scan_stats(db_path: str, owner_user_id: int) -> dict:
+    """How far the sweep has got through his history, per folder -- the only honest answer
+    to "have you finished looking?", which is a question a resumable backlog pass has to be
+    able to answer."""
+    with closing(_connect(db_path)) as conn:
+        rows = _rows(conn.execute(
+            """SELECT folder, COUNT(*) AS judged, SUM(is_debt) AS debts
+               FROM email_debt_scans WHERE owner_user_id = ? GROUP BY folder ORDER BY folder""",
+            (owner_user_id,),
+        ))
+    return {
+        "messages_judged": sum(r["judged"] for r in rows),
+        "debt_messages": sum(r["debts"] or 0 for r in rows),
+        "by_folder": [{"folder": r["folder"], "judged": r["judged"], "debts": r["debts"] or 0}
+                      for r in rows],
     }

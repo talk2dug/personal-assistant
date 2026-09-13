@@ -78,6 +78,15 @@ class Config:
     # Junk-folder round trip, so both start deliberately conservative.
     mail_importance_confidence_threshold: float = 0.75
     mail_importance_max_flags_per_run: int = 3
+    # The historical debt sweep (see mail_debts.py). Unlike the three passes above, this
+    # one works BACKWARDS through a mailbox with tens of thousands of messages, so it is
+    # explicitly a backlog job: a slow cadence and a small per-run cap, making progress
+    # over many runs rather than one heroic pass. per_run_limit is the real cost lever
+    # (LLM calls per run); shortlist_limit bounds the IMAP side independently, so a folder
+    # whose search matches thousands still returns a bounded, newest-first list.
+    mail_debts_interval_minutes: int = 360
+    mail_debts_per_run_limit: int = 15
+    mail_debts_shortlist_limit: int = 400
     # How often kitchen_db.sync_kroger_orders runs (see scheduler.py's kroger_sync job).
     # No documented Kroger rate limit exists anywhere in kroger-mcp or its API docs, so
     # this mirrors Era's real-world default rather than inventing a number.
@@ -331,6 +340,9 @@ def load_config(path: str = "config.json") -> Config:
         mail_junk_score_threshold=data.get("mail_junk_score_threshold", 4.0),
         mail_importance_confidence_threshold=data.get("mail_importance_confidence_threshold", 0.75),
         mail_importance_max_flags_per_run=data.get("mail_importance_max_flags_per_run", 3),
+        mail_debts_interval_minutes=data.get("mail_debts_interval_minutes", 360),
+        mail_debts_per_run_limit=data.get("mail_debts_per_run_limit", 15),
+        mail_debts_shortlist_limit=data.get("mail_debts_shortlist_limit", 400),
         kroger_sync_interval_seconds=data.get("kroger_sync_interval_seconds", 3600),
         task_watchdog_interval_seconds=data.get("task_watchdog_interval_seconds", 60),
         review_watchdog_interval_seconds=data.get("review_watchdog_interval_seconds", 900),

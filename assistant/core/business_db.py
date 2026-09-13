@@ -888,6 +888,35 @@ def create_review_item(
         return item_id
 
 
+def refresh_review_item_text(
+    db_path: str, owner_user_id: int, item_id: int, summary: str | None = None,
+    detail: str | None = None,
+) -> bool:
+    """Rewrites a STILL-PENDING card's summary/detail in place, for a card whose evidence
+    keeps accumulating after it was filed.
+
+    The case this exists for is mail_debts.py: a proposed debt's card is filed the first
+    time a statement for that account turns up, and every later statement the historical
+    sweep finds attaches another balance observation to the same proposal rather than
+    filing a second card. Without this, the card he eventually reads would still say what
+    was true after one statement while the debt behind it has twelve.
+
+    Deliberately refuses to touch an item he has already decided: rewriting the text of a
+    card after the fact would change what he appears to have approved.
+    """
+    fields = {k: v for k, v in (("summary", summary), ("detail", detail)) if v is not None}
+    if not fields:
+        return False
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            f"UPDATE review_items SET {sets} WHERE id = ? AND owner_user_id = ? AND status = 'pending'",
+            [*fields.values(), item_id, owner_user_id],
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def _attach_options(conn, items: list[dict]) -> list[dict]:
     if not items:
         return items
@@ -944,7 +973,10 @@ def classify_pipeline(item: dict, pending_tool_name: str | None = None) -> str:
                   drafted reply sits in), a provisionally-important email awaiting his
                   verdict ('email_importance_flags' -- mail_importance.py; same
                   reasoning again, and more so: the card asks about his finances,
-                  relationships and personal business, not about the mailbox), a linked personal
+                  relationships and personal business, not about the mailbox), a debt
+                  proposed from his mail history ('debts' -- mail_debts.py; a tracking_
+                  state='proposed' row awaiting his confirmation before it counts as his),
+                  a linked personal
                   task or credit-dispute item/letter ('personal_tasks', 'dispute_items',
                   'dispute_letters' -- no real call site sets these ref_tables today, but
                   the mapping is here for when one does), and every other pending_actions
@@ -971,7 +1003,7 @@ def classify_pipeline(item: dict, pending_tool_name: str | None = None) -> str:
     if ref_table == "email_drafts":
         return "mail"
     if ref_table in ("unknown_faces", "email_bills", "email_importance_flags",
-                     "personal_tasks", "dispute_items", "dispute_letters"):
+                     "personal_tasks", "dispute_items", "dispute_letters", "debts"):
         return "personal"
     if ref_table == "pending_actions":
         if pending_tool_name in _DEV_OPS_ACTION_TOOLS:

@@ -1,0 +1,402 @@
+/* The Command Center -- kept as its own file rather than appended to index.css (already
+   very large), same precedent StatusPanel.css/active-work.css already set. Reuses the
+   app's existing HUD tokens (--cyan/--amber/--red/--font-hud/--font-display/--font-mono,
+   .hud-label) throughout rather than introducing a second palette. */
+
+.command-center {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 100%;
+}
+
+/* --- top bar ---------------------------------------------------------------- */
+
+.cc-topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.cc-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border: 1px solid var(--border-dim);
+  border-radius: 999px;
+  padding: 5px 12px;
+}
+
+.cc-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #3ddc84;
+  box-shadow: 0 0 6px rgba(61, 220, 132, 0.7);
+}
+
+.cc-clock {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--font-hud);
+  font-size: 13px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.cc-clock-time {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  color: var(--cyan);
+}
+
+.cc-topbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.cc-review-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--amber);
+  color: #1a1200;
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cc-focus-toggle {
+  background: none;
+  border: 1px solid var(--border-dim);
+  color: var(--text-dim);
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.cc-focus-toggle:hover {
+  border-color: var(--cyan-dim);
+  color: var(--cyan);
+}
+
+/* --- hero -------------------------------------------------------------------- */
+
+.cc-hero-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.is-focus .cc-hero-row {
+  flex: 1;
+  justify-content: center;
+  padding: 40px 0;
+}
+
+.cc-hero-caption {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  max-width: 520px;
+}
+
+.cc-hero-mode {
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cyan);
+}
+
+.cc-hero-text {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+/* --- grid of cards ------------------------------------------------------------ */
+
+.cc-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.cc-card-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.dash-panel,
+.dash-card {
+  display: block;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  border-radius: 8px;
+  padding: 14px 16px;
+  text-decoration: none;
+  color: inherit;
+}
+
+a.dash-card {
+  transition: border-color 0.15s, background 0.15s;
+}
+
+a.dash-card:hover {
+  border-color: var(--cyan-dim);
+  background: var(--bg-inset);
+}
+
+.dash-card-figure {
+  font-family: var(--font-display);
+  font-size: 22px;
+  color: var(--cyan-bright);
+  margin-top: 6px;
+}
+
+.dash-card-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.dash-card-error,
+.dash-panel-error {
+  color: var(--red);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.dash-card-loading,
+.dash-panel-loading {
+  color: var(--text-faint);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* --- GPU card status coloring, same convention as .gpu-chip (index.css) --------- */
+
+.gpu-card.ok .dash-card-figure { color: var(--cyan-bright); }
+.gpu-card.reserved .dash-card-figure { color: var(--amber); }
+.gpu-card.down .dash-card-figure { color: var(--red); }
+
+/* --- intelligence feed ---------------------------------------------------------- */
+
+.intel-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.intel-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text);
+  border-left: 2px solid var(--border-dim);
+  padding-left: 8px;
+}
+
+.intel-row a {
+  color: inherit;
+}
+
+.intel-row.intel-live {
+  border-left-color: var(--cyan);
+}
+
+.intel-row.intel-warn {
+  border-left-color: var(--amber);
+  color: var(--amber);
+}
+
+.intel-row.intel-muted {
+  color: var(--text-faint);
+  font-style: italic;
+  border-left-color: transparent;
+}
+
+.intel-eta {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+/* --- SSH host health -------------------------------------------------------------- */
+
+.ssh-host-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.ssh-host-row {
+  display: grid;
+  grid-template-columns: 8px auto auto 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ssh-host-pip {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red);
+}
+
+.ssh-host-row.is-up .ssh-host-pip {
+  background: #3ddc84;
+  box-shadow: 0 0 5px rgba(61, 220, 132, 0.7);
+}
+
+.ssh-host-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ssh-host-badge {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--cyan);
+  border: 1px solid var(--cyan-dim);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.ssh-host-state {
+  grid-column: 4;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.ssh-host-purpose {
+  grid-column: 2 / -1;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- footer ------------------------------------------------------------------- */
+
+.cc-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 16px 0 6px;
+  flex-wrap: wrap;
+}
+
+.footer-pill {
+  border: 1px solid var(--border-dim);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: none;
+}
+
+.footer-link {
+  cursor: pointer;
+  font-family: var(--font-hud);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.cc-talk-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--cyan-dim);
+  border-radius: 999px;
+  padding: 10px 26px;
+  background: var(--bg-inset);
+  color: var(--cyan-bright);
+  font-family: var(--font-hud);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: 0 0 20px rgba(34, 232, 255, 0.12);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.cc-talk-button:hover {
+  box-shadow: 0 0 28px rgba(34, 232, 255, 0.22);
+}
+
+.cc-talk-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cc-talk-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cyan);
+}
+
+.cc-talk-button.is-recording .cc-talk-dot {
+  background: var(--red);
+  box-shadow: 0 0 8px rgba(255, 77, 77, 0.7);
+  animation: hud-pulse 1s ease-in-out infinite;
+}
+
+@media (max-width: 640px) {
+  .cc-topbar {
+    gap: 10px;
+  }
+  .cc-clock {
+    order: 3;
+    width: 100%;
+  }
+  .cc-card-row {
+    grid-template-columns: 1fr;
+  }
+}

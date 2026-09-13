@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useStatusPanel } from '../hooks/useStatusPanel'
+import { departmentLabel, groupByDepartment } from '../lib/agents'
 import './StatusPanel.css'
 
 /**
@@ -42,8 +43,13 @@ function AgentsSection({ agents, error }) {
       <span className="hud-label">Agents</span>
       {error && <div className="status-line status-error">Unavailable — {error}</div>}
       {!error && agents.length === 0 && <div className="status-line status-muted">No agents on staff.</div>}
-      {!error && agents.map((a) => (
-        <div key={a.key} className="status-line">{a.title} — {a.label}</div>
+      {!error && groupByDepartment(agents).map(([dept, members]) => (
+        <div key={dept} className="status-department">
+          <div className="status-department-label">{departmentLabel(dept)}</div>
+          {members.map((a) => (
+            <div key={a.key} className="status-line">{a.title} — {a.label}</div>
+          ))}
+        </div>
       ))}
     </section>
   )

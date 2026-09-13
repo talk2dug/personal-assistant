@@ -677,6 +677,27 @@ body::after {
   animation-duration: 0.9s;
 }
 
+/* .hero-orb reuses .orb-canvas/.orb-core-glow's drawing surface but owns its own sizing
+   box (Command Center's hero slot isn't the whole-page .orb-canvas-wrap layout) --
+   see HeroOrb.jsx. */
+.hero-orb {
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  margin: 0 auto;
+}
+
+.hero-orb-large {
+  width: min(340px, 42vh, 80%);
+  aspect-ratio: 1 / 1;
+}
+
+.hero-orb-small {
+  width: min(160px, 20vh, 60%);
+  aspect-ratio: 1 / 1;
+}
+
 .orb-caption {
   min-height: 44px;
   max-width: 620px;
@@ -1706,6 +1727,12 @@ body::after {
   color: var(--text-dim);
 }
 .office-empty, .office-note { font-size: 12px; color: var(--text-dim); margin: 6px 0 0; }
+
+.staff-department + .staff-department { margin-top: 14px; }
+.staff-department-label {
+  margin: 0 0 4px; font-size: 10px; letter-spacing: 1.8px; text-transform: uppercase;
+  color: var(--cyan-dim);
+}
 
 .staff-list, .queue-list, .tray-list { list-style: none; margin: 0; padding: 0; }
 .staff-row {

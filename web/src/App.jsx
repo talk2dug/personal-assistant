@@ -8,8 +8,10 @@ import Device from './pages/Device'
 import Login from './pages/Login'
 import { sections } from './sections'
 
-/** The orb page is itself a full-screen status display, so the dock would duplicate it. */
-const ORB_PATH = '/chat'
+/** The Command Center already has its own voice bar and text-chat trigger built in, so
+ *  the floating dock (which exists to reach Jarvis from every *other* page) would just
+ *  duplicate it here. */
+const ORB_PATH = '/dashboard'
 
 function NavState() {
   const { mode, recording } = useJarvis()

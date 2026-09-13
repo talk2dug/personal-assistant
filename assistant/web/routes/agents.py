@@ -94,7 +94,7 @@ def _hired_states(db_path: str, now: datetime) -> list[dict]:
         out.append({
             "key": person["key"],
             "title": person["title"],
-            "role": person["department"],
+            "department": person["department"],
             "character": person["character"],
             "hired": True,
             "seniority": person["seniority"],

@@ -39,6 +39,17 @@
   overflow-wrap: anywhere;
 }
 
+.status-department + .status-department {
+  margin-top: 6px;
+}
+
+.status-department-label {
+  font-size: 9.5px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: rgba(34, 232, 255, 0.55);
+}
+
 .status-muted {
   color: rgba(230, 245, 248, 0.45);
   font-style: italic;

@@ -94,6 +94,7 @@ export function useStatusPanel() {
   const agents = (agentStatus?.agents || []).map((a) => ({
     key: a.key,
     title: a.title,
+    department: a.department,
     label: AGENT_STATUS_LABEL[a.status] || a.status,
   }))
 

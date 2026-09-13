@@ -2,7 +2,6 @@
 // component plus one entry here — nothing else needs to change. App.jsx maps this
 // list into both the nav sidebar and the router.
 import Agents from './pages/Agents'
-import Chat from './pages/Chat'
 import Credit from './pages/Credit'
 import Crypto from './pages/Crypto'
 import Dashboard from './pages/Dashboard'
@@ -18,8 +17,7 @@ import Tasks from './pages/Tasks'
 export const sections = [
   // First entry doubles as the default landing route (App.jsx redirects '/' here) --
   // a dashboard is only really a dashboard if it's what you see first.
-  { path: '/dashboard', label: 'Dashboard', element: Dashboard },
-  { path: '/chat', label: 'Chat', element: Chat },
+  { path: '/dashboard', label: 'Command Center', element: Dashboard },
   { path: '/email', label: 'Email', element: Email },
   { path: '/schedule', label: 'Schedule', element: Schedule },
   { path: '/tasks', label: 'Tasks', element: Tasks },

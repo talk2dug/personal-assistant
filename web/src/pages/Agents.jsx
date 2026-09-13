@@ -5,6 +5,7 @@ import {
 import { applyServerState, createCharacter, renderOffice, setDecor, updateCharacter } from '../office/engine'
 import { TILE, loadAssets } from '../office/sprites'
 import { AGENT_STATUS_LABEL as STATUS_LABEL, useAgentStatus } from '../hooks/useAgentStatus'
+import { departmentLabel, groupByDepartment } from '../lib/agents'
 
 export default function Agents() {
   const canvasRef = useRef(null)
@@ -118,16 +119,21 @@ export default function Agents() {
       <div className="office-panels">
         <section className="office-panel">
           <h2>Staff</h2>
-          <ul className="staff-list">
-            {agents.map((a) => (
-              <li key={a.key} className={`staff-row status-${a.status}`}>
-                <span className="staff-pip" />
-                <span className="staff-name">{a.title}</span>
-                <span className="staff-status">{STATUS_LABEL[a.status] || a.status}</span>
-                <span className="staff-detail">{a.detail}</span>
-              </li>
-            ))}
-          </ul>
+          {groupByDepartment(agents).map(([dept, members]) => (
+            <div key={dept} className="staff-department">
+              <h3 className="staff-department-label">{departmentLabel(dept)}</h3>
+              <ul className="staff-list">
+                {members.map((a) => (
+                  <li key={a.key} className={`staff-row status-${a.status}`}>
+                    <span className="staff-pip" />
+                    <span className="staff-name">{a.title}</span>
+                    <span className="staff-status">{STATUS_LABEL[a.status] || a.status}</span>
+                    <span className="staff-detail">{a.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </section>
 
         <section className="office-panel">

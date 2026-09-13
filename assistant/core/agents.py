@@ -29,15 +29,18 @@ logger = logging.getLogger(__name__)
 
 # The staff, in one place, so the API and the office UI can't disagree about who works
 # here or what they're called. `desk` is the order they're seated in; `character` picks
-# which sprite sheet they wear.
+# which sprite sheet they wear. `department` uses the same vocabulary as hired staff's
+# department column (staff.py's CAPABILITY_TIERS) -- engineering/design/creative/
+# research/marketing/commerce/operations/general -- so built-in agents and hired
+# employees group under one taxonomy in the UI rather than two different label sets.
 AGENT_ROSTER = [
-    {"key": "market_finder", "title": "Market Finder", "role": "scout", "character": 0},
-    {"key": "trend_scout", "title": "Trend Scout", "role": "scout", "character": 1},
-    {"key": "research", "title": "Research", "role": "analyst", "character": 2},
-    {"key": "product_creator", "title": "Product Creator", "role": "maker", "character": 3},
-    {"key": "art_director", "title": "Art Director", "role": "creative", "character": 4},
-    {"key": "store_manager", "title": "E-Store Manager", "role": "commerce", "character": 5},
-    {"key": "social_director", "title": "Social Media Director", "role": "comms", "character": 1},
+    {"key": "market_finder", "title": "Market Finder", "role": "scout", "department": "research", "character": 0},
+    {"key": "trend_scout", "title": "Trend Scout", "role": "scout", "department": "research", "character": 1},
+    {"key": "research", "title": "Research", "role": "analyst", "department": "research", "character": 2},
+    {"key": "product_creator", "title": "Product Creator", "role": "maker", "department": "design", "character": 3},
+    {"key": "art_director", "title": "Art Director", "role": "creative", "department": "creative", "character": 4},
+    {"key": "store_manager", "title": "E-Store Manager", "role": "commerce", "department": "commerce", "character": 5},
+    {"key": "social_director", "title": "Social Media Director", "role": "comms", "department": "marketing", "character": 1},
 ]
 
 MARKET_SYSTEM = (

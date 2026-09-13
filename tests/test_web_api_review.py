@@ -384,3 +384,36 @@ def test_rejecting_a_pr_review_item_leaves_it_open(client_with_contexts, db_path
 
     client_with_contexts.post(f"/api/review/items/{item_id}/decide", json={"decision": "rejected"})
     assert git_ops.mcp_client.merge_calls == []
+
+
+# --- pipeline lanes + urgency (see business_db.classify_pipeline/compute_urgency) ---
+
+def test_list_items_carries_pipeline_and_urgency_on_every_item(client, db_path, owner_id):
+    business_db.create_review_item(db_path, owner_id, "Logo mockup", kind="art")
+    item = client.get("/api/review/items").json()["items"][0]
+    assert item["pipeline"] == "business"
+    assert isinstance(item["urgency_score"], float)
+
+
+def test_list_items_can_be_filtered_by_pipeline(client, db_path, owner_id):
+    business_db.create_review_item(db_path, owner_id, "Logo mockup", kind="art")
+    business_db.create_review_item(
+        db_path, owner_id, "PR #4: fix the thing", "other", ref_table="git_pull_requests", ref_id=4)
+
+    body = client.get("/api/review/items?pipeline=dev_ops").json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["title"].startswith("PR #4")
+    # pending count reflects everything, not just the filtered pipeline.
+    assert body["pending"] == 2
+
+
+def test_a_pending_mail_action_is_classified_into_the_mail_pipeline(client, db_path, owner_id):
+    create_pending_action_and_review(db_path, owner_id, "send_email", {"to": "a@b.com"})
+    item = client.get("/api/review/items").json()["items"][0]
+    assert item["pipeline"] == "mail"
+
+
+def test_a_pending_kroger_action_is_classified_into_the_personal_pipeline(client, db_path, owner_id):
+    create_pending_action_and_review(db_path, owner_id, "bulk_add_to_cart", {"items": []})
+    item = client.get("/api/review/items").json()["items"][0]
+    assert item["pipeline"] == "personal"

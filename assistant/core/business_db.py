@@ -905,20 +905,225 @@ def _attach_options(conn, items: list[dict]) -> list[dict]:
     return items
 
 
-def list_review_items(db_path: str, owner_user_id: int, status: str | None = "pending", limit: int = 50):
+# --- pipeline lanes + urgency -------------------------------------------------
+#
+# review_items has no pipeline or due-date column of its own -- the Review page used to
+# be one flat list, so nothing needed one. Restructuring it into lanes (business/dev_ops/
+# mail/personal/other) and real urgency ordering is computed here, from data already on
+# the item, rather than adding columns that would need backfilling for every item ever
+# created. Grounded in every real create_review_item/create_pending_action_and_review
+# call site in the codebase today (business_tools.py, engine.py, camera_watch.py,
+# mail_triage.py, vision_runtime.py) -- see classify_pipeline's docstring for the mapping.
+
+# Mirror config.py's mail_sensitive_tools default and setup.py's GIT_SENSITIVE_TOOLS.
+# Duplicated here (not imported) on purpose: business_db sits low in the import graph --
+# engine.py and setup.py both import *it*, so the reverse import isn't available -- and
+# these are just tool-name literals, not behavior, so a copy carries no real drift risk.
+_MAIL_ACTION_TOOLS = {"send_email", "archive_email", "delete_email"}
+_DEV_OPS_ACTION_TOOLS = {"git_merge_pr"}
+
+
+def classify_pipeline(item: dict, pending_tool_name: str | None = None) -> str:
+    """Which real lane this review item belongs on:
+
+      business  - the creative/product pipeline. Every kind other than 'other' (concept,
+                  art, listing, post, media, research) is exactly that pipeline's own
+                  output -- see the review_items CHECK constraint -- whether or not it
+                  carries a ref_table row yet (a research brief or a rendered image often
+                  doesn't).
+      dev_ops   - an opened PR (ref_table='git_pull_requests'), a proposed ops/MCP-install
+                  plan ('ops_plans'), an employee's capability request
+                  ('capability_requests'), or a pending_actions confirmation for
+                  git_merge_pr.
+      mail      - mail_triage's drafted replies ('email_drafts') and a pending_actions
+                  confirmation for send_email/archive_email/delete_email.
+      personal  - a camera/vision enrollment ask ('unknown_faces'), a linked personal
+                  task or credit-dispute item/letter ('personal_tasks', 'dispute_items',
+                  'dispute_letters' -- no real call site sets these ref_tables today, but
+                  the mapping is here for when one does), and every other pending_actions
+                  confirmation: phone, Era (financial), Kroger cart/order writes, CCXT
+                  trades, LetterStream (credit-dispute letters), and Home Assistant
+                  lock/cover/alarm changes -- the owner's own life, not the business.
+      other     - kind='other' with no ref_table Jarvis recognises (a plain ad-hoc
+                  yes/no question with nothing to write through to).
+
+    pending_tool_name is the tool_name off the linked pending_actions row. Callers that
+    hold a db connection already (list_review_items, get_review_item) resolve it in bulk
+    via _attach_pipeline; business_db doesn't own the pending_actions table itself (that's
+    db.py's), so this function stays a pure mapping rather than reaching for it directly.
+    Not knowing the tool name still lands the item in 'personal' rather than 'other',
+    since every sensitive-tool confirmation is personal-life by default except the two
+    carve-outs above.
+    """
+    if (item.get("kind") or "other") != "other":
+        return "business"
+
+    ref_table = item.get("ref_table")
+    if ref_table in ("git_pull_requests", "ops_plans", "capability_requests"):
+        return "dev_ops"
+    if ref_table == "email_drafts":
+        return "mail"
+    if ref_table in ("unknown_faces", "personal_tasks", "dispute_items", "dispute_letters"):
+        return "personal"
+    if ref_table == "pending_actions":
+        if pending_tool_name in _DEV_OPS_ACTION_TOOLS:
+            return "dev_ops"
+        if pending_tool_name in _MAIL_ACTION_TOOLS:
+            return "mail"
+        return "personal"
+    return "other"
+
+
+def _parse_iso(value: str | None):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _pending_action_tool_names(conn, ids: list[int]) -> dict:
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT id, tool_name FROM pending_actions WHERE id IN ({placeholders})", ids
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # pending_actions is db.py's table, not business_db's own -- same db file in the
+        # real app (see db.py/business_db.py's shared cfg.db_path), but not every test or
+        # caller of this module has run db.init_db first. Missing the table just means
+        # "can't resolve which tool this was", handled the same as any other unknown.
+        return {}
+    return {row["id"]: row["tool_name"] for row in rows}
+
+
+def _personal_task_due_dates(conn, ids: list[int]) -> dict:
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT id, due_at FROM personal_tasks WHERE id IN ({placeholders})", ids
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Same reasoning as _pending_action_tool_names -- personal_tasks is
+        # personal_db.py's table; not every caller has run personal_db.init_personal_db.
+        return {}
+    return {row["id"]: row["due_at"] for row in rows if row["due_at"]}
+
+
+def resolve_due_at(db_path: str, item: dict) -> str | None:
+    """The real due date behind a review item, when one exists. review_items itself has
+    no due-date column -- most items never have one -- so this reaches through
+    ref_table/ref_id to whatever pipeline row might carry a real deadline.
+
+    personal_tasks.due_at is the only case wired up today: checked against every real
+    create_review_item/create_pending_action_and_review call site in the codebase, and
+    it's the clearest real due date that exists anywhere near a review item. Everything
+    else either has no due-date concept at all (a PR, an ops plan, a mail draft) or, for
+    credit-dispute letters specifically, genuinely has no deadline column on dispute_items
+    /dispute_letters to read -- so this returns None for those rather than inventing a
+    deadline that doesn't exist, and compute_urgency falls back to priority + age instead.
+    """
+    ref_table, ref_id = item.get("ref_table"), item.get("ref_id")
+    if ref_table != "personal_tasks" or not ref_id:
+        return None
+    with closing(_connect(db_path)) as conn:
+        return _personal_task_due_dates(conn, [ref_id]).get(ref_id)
+
+
+def compute_urgency(item: dict, due_at: str | None = None, as_of: datetime | None = None) -> float:
+    """Higher means more urgent. Three signals, in the order they should matter:
+
+      1. A real due date (from resolve_due_at) -- overdue beats everything, and urgency
+         ramps up sharply as the deadline approaches.
+      2. priority -- the explicit high/normal/low call, the tie-breaker for anything
+         without a due date.
+      3. age (time since created_at) -- so something that's simply sat waiting a long
+         time visually rises even at normal/low priority with no deadline, rather than
+         starving forever behind a stream of fresh high-priority items. This is the
+         fallback the task calls for explicitly: don't pretend every item has a due date
+         it doesn't have, but don't let "no due date" mean "never rises" either. Capped,
+         so a years-old low-priority item still can't outrank something genuinely due
+         soon.
+
+    Pure function (no I/O) so a whole list can be scored cheaply, and deterministic for
+    tests via `as_of` instead of depending on the real clock.
+    """
+    now = as_of or datetime.now(timezone.utc)
+    created = _parse_iso(item.get("created_at")) or now
+    age_hours = max(0.0, (now - created).total_seconds() / 3600)
+
+    score = {"high": 100.0, "normal": 50.0, "low": 10.0}.get(item.get("priority"), 50.0)
+    score += min(age_hours / 2, 60.0)  # up to +60 after ~5 days waiting, then flat
+
+    due = _parse_iso(due_at)
+    if due is not None:
+        hours_until_due = (due - now).total_seconds() / 3600
+        if hours_until_due <= 0:
+            score += 200.0 + min(-hours_until_due, 200.0)  # overdue -- worse the longer
+        elif hours_until_due <= 24:
+            score += 150.0
+        elif hours_until_due <= 72:
+            score += 80.0
+        elif hours_until_due <= 24 * 7:
+            score += 30.0
+    return round(score, 2)
+
+
+def _attach_pipeline(conn, items: list[dict]) -> list[dict]:
+    """Adds 'pipeline', a resolved 'due_at' (may be None), and 'urgency_score' to each
+    item -- at most two extra batched queries for the whole list, same reasoning as
+    _attach_options."""
+    if not items:
+        return items
+    pending_ids = [i["ref_id"] for i in items if i.get("ref_table") == "pending_actions" and i.get("ref_id")]
+    task_ids = [i["ref_id"] for i in items if i.get("ref_table") == "personal_tasks" and i.get("ref_id")]
+    tool_names = _pending_action_tool_names(conn, pending_ids)
+    due_dates = _personal_task_due_dates(conn, task_ids)
+    now = datetime.now(timezone.utc)
+    for item in items:
+        tool_name = tool_names.get(item.get("ref_id")) if item.get("ref_table") == "pending_actions" else None
+        item["pipeline"] = classify_pipeline(item, pending_tool_name=tool_name)
+        due_at = due_dates.get(item.get("ref_id")) if item.get("ref_table") == "personal_tasks" else None
+        item["due_at"] = due_at
+        item["urgency_score"] = compute_urgency(item, due_at, as_of=now)
+    return items
+
+
+def list_review_items(
+    db_path: str, owner_user_id: int, status: str | None = "pending", limit: int = 50,
+    pipeline: str | None = None,
+):
     query = "SELECT * FROM review_items WHERE owner_user_id = ?"
     params: list = [owner_user_id]
     if status:
         query += " AND status = ?"
         params.append(status)
     # High priority first, then oldest — so the stack drains in the order it should.
+    # (The Review page itself now re-sorts within each pipeline lane by urgency_score;
+    # this is still the base order for every caller that doesn't group into lanes, e.g.
+    # the chat-facing list_review_queue tool.)
     query += (
         " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,"
         " CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at LIMIT ?"
     )
-    params.append(limit)
+    # pipeline is computed, not a column, so it can't be filtered in SQL. When it's
+    # requested, fetch a bounded multiple of `limit` up front (same ordering) so
+    # filtering afterward still has a real shot at returning `limit` matches instead of
+    # starving on whatever the plain SQL LIMIT happened to grab first -- bounded rather
+    # than unlimited so a pipeline filter on a large decided-history query can't turn
+    # into an unbounded table scan.
+    params.append(limit * 6 if pipeline else limit)
     with closing(_connect(db_path)) as conn:
-        return _attach_options(conn, _rows(conn.execute(query, params)))
+        items = _attach_pipeline(conn, _attach_options(conn, _rows(conn.execute(query, params))))
+    if pipeline:
+        items = [i for i in items if i["pipeline"] == pipeline][:limit]
+    return items
 
 
 def get_review_item(db_path: str, owner_user_id: int, item_id: int):
@@ -928,7 +1133,7 @@ def get_review_item(db_path: str, owner_user_id: int, item_id: int):
         ).fetchone()
         if row is None:
             return None
-        return _attach_options(conn, [dict(row)])[0]
+        return _attach_pipeline(conn, _attach_options(conn, [dict(row)]))[0]
 
 
 def decide_review_item(
@@ -971,7 +1176,7 @@ def get_review_item_by_ref(db_path: str, owner_user_id: int, ref_table: str, ref
         ).fetchone()
         if row is None:
             return None
-        return _attach_options(conn, [dict(row)])[0]
+        return _attach_pipeline(conn, _attach_options(conn, [dict(row)]))[0]
 
 
 def get_review_option_media(db_path: str, owner_user_id: int, option_id: int) -> str | None:

@@ -52,11 +52,17 @@ def _apply_enrollment_decision(db_path: str, item: dict, decision: str, note: st
 
 
 @router.get("/items")
-async def list_items(request: Request, status: str = "pending", limit: int = 50):
+async def list_items(request: Request, status: str = "pending", limit: int = 50, pipeline: str | None = None):
+    """Each item comes back carrying a resolved 'pipeline' lane and a computed
+    'urgency_score' (see business_db.classify_pipeline/compute_urgency) -- the Review
+    page groups into lanes and sorts by urgency client-side, but `pipeline` is also
+    accepted here as a server-side filter for any other caller (e.g. the chat-facing
+    list_review_queue tool) that just wants one lane's worth."""
     owner = _owner_id(request)
     cfg = request.app.state.cfg
     return {
-        "items": business_db.list_review_items(cfg.db_path, owner, status=status or None, limit=limit),
+        "items": business_db.list_review_items(
+            cfg.db_path, owner, status=status or None, limit=limit, pipeline=pipeline or None),
         "pending": business_db.count_pending_reviews(cfg.db_path, owner),
     }
 

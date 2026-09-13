@@ -1,0 +1,103 @@
+/* Pipeline lanes + urgency weighting on top of the Review page's existing two-pane shell
+   (index.css's .review-* rules -- header/tabs/stack/card/main/preview/options/actions are
+   untouched and still apply). Kept in its own file rather than appended further to
+   index.css, same precedent command-center.css/credit.css/email.css already set. Reuses
+   the app's existing HUD tokens throughout rather than introducing a second palette. */
+
+/* --- pipeline filter pills ----------------------------------------------------------
+   A second, visually lighter row under the Pending/Approved tabs -- pill-shaped (unlike
+   the squared-off primary tabs) so it reads as a secondary, narrower filter rather than
+   competing with the page's main pending/approved split. */
+
+.review-pipeline-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -6px 0 14px;
+}
+
+.review-pipeline-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-dim);
+  background: none;
+  color: var(--text-dim);
+  font-family: var(--font-hud);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.review-pipeline-tabs button:hover {
+  border-color: var(--cyan-dim);
+  color: var(--cyan);
+}
+
+.review-pipeline-tabs button.active {
+  border-color: var(--cyan);
+  color: var(--cyan-bright);
+  background: var(--bg-inset);
+}
+
+.review-pipeline-tabs .review-count {
+  margin-left: 0;
+  padding: 0 5px;
+  background: rgba(34, 232, 255, 0.18);
+  color: var(--cyan-bright);
+  font-size: 9px;
+}
+
+.review-pipeline-tabs button.active .review-count {
+  background: var(--cyan);
+  color: #001217;
+}
+
+/* --- lane sections within the stack -------------------------------------------------
+   Only rendered in "All" view (a specific pipeline pill collapses the stack back to a
+   plain sorted list, same shape as the page had before this ever existed). */
+
+/* Its own flex column (cards default to inline-block as <button>s) -- same gap the
+   flat stack used before lanes existed, so a single-lane view looks identical. */
+.review-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.review-lane + .review-lane {
+  margin-top: 16px;
+}
+
+.review-lane-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.review-lane-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* --- the due-date chip on a card's meta line ----------------------------------------
+   Urgency otherwise only shows up as sort order + the priority-high left border (already
+   in index.css); a real due date is worth surfacing as text, not just felt implicitly. */
+
+.review-card-due {
+  color: var(--amber);
+}
+
+.review-card-due.is-overdue {
+  color: var(--red);
+  font-weight: 700;
+}

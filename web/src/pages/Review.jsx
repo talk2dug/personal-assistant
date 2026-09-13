@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
+import './review.css'
 
 /**
  * The review surface: a stack of everything the team is waiting on a decision for, and
@@ -10,6 +11,13 @@ import { api } from '../api'
  * cards and the big preview shows whichever is selected, so choosing between three
  * artwork treatments means actually looking at them side by side rather than reading
  * filenames.
+ *
+ * The stack itself is grouped into pipeline lanes (business / dev_ops / mail / personal
+ * / other — see business_db.classify_pipeline) rather than one flat list, and sorted
+ * within each lane by urgency_score (business_db.compute_urgency: priority + a real due
+ * date when one resolves off the referenced row, e.g. a personal_tasks.due_at, else
+ * priority + how long it's sat waiting) so what's genuinely urgent surfaces first. The
+ * pipeline pills filter to one lane; "All" shows every lane as its own section.
  */
 
 const KIND_LABEL = {
@@ -17,8 +25,48 @@ const KIND_LABEL = {
   post: 'Social post', media: 'Media', research: 'Research', other: 'Item',
 }
 
+// Order lanes appear in -- roughly "the business" first, then the owner's own life, dev/
+// ops plumbing, mail, then whatever didn't fit a known ref_table.
+const PIPELINE_ORDER = ['business', 'personal', 'dev_ops', 'mail', 'other']
+const PIPELINE_LABEL = {
+  business: 'Business', personal: 'Personal', dev_ops: 'Dev & Ops', mail: 'Mail', other: 'Other',
+}
+
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|avif)$/i
 const VIDEO_RE = /\.(mp4|webm|mov|m4v)$/i
+
+function byUrgencyDesc(a, b) {
+  return (b.urgency_score ?? 0) - (a.urgency_score ?? 0)
+}
+
+// Groups items by their resolved pipeline lane, each group pre-sorted urgent-first.
+function groupByPipeline(items) {
+  const groups = {}
+  for (const item of items) {
+    const key = item.pipeline || 'other'
+    if (!groups[key]) groups[key] = []
+    groups[key].push(item)
+  }
+  for (const key of Object.keys(groups)) groups[key].sort(byUrgencyDesc)
+  return groups
+}
+
+// A compact "Due in 5h" / "Overdue 2d" chip -- the one piece of due-date weighting that
+// needs to be visible, not just felt through sort order. null when there's no resolved
+// due date (most items -- see resolve_due_at's docstring on why most genuinely don't
+// have one) or the value can't be parsed.
+function formatDue(dueAtIso) {
+  if (!dueAtIso) return null
+  const due = new Date(dueAtIso)
+  if (Number.isNaN(due.getTime())) return null
+  const diffHours = (due.getTime() - Date.now()) / 3_600_000
+  if (diffHours <= 0) {
+    const overdueDays = Math.floor(-diffHours / 24)
+    return { text: overdueDays >= 1 ? `Overdue ${overdueDays}d` : 'Overdue', overdue: true }
+  }
+  if (diffHours < 24) return { text: `Due ${Math.round(diffHours)}h`, overdue: false }
+  return { text: `Due ${Math.round(diffHours / 24)}d`, overdue: false }
+}
 
 export function OptionPreview({ option }) {
   if (!option) return <div className="review-preview-empty">Nothing selected.</div>
@@ -37,6 +85,24 @@ export function OptionPreview({ option }) {
   return <div className="review-preview-empty">{option.description || 'No preview for this option.'}</div>
 }
 
+function ReviewCard({ item, selected, onSelect }) {
+  const due = formatDue(item.due_at)
+  return (
+    <button
+      className={`review-card ${selected ? 'selected' : ''} priority-${item.priority}`}
+      onClick={onSelect}
+    >
+      <span className="review-card-kind">{KIND_LABEL[item.kind] || item.kind}</span>
+      <span className="review-card-title">{item.title}</span>
+      <span className="review-card-meta">
+        {item.source_agent || 'jarvis'}
+        {item.options.length > 1 && ` · ${item.options.length} options`}
+        {due && <span className={`review-card-due ${due.overdue ? 'is-overdue' : ''}`}> · {due.text}</span>}
+      </span>
+    </button>
+  )
+}
+
 export default function Review() {
   const [items, setItems] = useState([])
   const [historyItems, setHistoryItems] = useState([])
@@ -46,6 +112,7 @@ export default function Review() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [showDecided, setShowDecided] = useState(false)
+  const [activePipeline, setActivePipeline] = useState(null) // null == "All"
 
   const load = useCallback(async () => {
     try {
@@ -56,12 +123,10 @@ export default function Review() {
       setItems(pending.items)
       setHistoryItems(decided.items)
       setError(null)
-      // Keep the current selection if it's still pending; otherwise fall to the top of
-      // the stack, so deciding an item advances you rather than dumping you nowhere.
-      setSelectedId((prev) => {
-        if (prev && pending.items.some((i) => i.id === prev)) return prev
-        return pending.items[0]?.id ?? null
-      })
+      // Keep the current selection if it's still pending; otherwise let the render-time
+      // fallback below pick the most urgent item in view, so deciding an item advances
+      // you to whatever's next most urgent rather than dumping you nowhere.
+      setSelectedId((prev) => (prev && pending.items.some((i) => i.id === prev) ? prev : null))
     } catch (err) {
       setError(err.message)
     }
@@ -73,8 +138,18 @@ export default function Review() {
     return () => clearInterval(id)
   }, [load])
 
+  function switchTab(decided) {
+    setShowDecided(decided)
+    setActivePipeline(null)
+  }
+
   const shown = showDecided ? historyItems : items
-  const selected = shown.find((i) => i.id === selectedId) || shown[0] || null
+  const groups = groupByPipeline(shown)
+  const lanes = PIPELINE_ORDER.filter((p) => groups[p]?.length)
+  const visible = activePipeline ? (groups[activePipeline] || []) : shown
+  const visibleSorted = [...visible].sort(byUrgencyDesc)
+
+  const selected = shown.find((i) => i.id === selectedId) || visibleSorted[0] || null
   const options = selected?.options || []
   const isChoice = options.length > 1
 
@@ -117,10 +192,10 @@ export default function Review() {
           </p>
         </div>
         <div className="review-tabs">
-          <button className={!showDecided ? 'active' : ''} onClick={() => setShowDecided(false)}>
+          <button className={!showDecided ? 'active' : ''} onClick={() => switchTab(false)}>
             Pending {items.length > 0 && <span className="review-count">{items.length}</span>}
           </button>
-          <button className={showDecided ? 'active' : ''} onClick={() => setShowDecided(true)}>
+          <button className={showDecided ? 'active' : ''} onClick={() => switchTab(true)}>
             Approved
           </button>
         </div>
@@ -128,23 +203,53 @@ export default function Review() {
 
       {error && <div className="review-error">Couldn’t load the queue: {error}</div>}
 
+      {shown.length > 0 && (
+        <div className="review-pipeline-tabs">
+          <button className={!activePipeline ? 'active' : ''} onClick={() => setActivePipeline(null)}>
+            All <span className="review-count">{shown.length}</span>
+          </button>
+          {PIPELINE_ORDER.filter((p) => groups[p]?.length).map((p) => (
+            <button
+              key={p}
+              className={activePipeline === p ? 'active' : ''}
+              onClick={() => setActivePipeline(p)}
+            >
+              {PIPELINE_LABEL[p]} <span className="review-count">{groups[p].length}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="review-body">
         <aside className="review-stack">
           {shown.length === 0 && <p className="review-empty">Nothing here.</p>}
-          {shown.map((item) => (
-            <button
-              key={item.id}
-              className={`review-card ${item.id === selected?.id ? 'selected' : ''} priority-${item.priority}`}
-              onClick={() => setSelectedId(item.id)}
-            >
-              <span className="review-card-kind">{KIND_LABEL[item.kind] || item.kind}</span>
-              <span className="review-card-title">{item.title}</span>
-              <span className="review-card-meta">
-                {item.source_agent || 'jarvis'}
-                {item.options.length > 1 && ` · ${item.options.length} options`}
-              </span>
-            </button>
-          ))}
+          {shown.length > 0 && visible.length === 0 && (
+            <p className="review-empty">Nothing in this lane right now.</p>
+          )}
+
+          {activePipeline ? (
+            visibleSorted.map((item) => (
+              <ReviewCard
+                key={item.id} item={item} selected={item.id === selected?.id}
+                onSelect={() => setSelectedId(item.id)}
+              />
+            ))
+          ) : (
+            lanes.map((pipeline) => (
+              <div className="review-lane" key={pipeline}>
+                <div className="review-lane-header">
+                  <span className="hud-label">{PIPELINE_LABEL[pipeline]}</span>
+                  <span className="review-lane-count">{groups[pipeline].length}</span>
+                </div>
+                {groups[pipeline].map((item) => (
+                  <ReviewCard
+                    key={item.id} item={item} selected={item.id === selected?.id}
+                    onSelect={() => setSelectedId(item.id)}
+                  />
+                ))}
+              </div>
+            ))
+          )}
         </aside>
 
         <section className="review-main">

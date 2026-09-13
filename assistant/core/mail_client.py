@@ -162,13 +162,24 @@ class MailClient:
         finally:
             conn.logout()
 
-    def search_uids(self, terms: list, folder: str = "INBOX", limit: int = 500) -> dict:
+    def search_uids(self, terms: list, folder: str = "INBOX", limit: int = 500,
+                    exclude: set | None = None) -> dict:
         """UIDs in `folder` matching ANY of `terms`, newest-first — the narrowing step in
         front of an LLM classification pass (see mail_debts.py).
 
         `terms` is a list of (criterion, value) pairs, e.g. ("TEXT", "minimum payment"),
         ("SUBJECT", "statement"), ("FROM", "capitalone.com"), letting a caller mix
         whole-message phrase matches with sender-domain matches in one go.
+
+        `exclude` (uids the caller has already judged) is applied BEFORE `limit`, and that
+        ordering is load-bearing rather than incidental. Truncating first meant a folder
+        with more matches than `limit` could never be worked through: once the newest
+        `limit` uids were all in the caller's ledger, every later run returned that same
+        set, subtracted all of it, and found nothing to do — leaving everything older
+        permanently unreachable while looking like a finished sweep. Excluding first makes
+        each run take the newest `limit` *unjudged* uids instead, so a backlog job walks
+        backwards through history one run at a time. `matched` stays the true pre-exclusion
+        total, so a caller can still tell how much a folder really holds.
 
         Deliberately returns UIDs ONLY, no headers. A historical sweep across a mailbox
         with tens of thousands of messages shortlists thousands of candidates but then
@@ -200,8 +211,11 @@ class MailClient:
                 found.update(raw.decode() for raw in data[0].split())
             # Newest first: UIDs ascend with arrival, so the most recent statements — the
             # ones whose balances are still true — are what a capped run spends itself on.
+            matched = len(found)
+            if exclude:
+                found -= set(exclude)
             ordered = sorted(found, key=lambda u: int(u) if u.isdigit() else 0, reverse=True)
-            return {"folder": folder, "uids": ordered[:limit], "matched": len(found)}
+            return {"folder": folder, "uids": ordered[:limit], "matched": matched}
         finally:
             conn.logout()
 

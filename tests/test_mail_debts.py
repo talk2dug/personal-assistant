@@ -48,7 +48,7 @@ class FakeMailClient:
     def list_folders(self):
         return {"folders": self._folders}
 
-    def search_uids(self, terms, folder="INBOX", limit=500):
+    def search_uids(self, terms, folder="INBOX", limit=500, exclude=None):
         self.searched_folders.append(folder)
         haystacks = {}
         for uid, message in self._messages.get(folder, {}).items():
@@ -59,8 +59,13 @@ class FakeMailClient:
             }
         hits = [uid for uid, fields in haystacks.items()
                 if any(str(value).lower() in fields.get(criterion, "") for criterion, value in terms)]
+        # Mirrors the real client: exclusion happens BEFORE the cap, so a capped run
+        # takes the newest unjudged uids rather than re-serving the same newest slice.
+        matched = len(hits)
+        if exclude:
+            hits = [uid for uid in hits if uid not in exclude]
         hits.sort(key=lambda u: int(u) if u.isdigit() else 0, reverse=True)
-        return {"folder": folder, "uids": hits[:limit], "matched": len(hits)}
+        return {"folder": folder, "uids": hits[:limit], "matched": matched}
 
     def read_message(self, uid, folder="INBOX"):
         return self._messages.get(folder, {}).get(uid, {"error": f"no message with uid {uid}"})
@@ -584,10 +589,10 @@ def test_one_unsearchable_folder_does_not_end_the_sweep(db_path):
     path, owner = db_path
 
     class PartlyBrokenMail(FakeMailClient):
-        def search_uids(self, terms, folder="INBOX", limit=500):
+        def search_uids(self, terms, folder="INBOX", limit=500, exclude=None):
             if folder == "Archive":
                 raise RuntimeError("SELECT failed")
-            return super().search_uids(terms, folder=folder, limit=limit)
+            return super().search_uids(terms, folder=folder, limit=limit, exclude=exclude)
 
     mail = PartlyBrokenMail(
         folders=[{"name": "INBOX", "flags": []}, {"name": "Archive", "flags": ["\\Archive"]},
@@ -689,6 +694,37 @@ def test_a_confirmed_debt_gets_new_statements_without_a_fresh_question(db_path):
     assert len(business_db.list_review_items(path, owner, status="pending")) == 1
     assert personal_db.get_debt(path, owner, debt_id)["observation_count"] == 2
     assert personal_db.debt_summary(path, owner)["total_balance"] == 4200.00
+
+
+def test_the_sweep_walks_past_the_shortlist_cap_on_later_runs(db_path):
+    """The shortlist cap must bound each RUN, not the reachable history.
+
+    Regression: the cap used to be applied inside the search, before the ledger was
+    subtracted. Once the newest `shortlist_limit` matches were all judged, every later
+    run re-served that same slice, subtracted all of it, and found nothing -- so anything
+    older was permanently unreachable while the sweep looked finished. With a mailbox
+    where old statements are exactly where the debt history lives, that silently defeats
+    the whole feature.
+    """
+    path, owner = db_path
+    # Six matching messages, a shortlist cap of two: three runs must reach all six.
+    messages = {str(uid): _message(uid=str(uid), subject=f"Statement {uid}") for uid in range(1, 7)}
+    mail = FakeMailClient(messages={"INBOX": messages})
+    llm = ScriptedLLM({})  # every message classified "not a debt" -- we only care about reach
+
+    seen = set()
+    for _ in range(3):
+        stats = mail_debts.run_debt_mail_sweep_once(
+            path, llm, mail, owner, per_run_limit=2, shortlist_limit=2, today=date(2026, 9, 13))
+        assert stats["scanned"] == 2
+        seen |= set(mail_db.scanned_debt_uids(path, owner, "INBOX"))
+
+    assert seen == {"1", "2", "3", "4", "5", "6"}, "older mail was stranded behind the cap"
+
+    # A fourth run has genuinely nothing left rather than re-serving the newest slice.
+    assert mail_debts.run_debt_mail_sweep_once(
+        path, llm, mail, owner, per_run_limit=2, shortlist_limit=2,
+        today=date(2026, 9, 13))["scanned"] == 0
 
 
 def test_every_observation_records_which_message_it_came_from(db_path):

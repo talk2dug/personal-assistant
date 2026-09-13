@@ -601,8 +601,16 @@ def run_debt_mail_sweep_once(
         if remaining <= 0:
             stats["capped"] = True
             break
+        # One query for the whole folder's ledger rather than one per candidate: on a
+        # resumed run nearly every matching uid is already judged, and asking about them
+        # one at a time is thousands of round trips to decide to do nothing. Handed to
+        # search_uids so the shortlist cap applies to what is still UNJUDGED -- capping
+        # first would pin every run to the same newest slice and strand everything older
+        # (see search_uids' docstring).
+        already = mail_db.scanned_debt_uids(db_path, owner_user_id, folder)
         try:
-            found = mail_client.search_uids(SEARCH_TERMS, folder=folder, limit=shortlist_limit)
+            found = mail_client.search_uids(
+                SEARCH_TERMS, folder=folder, limit=shortlist_limit, exclude=already)
         except Exception:
             # One unreadable folder must not end the sweep -- the rest of his mail is
             # still worth searching, and this folder is retried on the next run.
@@ -610,11 +618,7 @@ def run_debt_mail_sweep_once(
             continue
         stats["folders_searched"] += 1
 
-        # One query for the whole folder's ledger rather than one per candidate: on a
-        # resumed run nearly every shortlisted uid is already judged, and asking about
-        # them one at a time is thousands of round trips to decide to do nothing.
-        already = mail_db.scanned_debt_uids(db_path, owner_user_id, folder)
-        candidates = [uid for uid in found.get("uids", []) if uid not in already]
+        candidates = found.get("uids", [])
         stats["shortlisted"] += len(candidates)
 
         for uid in candidates:

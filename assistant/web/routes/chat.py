@@ -7,7 +7,7 @@ import functools
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 
-from ...core import db, vision
+from ...core import db, ui_content, vision
 from ...core.engine import handle_message
 from ..auth import require_user
 
@@ -28,6 +28,10 @@ async def send_message(request: Request):
     text = (body.get("text") or "").strip()
     if not text:
         return {"reply": ""}
+    # A short description of whatever detail modal/pushed content is currently open in
+    # the browser (Command Center Phase 4) -- e.g. "the Finance detail modal, showing
+    # $12,450 across 2 accounts". Never persisted; see handle_message's own docstring.
+    viewing_context = (body.get("context") or "").strip() or None
 
     # Optional camera snapshot from the web UI's on-demand capture toggle — a data:
     # URL (e.g. "data:image/jpeg;base64,...") so we strip the prefix before decoding.
@@ -65,7 +69,7 @@ async def send_message(request: Request):
         handle_message, cfg.db_path, request.app.state.llm, user["id"], text,
         tz_name=cfg.timezone, era=era, calendar=request.app.state.calendar, phone=phone, mail=mail,
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
-        image_bytes=image_bytes,
+        image_bytes=image_bytes, viewing_context=viewing_context,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
         git_ops=git_ops, recipe=recipe, local_llm=local_llm,
     )
@@ -75,7 +79,13 @@ async def send_message(request: Request):
     # backend dispatches tool calls from a subprocess via routes/tools.py, not from this
     # handler, so a plain Python variable couldn't carry it back to this response.
     camera = vision.pop_pending_camera_view(cfg.db_path, user["id"])
-    return {"reply": reply, **({"camera": camera} if camera else {})}
+    # Same one-shot handoff as the camera view, for show_content -- see ui_content.py.
+    content = ui_content.pop_pending_content(cfg.db_path, user["id"])
+    return {
+        "reply": reply,
+        **({"camera": camera} if camera else {}),
+        **({"content": content} if content else {}),
+    }
 
 
 @router.post("/transcribe")

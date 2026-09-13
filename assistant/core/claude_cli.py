@@ -140,17 +140,19 @@ class ClaudeCLIClient:
         return payload.get("result") or ""
 
     @staticmethod
-    def _render(history: list[dict], now: str, tz_name: str) -> str:
+    def _render(history: list[dict], now: str, tz_name: str, viewing_context: str | None = None) -> str:
         """Renders Jarvis's DB history into the single prompt string print mode takes.
 
         Jarvis's own database stays the source of truth for conversation history across
         every surface (web, Telegram, Home Assistant), so the CLI's own session store is
         deliberately not used — no --resume, no session ids to keep in sync.
 
-        The current time goes here rather than in the system prompt on purpose: Anthropic
-        prompt-caches on an exact prefix, and a timestamp in the system prompt would
-        invalidate that cache every single turn, re-billing Claude Code's ~25k-token
-        preamble instead of reading it back cheaply.
+        The current time (and, the same way, viewing_context) goes here rather than in
+        the system prompt on purpose: Anthropic prompt-caches on an exact prefix, and
+        either one baked into the system prompt would invalidate that cache every single
+        turn, re-billing Claude Code's ~25k-token preamble instead of reading it back
+        cheaply. viewing_context also must never leak into <conversation_history> above
+        -- it describes this one live turn, not something true of the whole exchange.
         """
         lines = []
         # The last entry is the message being answered; earlier ones are context.
@@ -162,6 +164,8 @@ class ClaudeCLIClient:
                 lines.append(f"{speaker}: {message.get('content', '')}")
             lines.append("</conversation_history>\n")
         lines.append(f"The current local time is {now} ({tz_name}).\n")
+        if viewing_context:
+            lines.append(f"The owner is currently looking at: {viewing_context}.\n")
         lines.append("Reply to this message from the user:")
         lines.append(current.get("content", ""))
         return "\n".join(lines)
@@ -204,10 +208,11 @@ class ClaudeCLIClient:
     def converse(
         self, system_prompt: str, history: list[dict], now: str, tz_name: str,
         tools: list[dict] | None = None, image_bytes: bytes | None = None,
+        viewing_context: str | None = None,
     ) -> str:
         """One full agentic turn: Claude reasons, calls Jarvis's tools as needed, and
         returns finished reply text."""
-        prompt = self._render(history, now, tz_name)
+        prompt = self._render(history, now, tz_name, viewing_context)
         env = dict(os.environ)
         allowed = ["mcp__jarvis", "WebSearch"]
         denied = list(DENIED_TOOLS)

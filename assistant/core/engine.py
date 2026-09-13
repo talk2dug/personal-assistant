@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import business_db, db, staff, vision
+from . import business_db, db, staff, ui_content, vision
 from .git_ops import check_diff_scope
 from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
@@ -934,6 +934,38 @@ CAMERA_TOOLS = [
     },
 ]
 
+CONTENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "show_content",
+            "description": (
+                "Open a modal in the Jarvis web window showing something you're actively "
+                "discussing, so the owner sees it instead of just hearing about it. "
+                "kind='review_item' opens an existing review-queue item (a design mockup, "
+                "artwork, a drafted social post, anything already surfaced via "
+                "submit_for_review) -- pass its review_item_id. kind='text' shows a block of "
+                "text verbatim -- a drafted letter, a long proposal, structured findings -- "
+                "pass a title and the body. Only call this for something genuinely worth "
+                "looking at right now, not for routine replies."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["review_item", "text"]},
+                    "review_item_id": {
+                        "type": "integer",
+                        "description": "Required when kind is 'review_item'.",
+                    },
+                    "title": {"type": "string", "description": "Required when kind is 'text'."},
+                    "body": {"type": "string", "description": "Required when kind is 'text'."},
+                },
+                "required": ["kind"],
+            },
+        },
+    },
+]
+
 _CONFIRM_PREFIXES = ("yes", "yep", "yeah", "y", "confirm", "go ahead", "do it", "sure", "ok", "okay")
 _CANCEL_PREFIXES = ("no", "nope", "n", "cancel", "stop", "don't", "dont", "nevermind", "never mind")
 
@@ -1259,6 +1291,7 @@ def select_tools(
         return (
             TOOLS
             + CAMERA_TOOLS
+            + CONTENT_TOOLS
             + (era.era_tools if era is not None else [])
             + (phone.phone_tools if phone is not None else [])
             + (MAIL_TOOLS if mail is not None else [])
@@ -1281,6 +1314,7 @@ def select_tools(
         # it's a fixed 3-tool addition, so there's no overload risk to trade against the
         # capability-gap risk of an incomplete keyword list.
         + CAMERA_TOOLS
+        + CONTENT_TOOLS
         + (_select_era_tools(era, user_text) if era is not None else [])
         + (_select_phone_tools(phone, user_text) if phone is not None else [])
         + (_select_mail_tools(mail, user_text) if mail is not None else [])
@@ -1355,6 +1389,26 @@ def _dispatch_tool_call(
             "location": camera["location"] or camera["name"],
         })
         return json.dumps({"ok": True, "camera": camera["name"], "location": camera["location"]})
+    if name == "show_content":
+        kind = arguments.get("kind")
+        if kind == "review_item":
+            item_id = arguments.get("review_item_id")
+            if item_id is None:
+                return json.dumps({"error": "review_item_id is required when kind is 'review_item'."})
+            item = business_db.get_review_item(db_path, requesting_user_id, int(item_id))
+            if item is None:
+                return json.dumps({"error": f"no review item with id {item_id}"})
+            ui_content.set_pending_content(
+                db_path, requesting_user_id, "review_item", {"review_item_id": item["id"]})
+            return json.dumps({"ok": True, "shown": item["title"]})
+        if kind == "text":
+            title = (arguments.get("title") or "").strip()
+            body = (arguments.get("body") or "").strip()
+            if not title or not body:
+                return json.dumps({"error": "title and body are both required when kind is 'text'."})
+            ui_content.set_pending_content(db_path, requesting_user_id, "text", {"title": title, "body": body})
+            return json.dumps({"ok": True, "shown": title})
+        return json.dumps({"error": f"kind must be 'review_item' or 'text', got {kind!r}"})
     if name == "list_cameras":
         cameras = vision.list_cameras(db_path, enabled_only=True)
         return json.dumps({"cameras": [
@@ -1873,7 +1927,7 @@ def handle_message(
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
     recipe: "RecipeContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
-    local_llm=None,
+    local_llm=None, viewing_context: str | None = None,
 ) -> str:
     """Runs one user turn through the LLM (with tool-calling), persists the
     conversation, and returns the reply text. image_bytes (a JPEG snapshot from the
@@ -1884,7 +1938,13 @@ def handle_message(
     local_llm (set only when config.local_llm_host is configured) is tried first for
     simple Home-Assistant-flavored requests via local_fast_path.py, before this ever
     reaches the main backend -- see that module's own docstring for why. None means the
-    fast path is disabled and this behaves exactly as it always has."""
+    fast path is disabled and this behaves exactly as it always has.
+
+    viewing_context (a short description like "the Finance detail modal, showing account
+    balances and upcoming charges") is handled exactly like image_bytes -- folded into
+    this one outgoing turn only, never written to the persisted conversation, so a modal
+    the owner closed five messages ago doesn't linger as stale "currently looking at"
+    context on every later replay of this history."""
     if (era is not None or phone is not None or mail is not None or home_assistant is not None
             or kroger is not None or ccxt is not None or letterstream is not None or git_ops is not None):
         pending = db.get_pending_action(db_path, requesting_user_id)
@@ -1926,7 +1986,7 @@ def handle_message(
         try:
             reply = llm.converse(
                 system_prompt=system_prompt, history=history, now=now, tz_name=tz_name,
-                tools=tools, image_bytes=image_bytes,
+                tools=tools, image_bytes=image_bytes, viewing_context=viewing_context,
             )
         except Exception as e:
             reply = f"I couldn't reach my reasoning backend just then, sir — {e}"
@@ -1942,6 +2002,9 @@ def handle_message(
     ] + history
     if image_bytes is not None and messages[-1]["role"] == "user":
         messages[-1] = {**messages[-1], "images": [image_bytes]}
+    if viewing_context and messages[-1]["role"] == "user":
+        note = f"\n\n(The owner is currently looking at: {viewing_context}.)"
+        messages[-1] = {**messages[-1], "content": messages[-1].get("content", "") + note}
 
     empty_retried = False
     for _ in range(max_tool_hops):

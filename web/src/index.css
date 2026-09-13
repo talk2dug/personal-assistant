@@ -742,7 +742,11 @@ body::after {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  /* Above the Command Center's detail/content modals (modal.css, z-index: 200) on
+     purpose: the text chat is how the owner talks to Jarvis about whatever's open
+     underneath (viewing_context), so opening it must always bring it to the front
+     rather than getting stuck behind whatever detail modal was already up. */
+  z-index: 300;
   animation: hud-materialize 0.2s ease-out both;
 }
 

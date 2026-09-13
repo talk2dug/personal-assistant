@@ -135,8 +135,11 @@ def test_ha_endpoint_gets_the_same_contexts_as_every_other_surface(cfg, monkeypa
     monkeypatch.setattr(openai_compat, "handle_message", fake_handle_message)
 
     # Everything handle_message accepts that is a capability context, not a knob.
+    # viewing_context is per-turn like image_bytes (what's in the browser this instant,
+    # not a wired integration) -- the HA voice endpoint has no browser/modal concept at
+    # all, so there's nothing for it to pass.
     non_contexts = {"db_path", "llm", "requesting_user_id", "user_text", "tz_name",
-                    "image_bytes", "max_tool_hops"}
+                    "image_bytes", "max_tool_hops", "viewing_context"}
     contexts = [p for p in inspect.signature(engine.handle_message).parameters
                 if p not in non_contexts]
 

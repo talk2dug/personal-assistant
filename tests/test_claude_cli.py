@@ -59,6 +59,35 @@ def test_render_omits_history_block_for_a_first_message(client):
     assert prompt.rstrip().endswith("hello")
 
 
+def test_render_includes_viewing_context_when_given(client):
+    prompt = client._render(
+        [{"role": "user", "content": "what am I looking at?"}], now="t", tz_name="America/New_York",
+        viewing_context="the Finance detail modal, showing $12,450 across 2 accounts",
+    )
+    assert "currently looking at: the Finance detail modal" in prompt
+    # Still ends on the actual instruction, same as with no viewing_context at all.
+    assert prompt.rstrip().endswith("what am I looking at?")
+
+
+def test_render_omits_viewing_context_line_when_not_given(client):
+    prompt = client._render([{"role": "user", "content": "hello"}], now="t", tz_name="America/New_York")
+    assert "currently looking at" not in prompt
+
+
+def test_render_never_puts_viewing_context_inside_conversation_history(client):
+    """It describes this one live turn, not something true of the whole exchange -- a
+    stale claim baked into the quoted history would mislead every future turn that
+    replays it."""
+    history = [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+        {"role": "user", "content": "current question"},
+    ]
+    prompt = client._render(history, now="t", tz_name="America/New_York", viewing_context="the Crypto modal")
+    history_block = prompt[prompt.index("<conversation_history>"):prompt.index("</conversation_history>")]
+    assert "currently looking at" not in history_block
+
+
 def test_current_time_goes_in_the_prompt_not_the_system_prompt(client):
     """A timestamp in the system prompt would bust Anthropic's prompt cache every turn,
     re-billing Claude Code's ~25k-token preamble instead of reading it back cheaply."""

@@ -20,7 +20,7 @@ const KIND_LABEL = {
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|avif)$/i
 const VIDEO_RE = /\.(mp4|webm|mov|m4v)$/i
 
-function OptionPreview({ option }) {
+export function OptionPreview({ option }) {
   if (!option) return <div className="review-preview-empty">Nothing selected.</div>
   const path = option.media_path || ''
   const src = `/api/review/media/${option.id}`

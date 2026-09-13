@@ -182,6 +182,27 @@ def test_a_yes_no_item_round_trips(client, db_path, owner_id):
     assert item["options"] == []  # no options == straight approve/reject
 
 
+def test_get_one_item_by_id(client, db_path, owner_id):
+    item_id = business_db.create_review_item(
+        db_path, owner_id, "Logo mockup v2", kind="art", summary="Pick a direction")
+    item = client.get(f"/api/review/items/{item_id}").json()
+    assert item["id"] == item_id
+    assert item["title"] == "Logo mockup v2"
+
+
+def test_get_one_item_works_even_after_it_is_decided(client, db_path, owner_id):
+    """show_content may reference an item the owner already acted on -- the single-item
+    GET must not filter by status the way the list endpoint does."""
+    item_id = business_db.create_review_item(db_path, owner_id, "One shot")
+    client.post(f"/api/review/items/{item_id}/decide", json={"decision": "approved"})
+    item = client.get(f"/api/review/items/{item_id}").json()
+    assert item["status"] == "approved"
+
+
+def test_get_one_item_404s_for_an_unknown_id(client):
+    assert client.get("/api/review/items/999").status_code == 404
+
+
 def test_a_choice_carries_its_options_in_order(client, db_path, owner_id):
     business_db.create_review_item(
         db_path, owner_id, "Pick a treatment", kind="art",

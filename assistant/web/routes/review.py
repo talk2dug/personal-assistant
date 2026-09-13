@@ -61,6 +61,20 @@ async def list_items(request: Request, status: str = "pending", limit: int = 50)
     }
 
 
+@router.get("/items/{item_id}")
+async def get_item(item_id: int, request: Request):
+    """A single review item with its options, regardless of status (decided or not) --
+    what show_content's kind='review_item' modal renders. The list endpoint above only
+    ever shows one status at a time and Jarvis may want to reference an item that's
+    already been decided, so this doesn't filter on status at all."""
+    owner = _owner_id(request)
+    cfg = request.app.state.cfg
+    item = business_db.get_review_item(cfg.db_path, owner, item_id)
+    if item is None:
+        raise HTTPException(404, "no review item with that id")
+    return item
+
+
 @router.post("/items/{item_id}/decide")
 async def decide(item_id: int, request: Request):
     owner = _owner_id(request)

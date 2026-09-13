@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useJarvis } from '../context/JarvisContext'
 import ActiveWorkStrip from './chat/ActiveWorkStrip'
+import ContentModal from './modals/ContentModal'
 
 function CameraWindow({ camera, onClose }) {
   const [broken, setBroken] = useState(false)
@@ -64,6 +65,7 @@ export default function JarvisDock({ compact }) {
     mode, caption, messages, sending, mediaError, recording, transcribing,
     modalOpen, setModalOpen, sendToJarvis, toggleRecording,
     videoRef, snapshotCanvasRef, activeCamera, closeCamera,
+    activeContent, closeContent,
   } = useJarvis()
 
   const [input, setInput] = useState('')
@@ -143,6 +145,7 @@ export default function JarvisDock({ compact }) {
       )}
 
       {activeCamera && <CameraWindow camera={activeCamera} onClose={closeCamera} />}
+      {activeContent && <ContentModal content={activeContent} onClose={closeContent} />}
     </>
   )
 }

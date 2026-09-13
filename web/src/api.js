@@ -37,8 +37,15 @@ export const api = {
   me: () => request('/api/me'),
 
   chatHistory: () => request('/api/chat/history'),
-  sendMessage: (text, image) =>
-    request('/api/chat/message', { method: 'POST', body: JSON.stringify(image ? { text, image } : { text }) }),
+  sendMessage: (text, image, viewingContext) =>
+    request('/api/chat/message', {
+      method: 'POST',
+      body: JSON.stringify({
+        text,
+        ...(image ? { image } : {}),
+        ...(viewingContext ? { context: viewingContext } : {}),
+      }),
+    }),
   // FormData, not JSON — must NOT go through request()'s helper, which force-sets
   // Content-Type: application/json; the browser needs to set the multipart boundary itself.
   transcribe: async (audioBlob) => {
@@ -192,6 +199,7 @@ export const api = {
     request(`/api/kitchen/shopping-list/${encodeURIComponent(item)}/purchased`, { method: 'POST' }),
 
   reviewItems: (status = 'pending') => request(`/api/review/items?status=${status}`),
+  reviewItem: (itemId) => request(`/api/review/items/${itemId}`),
   decideReview: (id, decision) =>
     request(`/api/review/items/${id}/decide`, { method: 'POST', body: JSON.stringify(decision) }),
 

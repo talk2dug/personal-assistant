@@ -57,13 +57,37 @@ function usePendingReviewCount() {
 
 const MODE_LABEL = { idle: 'Standing by', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking' }
 
+// What each detail modal is, in plain language -- fed to Jarvis as viewing_context
+// (Phase 4) whenever it's the one open, so "what am I looking at" has a real answer
+// without the owner having to describe the screen themselves.
+const MODAL_LABELS = {
+  agents: 'the Agents detail modal, showing the full roster grouped by department',
+  crypto: 'the Crypto detail modal, showing the paper-trading book, open positions, and recent trades',
+  schedule: 'the Schedule detail modal, showing upcoming reminders and the weather forecast',
+  finance: 'the Finance detail modal, showing account balances and upcoming recurring charges',
+  media: 'the Media detail modal, showing the catalogue broken down by kind and volume',
+}
+
 export default function Dashboard() {
-  const { mode, caption, recording, transcribing, mediaError, toggleRecording, setModalOpen } = useJarvis()
+  const {
+    mode, caption, recording, transcribing, mediaError, toggleRecording, setModalOpen,
+    setViewingContext,
+  } = useJarvis()
   const [focusMode, setFocusMode] = useState(false)
   // Which detail modal (if any) is open -- 'agents' | 'crypto' | 'schedule' | 'finance'
   // | 'media' | null. One piece of state for all five rather than five booleans, since
   // only one can ever be open at a time.
   const [openModal, setOpenModal] = useState(null)
+
+  function openModalWithContext(key) {
+    setOpenModal(key)
+    setViewingContext(MODAL_LABELS[key])
+  }
+  function closeModal() {
+    setOpenModal(null)
+    setViewingContext(null)
+  }
+
   const now = useClock()
   const pendingReview = usePendingReviewCount()
   const {
@@ -103,8 +127,8 @@ export default function Dashboard() {
             <div
               className="dash-panel cc-card-sm is-clickable"
               role="button" tabIndex={0}
-              onClick={() => setOpenModal('agents')}
-              onKeyDown={(e) => e.key === 'Enter' && setOpenModal('agents')}
+              onClick={() => openModalWithContext('agents')}
+              onKeyDown={(e) => e.key === 'Enter' && openModalWithContext('agents')}
             >
               <AgentsSection agents={agents} error={agentsError} />
             </div>
@@ -124,16 +148,16 @@ export default function Dashboard() {
             <div
               className="dash-panel cc-card-sm is-clickable"
               role="button" tabIndex={0}
-              onClick={() => setOpenModal('crypto')}
-              onKeyDown={(e) => e.key === 'Enter' && setOpenModal('crypto')}
+              onClick={() => openModalWithContext('crypto')}
+              onKeyDown={(e) => e.key === 'Enter' && openModalWithContext('crypto')}
             >
               <CryptoSection book={book} hasTraders={cryptoTraders > 0} error={cryptoError} />
             </div>
             <div
               className="dash-panel cc-card-sm is-clickable"
               role="button" tabIndex={0}
-              onClick={() => setOpenModal('schedule')}
-              onKeyDown={(e) => e.key === 'Enter' && setOpenModal('schedule')}
+              onClick={() => openModalWithContext('schedule')}
+              onKeyDown={(e) => e.key === 'Enter' && openModalWithContext('schedule')}
             >
               <ScheduleSection schedule={schedule} error={scheduleError} />
             </div>
@@ -143,8 +167,8 @@ export default function Dashboard() {
           </div>
 
           <div className="cc-row">
-            <FinanceCard onClick={() => setOpenModal('finance')} />
-            <MediaCard onClick={() => setOpenModal('media')} />
+            <FinanceCard onClick={() => openModalWithContext('finance')} />
+            <MediaCard onClick={() => openModalWithContext('media')} />
             <GpuCard />
           </div>
 
@@ -187,11 +211,11 @@ export default function Dashboard() {
         </div>
       </footer>
 
-      {openModal === 'agents' && <AgentsModal onClose={() => setOpenModal(null)} />}
-      {openModal === 'crypto' && <CryptoModal onClose={() => setOpenModal(null)} />}
-      {openModal === 'schedule' && <ScheduleModal onClose={() => setOpenModal(null)} />}
-      {openModal === 'finance' && <FinanceModal onClose={() => setOpenModal(null)} />}
-      {openModal === 'media' && <MediaModal onClose={() => setOpenModal(null)} />}
+      {openModal === 'agents' && <AgentsModal onClose={closeModal} />}
+      {openModal === 'crypto' && <CryptoModal onClose={closeModal} />}
+      {openModal === 'schedule' && <ScheduleModal onClose={closeModal} />}
+      {openModal === 'finance' && <FinanceModal onClose={closeModal} />}
+      {openModal === 'media' && <MediaModal onClose={closeModal} />}
     </div>
   )
 }

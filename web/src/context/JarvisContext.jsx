@@ -80,6 +80,18 @@ export function JarvisProvider({ children }) {
   // The room camera Jarvis opened via show_camera ("show me the kitchen"), distinct from
   // cameraOn above (the user's own outgoing webcam, used for vision-in on a sent message).
   const [activeCamera, setActiveCamera] = useState(null)
+  // Whatever Jarvis pulled into view via show_content (a review item or a block of
+  // text) -- same one-shot handoff as activeCamera, see sendToJarvis below.
+  const [activeContent, setActiveContent] = useState(null)
+  // What's currently on screen for the owner, if anything -- a Command Center detail
+  // modal or this same activeContent -- so the next chat turn can tell Jarvis what's
+  // being looked at (Phase 4). A short plain-text description or null, e.g. "the
+  // Finance detail modal, showing $12,450 across 2 accounts" -- sendToJarvis reads
+  // this via a ref (not the state) so setting it doesn't need to thread through every
+  // call site, and handle_message folds it into this one turn only, never persisted.
+  const [viewingContext, setViewingContext] = useState(null)
+  const viewingContextRef = useRef(null)
+  useEffect(() => { viewingContextRef.current = viewingContext }, [viewingContext])
 
   const videoRef = useRef(null)
   const snapshotCanvasRef = useRef(null)
@@ -197,10 +209,11 @@ export function JarvisProvider({ children }) {
     setSending(true)
     sendingRef.current = true
     try {
-      const { reply, camera } = await api.sendMessage(text, image)
+      const { reply, camera, content } = await api.sendMessage(text, image, viewingContextRef.current)
       if (addToLog) setMessages((prev) => [...prev, { role: 'assistant', content: stripMarkdown(reply) }])
       if (reply) setCaption(stripMarkdown(reply))
       if (camera) setActiveCamera(camera)
+      if (content) setActiveContent(content)
       speak(reply)
     } catch (err) {
       const errText = `(error reaching Jarvis: ${err.message})`
@@ -283,6 +296,7 @@ export function JarvisProvider({ children }) {
   }, [startRecording, stopRecording])
 
   const closeCamera = useCallback(() => setActiveCamera(null), [])
+  const closeContent = useCallback(() => setActiveContent(null), [])
 
   // ---- keyboard: space opens the mic, anywhere in the app --------------------
   useEffect(() => {
@@ -337,6 +351,8 @@ export function JarvisProvider({ children }) {
     speak, toggleVoice, toggleCamera, toggleRecording, startRecording, stopRecording, sendToJarvis,
     analyserRef, freqRef, modeRef, videoRef, snapshotCanvasRef,
     activeCamera, closeCamera,
+    activeContent, closeContent,
+    viewingContext, setViewingContext,
   }
 
   return <JarvisContext.Provider value={value}>{children}</JarvisContext.Provider>

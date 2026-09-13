@@ -10,8 +10,16 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Below the chat text modal (index.css's .chat-modal-backdrop, z-index: 300) on
+     purpose -- see Modal.jsx's docstring for the one exception (elevated). */
   z-index: 200;
   padding: 16px;
+}
+
+/* ContentModal only (Phase 3) -- above the chat modal, since seeing what Jarvis just
+   pushed into view is the actual point of the interaction, chat window or not. */
+.modal-backdrop-elevated {
+  z-index: 400;
 }
 
 .modal-panel {
@@ -39,7 +47,14 @@
   margin-bottom: 14px;
 }
 
-.modal-close {
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-close,
+.modal-talk {
   background: none;
   border: 1px solid var(--border-dim);
   color: var(--text-dim);
@@ -56,6 +71,11 @@
 .modal-close:hover {
   border-color: var(--red-dim);
   color: var(--red);
+}
+
+.modal-talk:hover {
+  border-color: var(--cyan-dim, var(--cyan));
+  color: var(--cyan);
 }
 
 .modal-body {
@@ -116,4 +136,43 @@
   font-family: var(--font-mono);
   font-size: 12px;
   white-space: nowrap;
+}
+
+/* --- content modal (Jarvis-pushed content, ContentModal.jsx) --------------------- */
+
+.modal-text-body {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 14px;
+  border-radius: 4px;
+}
+
+.modal-content-summary {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0 0 14px;
+}
+
+.modal-content-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 14px;
+}
+
+.modal-content-gallery-item img,
+.modal-content-gallery-item video {
+  width: 100%;
+  border-radius: 4px;
+  border: 1px solid var(--border-dim);
+}
+
+.modal-content-gallery-label {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
 }

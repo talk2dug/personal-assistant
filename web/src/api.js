@@ -141,6 +141,13 @@ export const api = {
     request(`/api/email/messages/${encodeURIComponent(uid)}?folder=${encodeURIComponent(folder)}`),
   sendEmail: (to, subject, body) =>
     request('/api/email/send', { method: 'POST', body: JSON.stringify({ to, subject, body }) }),
+  markEmailRead: (uid, folder = 'INBOX') =>
+    request(`/api/email/messages/${encodeURIComponent(uid)}/read?folder=${encodeURIComponent(folder)}`, { method: 'POST' }),
+  archiveEmail: (uid, folder = 'INBOX') =>
+    request(`/api/email/messages/${encodeURIComponent(uid)}/archive?folder=${encodeURIComponent(folder)}`, { method: 'POST' }),
+  deleteEmail: (uid, folder = 'INBOX') =>
+    request(`/api/email/messages/${encodeURIComponent(uid)}/delete?folder=${encodeURIComponent(folder)}`, { method: 'POST' }),
+  mailJunkLog: (limit = 50) => request(`/api/email/junk-log?limit=${limit}`),
 
   activeWork: () => request('/api/active-work'),
   sshHostsStatus: () => request('/api/infra/ssh-hosts'),

@@ -10,9 +10,10 @@ from datetime import date, datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import (
-    agents, business_db, db, github_client, kitchen_db, location, mail_triage, market_data,
+    agents, business_db, db, github_client, kitchen_db, location, mail_db, mail_triage, market_data,
     paper_trading, personal_agents, personal_db, staff,
 )
+from .mail_client import JUNK_FOLDER
 from .engine import handle_message
 from .finance import CADENCE_DAYS
 from . import finance
@@ -130,6 +131,7 @@ def start(
         def _mail_junk_tick():
             result = run_mail_junk_scan(mail.mcp_client, limit=mail_junk_scan_limit)
             if result.get("flagged"):
+                record_junk_scan_results(db_path, "INBOX", result.get("results", []))
                 logger.info(
                     "mail junk scan: flagged %d of %d scanned message(s) as junk (moved %d)",
                     result["flagged"], result["scanned"], result.get("moved", 0),
@@ -654,6 +656,31 @@ def run_mail_junk_scan(mcp_client, limit: int = 25) -> dict:
     refresh_era_cache/sync_calendar already use.
     """
     return mcp_client.call_tool("scan_inbox_for_junk", {"limit": limit, "only_unread": True})
+
+
+def record_junk_scan_results(db_path: str, folder: str, results: list[dict]) -> int:
+    """Writes one mail_junk_log row per flagged message from a scan_inbox_for_junk pass
+    -- the owner-facing audit trail that job has never had beyond the logger.info line in
+    _mail_junk_tick above. Only flagged rows are recorded (everything else just wasn't
+    junk); moved_to is only set when the move itself actually succeeded, so a flagged-
+    but-failed-to-move row is still visible rather than silently dropped.
+
+    A thin top-level wrapper, same pattern as run_mail_junk_scan itself, so it's directly
+    unit-testable against a plain list of result dicts rather than a real scheduler tick.
+    """
+    mail_db.init_mail_db(db_path)
+    logged = 0
+    for r in results:
+        if not r.get("flagged"):
+            continue
+        moved = bool(r.get("moved", False))
+        mail_db.log_junk_action(
+            db_path, r["uid"], folder, r.get("from", ""), r.get("subject", ""),
+            r.get("score", 0.0), r.get("reasons", []), moved,
+            moved_to=JUNK_FOLDER if moved else None,
+        )
+        logged += 1
+    return logged
 
 
 def run_task_watchdog(db_path: str, notify, as_of: str | None = None) -> list[dict]:

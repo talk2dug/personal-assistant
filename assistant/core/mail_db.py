@@ -11,6 +11,7 @@ reconciled after a real send. The only place a message actually leaves the accou
 mail_client.py's send(), which stays behind the existing pending_actions confirmation
 gate untouched by any of this.
 """
+import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -34,6 +35,27 @@ CREATE TABLE IF NOT EXISTS email_drafts (
     UNIQUE(owner_user_id, folder, uid)
 );
 CREATE INDEX IF NOT EXISTS idx_email_drafts_status ON email_drafts(owner_user_id, status, created_at);
+
+-- Audit trail for the autonomous junk-scan (scheduler.run_mail_junk_scan / mail_client
+-- .scan_inbox_for_junk). That pass has always run unattended -- no confirmation, by
+-- design, since moving into Junk is reversible -- but until now the only record of what
+-- it did was a single logger.info line per scan. One row per message it flagged (whether
+-- or not the move itself succeeded), so the owner has something real to look at instead
+-- of trusting the scoring blindly. Purely informational: nothing reads this back to
+-- decide anything, and nothing here can undo or redo a move.
+CREATE TABLE IF NOT EXISTS mail_junk_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT NOT NULL,
+    folder TEXT NOT NULL DEFAULT 'INBOX',
+    from_address TEXT,
+    subject TEXT,
+    score REAL NOT NULL,
+    reasons TEXT,
+    moved INTEGER NOT NULL DEFAULT 0,
+    moved_to TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mail_junk_log_created ON mail_junk_log(created_at);
 """
 
 
@@ -166,3 +188,37 @@ def count_pending_drafts(db_path: str, owner_user_id: int) -> int:
             "SELECT COUNT(*) AS n FROM email_drafts WHERE owner_user_id = ? AND status IN ('drafted', 'edited')",
             (owner_user_id,),
         ).fetchone()["n"]
+
+
+# --- junk-scan audit log (see mail_junk_log's schema comment above) ---------------
+
+def log_junk_action(
+    db_path: str, uid: str, folder: str, from_address: str, subject: str,
+    score: float, reasons: list[str], moved: bool, moved_to: str | None = None,
+) -> int:
+    """Records one message scan_inbox_for_junk decided was junk this pass, regardless of
+    whether the move into Junk actually succeeded (moved=False + no moved_to means it was
+    flagged but the move itself failed, still worth surfacing). Called from
+    scheduler.record_junk_scan_results, once per flagged result -- never for messages that
+    scored under threshold, so this table doesn't fill up with every message ever scanned."""
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO mail_junk_log
+                   (uid, folder, from_address, subject, score, reasons, moved, moved_to, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (uid, folder, from_address, subject, score, json.dumps(reasons or []), int(moved), moved_to, _now()),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_junk_log(db_path: str, limit: int = 50) -> list[dict]:
+    """Most recent auto-junked messages first, for the Email page's audit view."""
+    with closing(_connect(db_path)) as conn:
+        rows = _rows(conn.execute(
+            "SELECT * FROM mail_junk_log ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+        ))
+    for row in rows:
+        row["reasons"] = json.loads(row["reasons"]) if row.get("reasons") else []
+        row["moved"] = bool(row["moved"])
+    return rows

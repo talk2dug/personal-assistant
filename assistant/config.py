@@ -309,9 +309,13 @@ def load_config(path: str = "config.json") -> Config:
         # SMS read, call log, device controls) executes immediately.
         phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
         stt_model_size=data.get("stt_model_size", "small.en"),
-        # Matches the phone/Era gating policy: only send_email has real-world consequences
-        # (an email actually leaving the account) — read tools (list/search/read) run directly.
-        mail_sensitive_tools=data.get("mail_sensitive_tools", ["send_email"]),
+        # Matches the phone/Era gating policy: only tools with a real, hard-to-fully-undo
+        # consequence require confirmation. send_email leaves the account for good;
+        # archive_email/delete_email each remove a message from wherever the user currently
+        # has it (delete lands it in Trash, not a true wipe, but it's still gone from view
+        # without warning if unconfirmed) — read tools (list/search/read/list_mail_folders)
+        # and mark_email_read (just a flag, trivially reversible) run directly.
+        mail_sensitive_tools=data.get("mail_sensitive_tools", ["send_email", "archive_email", "delete_email"]),
         # Junk-flagging (move to Junk folder) is deliberately NOT in mail_sensitive_tools:
         # it's reversible (nothing is deleted) and the whole point of "autonomous" triage
         # is that it doesn't wait on a chat confirmation for every scan.

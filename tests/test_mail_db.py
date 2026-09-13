@@ -100,3 +100,46 @@ def test_drafts_are_scoped_to_owner(db_path):
     draft_id = _make(db_path, owner=1)
     assert mail_db.get_draft(db_path, 2, draft_id) is None
     assert mail_db.list_drafts(db_path, 2) == []
+
+
+# --- junk-scan audit log (Phase 3 of project 19: visibility, not a new gate) -------
+
+def test_log_junk_action_and_list(db_path):
+    mail_db.log_junk_action(
+        db_path, "500", "INBOX", "spammer@example.com", "You won a prize!",
+        6.5, ["prize", "click here"], moved=True, moved_to="Junk",
+    )
+    entries = mail_db.list_junk_log(db_path)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["uid"] == "500"
+    assert entry["from_address"] == "spammer@example.com"
+    assert entry["subject"] == "You won a prize!"
+    assert entry["score"] == 6.5
+    assert entry["reasons"] == ["prize", "click here"]
+    assert entry["moved"] is True
+    assert entry["moved_to"] == "Junk"
+
+
+def test_list_junk_log_most_recent_first(db_path):
+    mail_db.log_junk_action(db_path, "1", "INBOX", "a@x.com", "first", 5.0, [], moved=True, moved_to="Junk")
+    mail_db.log_junk_action(db_path, "2", "INBOX", "b@x.com", "second", 5.0, [], moved=True, moved_to="Junk")
+    entries = mail_db.list_junk_log(db_path)
+    assert [e["uid"] for e in entries] == ["2", "1"]
+
+
+def test_list_junk_log_respects_limit(db_path):
+    for i in range(5):
+        mail_db.log_junk_action(db_path, str(i), "INBOX", "a@x.com", "s", 5.0, [], moved=True, moved_to="Junk")
+    assert len(mail_db.list_junk_log(db_path, limit=2)) == 2
+
+
+def test_log_junk_action_records_a_failed_move_with_no_destination(db_path):
+    mail_db.log_junk_action(db_path, "9", "INBOX", "a@x.com", "s", 5.0, [], moved=False)
+    entry = mail_db.list_junk_log(db_path)[0]
+    assert entry["moved"] is False
+    assert entry["moved_to"] is None
+
+
+def test_list_junk_log_empty_by_default(db_path):
+    assert mail_db.list_junk_log(db_path) == []

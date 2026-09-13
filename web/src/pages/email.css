@@ -14,6 +14,19 @@
 .email-row.is-unread .task-text { font-weight: 700; }
 .email-row.is-unread { border-left-color: var(--cyan); }
 
+.email-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+/* Per-row mark-read/archive/delete -- always reachable without opening the message,
+   same reasoning Tasks' inline drop button has. stopPropagation keeps a click here from
+   also opening MessageDetail (see Email.jsx's requestAction/handleMarkRead). */
+.email-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.email-row-actions .task-drop { font-size: 15px; padding: 2px 4px; }
+
 .email-detail {
   margin-top: 16px;
   background: var(--bg-inset);
@@ -28,7 +41,15 @@
   justify-content: space-between;
   gap: 12px;
 }
-.email-detail-header h4 { margin: 0; }
+.email-detail-header h4 { margin: 0; flex: 1; min-width: 0; overflow-wrap: break-word; }
+
+.email-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.email-detail-actions .task-drop { font-size: 15px; padding: 2px 4px; }
 
 .email-detail-meta {
   display: flex;
@@ -115,4 +136,12 @@
 .confirm-send-cancel:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Delete's variant of the confirm-send button -- same modal shell as send/archive
+   (ConfirmMailActionModal reuses confirm-send-*), just marked red since this is the one
+   of the three that moves a message somewhere the owner isn't currently looking. */
+.confirm-send-go.confirm-send-danger {
+  background: var(--red);
+  border-color: var(--red);
 }

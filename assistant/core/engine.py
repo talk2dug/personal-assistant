@@ -526,6 +526,62 @@ MAIL_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "mark_email_read",
+            "description": "Mark one email as read (sets the \\Seen flag), from list_emails/search_emails results.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "The email's uid."},
+                    "folder": {"type": "string", "description": "IMAP folder name (default 'INBOX')."},
+                },
+                "required": ["uid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "archive_email",
+            "description": "Move one email into the account's Archive folder, from list_emails/search_emails results.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "The email's uid."},
+                    "folder": {"type": "string", "description": "IMAP folder the email is currently in (default 'INBOX')."},
+                },
+                "required": ["uid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_email",
+            "description": (
+                "Move one email to the account's Trash folder (never a permanent, unrecoverable wipe), "
+                "from list_emails/search_emails results."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "The email's uid."},
+                    "folder": {"type": "string", "description": "IMAP folder the email is currently in (default 'INBOX')."},
+                },
+                "required": ["uid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_mail_folders",
+            "description": "List every real IMAP folder on this account, e.g. to find the exact name of Archive/Trash/Junk.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 MAIL_KEYWORDS = ["email", "e-mail", "emails", "inbox", "mailbox", "unread mail", "mail from", "send a mail", "compose"]
@@ -1104,19 +1160,26 @@ HOME_ASSISTANT_SYSTEM_NOTE = (
 )
 
 MAIL_SYSTEM_NOTE = (
-    " You also have read access to the user's iCloud email (list_emails, search_emails, read_email) and "
-    "can send new email (send_email). search_emails only matches one exact phrase per call — for a request "
-    "spanning multiple categories (e.g. 'find receipts, payment confirmations, or bills'), call "
-    "search_emails several times in the SAME turn, once per keyword (e.g. 'receipt', 'payment', 'bill', "
-    "'invoice', 'past due'), rather than one keyword at a time across separate turns — you have a limited "
-    "number of tool-calling rounds, and spreading searches out risks running out before you've gathered "
-    "real results. If you genuinely run out of rounds before finishing, say so plainly rather than "
-    "answering from general knowledge of what such emails typically look like — a guessed answer about "
-    "someone's real inbox is worse than an honest 'I didn't finish checking.' Sending is sensitive — "
-    "calling send_email does not send it immediately; it stages the message and you must clearly read "
-    "back exactly what will be sent (to, subject, body) and ask the user to explicitly confirm before it "
-    "goes out. After any read tool call, answer using the actual data returned — state it in plain "
-    "language, as if you already knew it. Never describe the tool call itself."
+    " You also have read access to the user's iCloud email (list_emails, search_emails, read_email, "
+    "list_mail_folders) and can send new email (send_email), mark a message read (mark_email_read), move "
+    "one to Archive (archive_email), or move one to Trash (delete_email). search_emails only matches one "
+    "exact phrase per call — for a request spanning multiple categories (e.g. 'find receipts, payment "
+    "confirmations, or bills'), call search_emails several times in the SAME turn, once per keyword (e.g. "
+    "'receipt', 'payment', 'bill', 'invoice', 'past due'), rather than one keyword at a time across "
+    "separate turns — you have a limited number of tool-calling rounds, and spreading searches out risks "
+    "running out before you've gathered real results. If you genuinely run out of rounds before "
+    "finishing, say so plainly rather than answering from general knowledge of what such emails typically "
+    "look like — a guessed answer about someone's real inbox is worse than an honest 'I didn't finish "
+    "checking.' send_email, archive_email, and delete_email are sensitive — calling one of those does not "
+    "execute it immediately; it stages the action and you must clearly describe exactly what will happen "
+    "(for send_email: read back the to, subject, and body; for archive_email/delete_email: name the exact "
+    "message by subject/sender) and ask the user to explicitly confirm before it goes out or moves. "
+    "delete_email only moves a message to Trash — it is not a permanent wipe — but still always requires "
+    "confirmation, the same as archive_email; never treat either as safe to run without asking first, no "
+    "matter how confident you are about which message the user means. mark_email_read and "
+    "list_mail_folders are not sensitive and run immediately. After any read tool call, answer using the "
+    "actual data returned — state it in plain language, as if you already knew it. Never describe the "
+    "tool call itself."
 )
 
 PHONE_SYSTEM_NOTE = (

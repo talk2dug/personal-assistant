@@ -717,12 +717,43 @@ def test_rejecting_the_review_item_never_runs_anything(db_path):
 
     result = client.call_tool("decide_review_item", {
         "item_id": proposed["review_item_id"], "decision": "rejected",
+        "note": "too risky to run unattended",
     })
 
     assert result["ok"] is True
     plan = ops_plans.get_plan(db_path, proposed["plan_id"])
     assert plan["status"] == "rejected"
     assert ssh.run_calls == []
+
+
+def test_rejecting_from_chat_without_a_reason_is_refused(db_path):
+    """The same rule the Review page enforces has to hold here too, or it is bypassed by
+    rejecting in chat instead. Phrased as something to go and ask: the owner has already
+    said no, and the only missing piece is why."""
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE)
+    item_id = business_db.create_review_item(db_path, 1, "RVA skyline decal", kind="concept")
+
+    result = client.call_tool("decide_review_item", {"item_id": item_id, "decision": "rejected"})
+
+    assert "error" in result
+    assert "reason" in result["error"].lower()
+    # Nothing recorded, so it can still be decided once he says why.
+    assert business_db.get_review_item(db_path, 1, item_id)["status"] == "pending"
+
+
+def test_rejecting_from_chat_with_a_reason_is_recorded(db_path):
+    client = BusinessClient(db_path, owner_user_id=1, profile=PROFILE)
+    item_id = business_db.create_review_item(db_path, 1, "RVA skyline decal", kind="concept")
+
+    result = client.call_tool("decide_review_item", {
+        "item_id": item_id, "decision": "rejected",
+        "note": "I already have this created",
+    })
+
+    assert result["ok"] is True
+    decided = business_db.get_review_item(db_path, 1, item_id)
+    assert decided["status"] == "rejected"
+    assert decided["decision_note"] == "I already have this created"
 
 
 @pytest.mark.parametrize("ref_table", ["pending_actions", "git_pull_requests"])

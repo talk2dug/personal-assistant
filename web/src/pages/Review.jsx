@@ -161,8 +161,17 @@ export default function Review() {
     setNote('')
   }, [selected?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A rejection requires a reason, and the button is disabled until there is one rather
+  // than failing on submit. The server enforces this too (it is the real gate, and chat
+  // can reject as well) -- this is only so the requirement is visible before the click.
+  // Of 84 decided cards only 6 carried a note, and a bare "no" is the one verdict that
+  // teaches nothing: "approved" at least says the output was fine, while "rejected" with
+  // no reason says only that something was wrong, which no agent can act on.
+  const rejectBlocked = !note.trim()
+
   async function decide(decision) {
     if (!selected || busy) return
+    if (decision === 'rejected' && rejectBlocked) return
     setBusy(true)
     try {
       await api.decideReview(selected.id, {
@@ -303,19 +312,33 @@ export default function Review() {
               )}
 
               {selected.status === 'pending' ? (
-                <div className="review-actions">
-                  <input
-                    className="review-note"
-                    value={note}
-                    onChange={(e) => setNote(e.target.value)}
-                    placeholder="Note (optional) — why, or what to change"
-                  />
-                  <button className="review-reject" disabled={busy} onClick={() => decide('rejected')}>
-                    Reject
-                  </button>
-                  <button className="review-approve" disabled={busy} onClick={() => decide('approved')}>
-                    {isChoice ? 'Approve selected' : 'Approve'}
-                  </button>
+                <div className="review-actions-wrap">
+                  <div className="review-actions">
+                    <input
+                      className="review-note"
+                      value={note}
+                      onChange={(e) => setNote(e.target.value)}
+                      placeholder="Why, or what to change — required to reject"
+                    />
+                    <button
+                      className="review-reject"
+                      disabled={busy || rejectBlocked}
+                      title={rejectBlocked ? 'Say what was wrong first' : 'Reject'}
+                      onClick={() => decide('rejected')}
+                    >
+                      Reject
+                    </button>
+                    <button className="review-approve" disabled={busy} onClick={() => decide('approved')}>
+                      {isChoice ? 'Approve selected' : 'Approve'}
+                    </button>
+                  </div>
+                  {rejectBlocked && (
+                    <p className="review-note-hint">
+                      A rejection needs a reason — anything you type teaches me more than the
+                      yes/no does. A bare “no” tells the agent something was wrong but not
+                      what, so it proposes the same thing again next run.
+                    </p>
+                  )}
                 </div>
               ) : (
                 selected.decision_note && (

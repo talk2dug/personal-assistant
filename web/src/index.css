@@ -2185,6 +2185,16 @@ body::after {
 .review-approve:hover:not(:disabled) { background: var(--cyan-dim); color: #001217; }
 .review-decision-note { font-size: 12px; color: var(--text-dim); font-style: italic; }
 
+/* The wrapper now owns the push-to-bottom that .review-actions used to do on its own,
+   so the "a rejection needs a reason" hint sits with the buttons instead of being
+   shoved to the bottom separately. */
+.review-actions-wrap { margin-top: auto; padding-top: 8px; }
+.review-actions-wrap .review-actions { margin-top: 0; padding-top: 0; }
+.review-note-hint {
+  margin: 8px 0 0; font-size: 11px; line-height: 1.5; color: var(--text-dim);
+  border-left: 2px solid var(--amber); padding-left: 10px;
+}
+
 .nav-badge {
   margin-left: 8px; padding: 1px 7px; font-family: var(--font-mono, monospace); font-size: 10px;
   background: var(--amber); color: #1a1000; vertical-align: middle;

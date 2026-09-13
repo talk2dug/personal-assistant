@@ -100,6 +100,21 @@ async def decide(item_id: int, request: Request):
             and not (note or "").strip()):
         raise HTTPException(400, "type the person's name in the note before approving")
 
+    # A rejection requires a reason. The owner asked for this explicitly and accepted the
+    # friction knowingly: of 84 decided cards, only 6 carried a note, and a bare "no" is
+    # the one verdict that teaches nothing. "Approved" at least says the output was fine;
+    # "rejected" without a reason says only that something was wrong, which an agent
+    # cannot act on -- so it re-proposes the same thing next run and the loop never closes.
+    # Checked before the decision is recorded, same reasoning as the enrolment case above:
+    # a card can only be decided once, so a rejected-but-unexplained card could never be
+    # corrected from this page.
+    if decision == "rejected" and not (note or "").strip():
+        raise HTTPException(
+            400,
+            "a rejection needs a reason — say what was wrong in the note. Anything you "
+            "type teaches me more than the yes/no does.",
+        )
+
     item = business_db.decide_review_item(
         cfg.db_path, owner, item_id, decision,
         option_id=body.get("option_id"), note=note,

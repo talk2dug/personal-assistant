@@ -475,7 +475,7 @@ def test_rejecting_the_review_card_dismisses_the_debt_for_good(db_path, owner_id
     c = _client(db_path)
     item_id = business_db.list_review_items(db_path, owner_id, status="pending")[0]["id"]
 
-    assert _decide(c, item_id, "rejected").status_code == 200
+    assert _decide(c, item_id, "rejected", note="not my debt").status_code == 200
 
     assert c.get("/api/debts").json() == []
     assert c.get("/api/debts/proposals").json() == []

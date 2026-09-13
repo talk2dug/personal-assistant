@@ -245,7 +245,8 @@ def test_rejection_writes_through_too(client, db_path, owner_id):
     item_id = business_db.create_review_item(
         db_path, owner_id, "Approve listing", kind="listing",
         ref_table="store_listings", ref_id=listing_id)
-    client.post(f"/api/review/items/{item_id}/decide", json={"decision": "rejected"})
+    client.post(f"/api/review/items/{item_id}/decide",
+                json={"decision": "rejected", "note": "wrong price point"})
     assert business_db.list_store_listings(db_path, owner_id)[0]["status"] == "rejected"
 
 
@@ -253,7 +254,65 @@ def test_an_item_cannot_be_decided_twice(client, db_path, owner_id):
     """A stale tab must not be able to overturn a decision already made."""
     item_id = business_db.create_review_item(db_path, owner_id, "One shot")
     assert client.post(f"/api/review/items/{item_id}/decide", json={"decision": "approved"}).status_code == 200
-    assert client.post(f"/api/review/items/{item_id}/decide", json={"decision": "rejected"}).status_code == 404
+    assert client.post(
+        f"/api/review/items/{item_id}/decide",
+        json={"decision": "rejected", "note": "changed my mind"}).status_code == 404
+
+
+def test_rejecting_without_a_reason_is_refused(client, db_path, owner_id):
+    """The owner asked for this and accepted the friction knowingly: of 84 decided cards
+    only 6 carried a note. A bare "no" is the one verdict that teaches nothing -- it says
+    something was wrong but not what, so the agent re-proposes the same thing next run."""
+    item_id = business_db.create_review_item(db_path, owner_id, "RVA skyline decal", kind="concept")
+
+    resp = client.post(f"/api/review/items/{item_id}/decide", json={"decision": "rejected"})
+
+    assert resp.status_code == 400
+    assert "reason" in resp.json()["detail"].lower()
+    # Refused before anything was recorded, so the card is still decidable from this page.
+    assert business_db.get_review_item(db_path, owner_id, item_id)["status"] == "pending"
+
+
+def test_whitespace_is_not_a_reason(client, db_path, owner_id):
+    item_id = business_db.create_review_item(db_path, owner_id, "RVA skyline decal", kind="concept")
+
+    resp = client.post(f"/api/review/items/{item_id}/decide",
+                       json={"decision": "rejected", "note": "   \n  "})
+
+    assert resp.status_code == 400
+
+
+def test_rejecting_with_a_reason_records_it(client, db_path, owner_id):
+    item_id = business_db.create_review_item(db_path, owner_id, "RVA skyline decal", kind="concept")
+
+    resp = client.post(
+        f"/api/review/items/{item_id}/decide",
+        json={"decision": "rejected", "note": "I already have this created"})
+
+    assert resp.status_code == 200
+    decided = business_db.get_review_item(db_path, owner_id, item_id)
+    assert decided["status"] == "rejected"
+    assert decided["decision_note"] == "I already have this created"
+
+
+def test_approving_still_needs_no_note(client, db_path, owner_id):
+    """The requirement is asymmetric on purpose. "Approved" already carries its meaning --
+    the output was fine -- so demanding a note there would be friction that teaches nothing."""
+    item_id = business_db.create_review_item(db_path, owner_id, "RVA skyline decal", kind="concept")
+
+    resp = client.post(f"/api/review/items/{item_id}/decide", json={"decision": "approved"})
+
+    assert resp.status_code == 200
+
+
+def test_cancelling_still_needs_no_note(client, db_path, owner_id):
+    """Cancelled means "this no longer applies", not "this was wrong" -- there is no
+    lesson in it for the agent."""
+    item_id = business_db.create_review_item(db_path, owner_id, "RVA skyline decal", kind="concept")
+
+    resp = client.post(f"/api/review/items/{item_id}/decide", json={"decision": "cancelled"})
+
+    assert resp.status_code == 200
 
 
 def test_a_bad_decision_value_is_rejected(client, db_path, owner_id):
@@ -362,7 +421,8 @@ def test_rejecting_a_pending_action_review_item_never_calls_it(
         db_path, owner_id, "bulk_add_to_cart", {"items": [{"upc": "123", "quantity": 2}]})
     item = business_db.get_review_item_by_ref(db_path, owner_id, "pending_actions", pending_id)
 
-    client_with_contexts.post(f"/api/review/items/{item['id']}/decide", json={"decision": "rejected"})
+    client_with_contexts.post(f"/api/review/items/{item['id']}/decide",
+                              json={"decision": "rejected", "note": "not buying that"})
     assert kroger.mcp_client.calls == []
     assert db.get_pending_action_by_id(db_path, pending_id)["status"] == "cancelled"
 
@@ -382,7 +442,8 @@ def test_rejecting_a_pr_review_item_leaves_it_open(client_with_contexts, db_path
         db_path, owner_id, "PR #4: fix the thing", "other",
         summary="fix-branch -> main", ref_table="git_pull_requests", ref_id=4)
 
-    client_with_contexts.post(f"/api/review/items/{item_id}/decide", json={"decision": "rejected"})
+    client_with_contexts.post(f"/api/review/items/{item_id}/decide",
+                              json={"decision": "rejected", "note": "needs another look"})
     assert git_ops.mcp_client.merge_calls == []
 
 
@@ -450,7 +511,8 @@ def test_rejecting_a_detected_bill_dismisses_the_row(client, db_path, owner_id):
     from assistant.core import mail_db
     bill_id, item_id = _detected_bill(db_path, owner_id)
 
-    client.post(f"/api/review/items/{item_id}/decide", json={"decision": "rejected"})
+    client.post(f"/api/review/items/{item_id}/decide",
+                json={"decision": "rejected", "note": "already paid this one"})
     assert mail_db.get_bill(db_path, owner_id, bill_id)["status"] == "dismissed"
 
 

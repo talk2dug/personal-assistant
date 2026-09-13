@@ -1203,6 +1203,33 @@ def decide_review_item(
     return get_review_item(db_path, owner_user_id, item_id)
 
 
+def list_verdict_examples(
+    db_path: str, owner_user_id: int, source_agent: str, status: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """The owner's decided cards for one agent, most recent first.
+
+    Deliberately the same shape as mail_db.list_importance_examples: this is only the
+    query, and review_examples.select_examples owns the actual selection strategy
+    (recency, balance, asymmetric backfill, cap). Keeping the split identical means the
+    one proven learning loop in this codebase and this new one cannot drift apart.
+
+    Ordered by decided_at rather than created_at -- what matters is when he ruled, not
+    when the card was raised, and a card he left sitting for a week then rejected is a
+    fresher signal than one he answered instantly the day before.
+    """
+    query = ("SELECT id, title, summary, status, decision_note, decided_at FROM review_items "
+             "WHERE owner_user_id = ? AND source_agent = ? AND status != 'pending'")
+    params: list = [owner_user_id, source_agent]
+    if status is not None:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY decided_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
 def get_review_item_by_ref(db_path: str, owner_user_id: int, ref_table: str, ref_id: int):
     """Looks up the review item standing in for a specific pipeline row -- used to keep
     a card in sync when its underlying decision gets made somewhere other than this

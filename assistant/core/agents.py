@@ -23,7 +23,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from . import agent_notes, business_db
+from . import agent_notes, business_db, review_examples
 
 logger = logging.getLogger(__name__)
 
@@ -347,10 +347,15 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
             f"- {lead['topic']} (score {lead['score']}): {lead.get('product_idea') or ''}" for lead in leads)
         existing = [c["name"] for c in business_db.list_product_concepts(db_path, owner_user_id, limit=40)]
         avoid = ("\n\nAlready proposed, do not repeat: " + "; ".join(existing[:40])) if existing else ""
+        # A list of titles is what it already had, and it is not enough: it knew WHAT it
+        # had proposed and never once what he THOUGHT of it. One of his real rejection
+        # notes reads "I already have this created. No need to make it again" -- a rule
+        # about his workshop no title list could ever convey.
+        verdicts = review_examples.build_verdict_briefing(db_path, owner_user_id, "product_creator")
 
         prompt = (
             f"{_profile_text(profile)}\n\n"
-            f"Trend signals to work from:\n{lead_text}{avoid}\n\n"
+            f"Trend signals to work from:\n{lead_text}{avoid}{verdicts}\n\n"
             f"Propose up to {limit} specific products this shop could actually make and sell. "
             f"Each must be one concrete item, not a category — 'RVA skyline die-cut vinyl "
             f"decal, 4in, matte white' not 'local pride stickers'.\n\n"
@@ -402,10 +407,11 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                 db_path, run_id, "skipped", "No approved concepts waiting on artwork.")
             return {"status": "skipped", "new": 0}
 
+        verdicts = review_examples.build_verdict_briefing(db_path, owner_user_id, "art_director")
         new_count = 0
         for concept in concepts:
             prompt = (
-                f"{_profile_text(profile)}\n\n"
+                f"{_profile_text(profile)}{verdicts}\n\n"
                 f"Product: {concept['name']}\n"
                 f"Type: {concept.get('product_type')}\n"
                 f"Description: {concept.get('description')}\n"
@@ -445,10 +451,11 @@ def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int
     run_id = business_db.start_agent_run(db_path, "store_manager")
     try:
         concepts = business_db.concepts_without(db_path, owner_user_id, "store_listings", limit=limit)
+        verdicts = review_examples.build_verdict_briefing(db_path, owner_user_id, "store_manager")
         new_count = 0
         for concept in concepts:
             prompt = (
-                f"{_profile_text(profile)}\n\n"
+                f"{_profile_text(profile)}{verdicts}\n\n"
                 f"Write the store listing for this product.\n"
                 f"Name: {concept['name']}\n"
                 f"Type: {concept.get('product_type')}\n"
@@ -499,10 +506,11 @@ def run_social_director(db_path: str, llm, owner_user_id: int, profile, limit: i
             business_db.finish_agent_run(db_path, run_id, "skipped", "No listings waiting on posts.")
             return {"status": "skipped", "new": 0}
 
+        verdicts = review_examples.build_verdict_briefing(db_path, owner_user_id, "social_director")
         new_count = 0
         for listing in listings:
             prompt = (
-                f"{_profile_text(profile)}\n\n"
+                f"{_profile_text(profile)}{verdicts}\n\n"
                 f"New product to announce:\n"
                 f"Title: {listing['title']}\n"
                 f"Description: {listing.get('description')}\n"

@@ -422,13 +422,19 @@ BUSINESS_TOOLS = [
         "description": (
             "Record the owner's decision on a queued item when he tells you in conversation "
             "(e.g. 'approve the second one'). Only ever relay a decision he has actually "
-            "made — never decide on his behalf. For a pick-one, pass the option_id he chose."
+            "made — never decide on his behalf. For a pick-one, pass the option_id he chose. "
+            "A REJECTION REQUIRES A NOTE saying what was wrong: if he rejects something "
+            "without saying why, ask him before calling this. His reason is fed back to the "
+            "agent that produced the work, and is the only thing that stops it proposing the "
+            "same thing again."
         ),
         "parameters": {"type": "object", "properties": {
             "item_id": {"type": "integer"},
             "decision": {"type": "string", "enum": ["approved", "rejected", "cancelled"]},
             "option_id": {"type": "integer", "description": "Which option he picked, for a choice."},
-            "note": {"type": "string", "description": "Anything he said about why."},
+            "note": {"type": "string", "description": (
+                "Why, in his own words. Required when decision is 'rejected'."
+            )},
         }, "required": ["item_id", "decision"]},
     }},
     {"type": "function", "function": {
@@ -1163,6 +1169,18 @@ class BusinessClient:
                 return {"error": (
                     "This one has to be decided from the Review page in the web dashboard, "
                     "not from chat -- tell the owner it's waiting for him there."
+                )}
+            if (arguments["decision"] == "rejected"
+                    and not (arguments.get("note") or "").strip()):
+                # Same rule the Review page enforces, and it has to hold here too or the
+                # requirement is bypassed by rejecting in chat instead. Phrased as
+                # something to go and ask rather than a refusal: the owner has already
+                # said no, and the missing piece is only why.
+                return {"error": (
+                    "A rejection needs a reason before it can be recorded. Ask him what "
+                    "was wrong with it -- even a few words -- and call this again with "
+                    "that as the note. It is the only thing that stops the same work "
+                    "coming back next run."
                 )}
             item = business_db.decide_review_item(
                 db_path, owner, arguments["item_id"], arguments["decision"],

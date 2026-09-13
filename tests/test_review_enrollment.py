@@ -92,7 +92,8 @@ def test_approving_with_a_name_enrolls_a_known_person(client, db_path, owner_id)
 
 def test_rejecting_leaves_the_face_unidentified(client, db_path, owner_id):
     item_id, face = _create_enrollment_item(db_path, owner_id)
-    resp = client.post(f"/api/review/items/{item_id}/decide", json={"decision": "rejected"})
+    resp = client.post(f"/api/review/items/{item_id}/decide",
+                       json={"decision": "rejected", "note": "not someone I know"})
     assert resp.status_code == 200
     assert vision.get_unknown_face(db_path, face["id"])["resolved_person_key"] is None
     assert vision.list_known_people(db_path) == []

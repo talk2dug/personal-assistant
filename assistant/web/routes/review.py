@@ -15,7 +15,7 @@ import pathlib
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from ...core import business_db, db, vision
+from ...core import business_db, db, mail_db, vision
 from ...core.business_tools import apply_review_decision
 from ...core.engine import execute_pending_action
 from ..auth import require_user
@@ -148,6 +148,19 @@ async def decide(item_id: int, request: Request):
             written_through = f"git_pull_requests#{ref_id} -> left open on GitHub"
     elif ref_table == "unknown_faces" and ref_id:
         written_through = _apply_enrollment_decision(cfg.db_path, item, decision, note)
+    elif ref_table == "email_bills" and ref_id:
+        # A bill mail_bills.py detected. The decision records the owner's verdict on the
+        # classifier's read and nothing more -- approving does NOT pay anything, schedule
+        # anything, or add a recurring charge (see mail_bills.py on why that table stays
+        # owner-entered). Any reminder already created for the due date stands either
+        # way: dismissing a mis-detected bill shouldn't silently cancel a nudge he may
+        # have been counting on, and cancelling a reminder is one line in chat.
+        status = "confirmed" if decision == "approved" else "dismissed"
+        updated = mail_db.update_bill_status(cfg.db_path, owner, ref_id, status)
+        written_through = (
+            f"email_bills#{ref_id} -> {status}" if updated
+            else f"email_bills#{ref_id} -> no such bill row"
+        )
     else:
         business = request.app.state.business
         ssh_ops = getattr(business.mcp_client, "ssh_ops", None) if business is not None else None

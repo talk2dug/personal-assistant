@@ -38,6 +38,13 @@ def test_unknown_faces_are_personal():
     assert business_db.classify_pipeline({"kind": "other", "ref_table": "unknown_faces"}) == "personal"
 
 
+def test_detected_bills_are_personal_not_mail():
+    """A bill mail_bills.py found arrives BY email, but it's the owner's money and his due
+    date -- it belongs beside his finances, not in the mail-hygiene lane where a drafted
+    reply (email_drafts) sits."""
+    assert business_db.classify_pipeline({"kind": "other", "ref_table": "email_bills"}) == "personal"
+
+
 @pytest.mark.parametrize("ref_table", ["personal_tasks", "dispute_items", "dispute_letters"])
 def test_personal_life_ref_tables_are_personal(ref_table):
     """No real create_review_item call site sets these ref_tables today (grepped every

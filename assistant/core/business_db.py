@@ -937,7 +937,11 @@ def classify_pipeline(item: dict, pending_tool_name: str | None = None) -> str:
                   git_merge_pr.
       mail      - mail_triage's drafted replies ('email_drafts') and a pending_actions
                   confirmation for send_email/archive_email/delete_email.
-      personal  - a camera/vision enrollment ask ('unknown_faces'), a linked personal
+      personal  - a camera/vision enrollment ask ('unknown_faces'), a bill detected in
+                  the owner's own email ('email_bills' -- mail_bills.py; it arrives BY
+                  mail, but it's his money and his due date, so it belongs in the lane
+                  his finances already live in rather than the mail-hygiene lane a
+                  drafted reply sits in), a linked personal
                   task or credit-dispute item/letter ('personal_tasks', 'dispute_items',
                   'dispute_letters' -- no real call site sets these ref_tables today, but
                   the mapping is here for when one does), and every other pending_actions
@@ -963,7 +967,8 @@ def classify_pipeline(item: dict, pending_tool_name: str | None = None) -> str:
         return "dev_ops"
     if ref_table == "email_drafts":
         return "mail"
-    if ref_table in ("unknown_faces", "personal_tasks", "dispute_items", "dispute_letters"):
+    if ref_table in ("unknown_faces", "email_bills", "personal_tasks", "dispute_items",
+                     "dispute_letters"):
         return "personal"
     if ref_table == "pending_actions":
         if pending_tool_name in _DEV_OPS_ACTION_TOOLS:

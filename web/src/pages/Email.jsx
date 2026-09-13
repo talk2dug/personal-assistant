@@ -216,6 +216,55 @@ function JunkLogPanel() {
   )
 }
 
+/** Bills the background scan (mail_bills.py) found in incoming mail. Read-only on
+ *  purpose: this pass only ever reads and records, and the place to actually act on a
+ *  bill is the Review queue, where confirming/dismissing writes back to the row. Amounts
+ *  and dates are shown exactly as the message worded them when they weren't clean enough
+ *  to parse ("$80-$120", "due on receipt") rather than being rounded into a number this
+ *  page can't stand behind. */
+function BillsPanel() {
+  const [bills, setBills] = useState(null)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    api.mailBills(50).then((r) => setBills(r.bills || [])).catch((e) => setError(e.message))
+  }, [])
+
+  if (bills === null) return <p className="empty-hint">Loading…</p>
+
+  return (
+    <section>
+      <h3>Bills</h3>
+      <p className="empty-hint">
+        Bills spotted in incoming mail, with a reminder set a few days ahead of any real
+        due date. Nothing here is paid, filed, or added to your recurring charges — confirm
+        or dismiss them in the Review queue.
+      </p>
+      {error && <p className="empty-hint">{error}</p>}
+      {bills.length === 0 && <p className="empty-hint">No bills detected yet.</p>}
+      <ul className="task-list">
+        {bills.map((bill) => (
+          <li key={bill.id} className="task-row email-row">
+            <div className="task-body">
+              <div className="task-text">
+                {bill.payee || bill.subject || '(unknown payee)'}
+                {bill.amount_text ? ` — ${bill.amount_text}` : ''}
+              </div>
+              <div className="task-meta">
+                <span>{bill.due_date ? `due ${bill.due_date}` : bill.due_date_text || 'no due date'}</span>
+                {bill.is_recurring && <span>recurring{bill.cadence ? ` (${bill.cadence})` : ''}</span>}
+                {bill.reminder_id && <span>reminder set</span>}
+                <span>{bill.status}</span>
+                <span>{bill.from_address}</span>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 function ComposePanel() {
   const [to, setTo] = useState('')
   const [subject, setSubject] = useState('')
@@ -275,12 +324,16 @@ export default function Email() {
         <button className={`kitchen-tab ${tab === 'compose' ? 'active' : ''}`} onClick={() => setTab('compose')}>
           Compose
         </button>
+        <button className={`kitchen-tab ${tab === 'bills' ? 'active' : ''}`} onClick={() => setTab('bills')}>
+          Bills
+        </button>
         <button className={`kitchen-tab ${tab === 'junk' ? 'active' : ''}`} onClick={() => setTab('junk')}>
           Auto-junked
         </button>
       </div>
       {tab === 'inbox' && <InboxPanel />}
       {tab === 'compose' && <ComposePanel />}
+      {tab === 'bills' && <BillsPanel />}
       {tab === 'junk' && <JunkLogPanel />}
     </div>
   )

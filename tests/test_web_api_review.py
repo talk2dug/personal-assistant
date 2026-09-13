@@ -417,3 +417,54 @@ def test_a_pending_kroger_action_is_classified_into_the_personal_pipeline(client
     create_pending_action_and_review(db_path, owner_id, "bulk_add_to_cart", {"items": []})
     item = client.get("/api/review/items").json()["items"][0]
     assert item["pipeline"] == "personal"
+
+
+# --- detected bills (mail_bills.py): the decision records a verdict, nothing more -----
+
+def _detected_bill(db_path, owner_id):
+    from assistant.core import mail_db
+    mail_db.init_mail_db(db_path)
+    bill_id = mail_db.create_bill(
+        db_path, owner_id, folder="INBOX", uid="1", from_address="billing@citypower.example",
+        subject="Your October statement", received_at="2026-09-13", payee="City Power & Light",
+        amount_text="$142.53", amount=142.53, due_date="2026-10-01",
+        due_date_text="due October 1, 2026", is_recurring=True, cadence="monthly",
+        confidence="high", reasoning="Monthly electric statement with a balance due.")
+    item_id = business_db.create_review_item(
+        db_path, owner_id, "Bill: City Power & Light", kind="other",
+        ref_table="email_bills", ref_id=bill_id)
+    return bill_id, item_id
+
+
+def test_approving_a_detected_bill_confirms_the_row(client, db_path, owner_id):
+    from assistant.core import mail_db
+    bill_id, item_id = _detected_bill(db_path, owner_id)
+
+    resp = client.post(f"/api/review/items/{item_id}/decide", json={"decision": "approved"})
+    assert resp.status_code == 200
+    assert f"email_bills#{bill_id}" in (resp.json()["written_through"] or "")
+    assert mail_db.get_bill(db_path, owner_id, bill_id)["status"] == "confirmed"
+
+
+def test_rejecting_a_detected_bill_dismisses_the_row(client, db_path, owner_id):
+    from assistant.core import mail_db
+    bill_id, item_id = _detected_bill(db_path, owner_id)
+
+    client.post(f"/api/review/items/{item_id}/decide", json={"decision": "rejected"})
+    assert mail_db.get_bill(db_path, owner_id, bill_id)["status"] == "dismissed"
+
+
+def test_confirming_a_bill_never_writes_a_recurring_charge(client, db_path, owner_id):
+    """Approving says "yes, that's a real bill" -- it does NOT add it to the table the
+    owner's budget projections read. That stays owner-entered (see mail_bills.py)."""
+    from assistant.core import db as core_db
+    _, item_id = _detected_bill(db_path, owner_id)
+
+    client.post(f"/api/review/items/{item_id}/decide", json={"decision": "approved"})
+    assert core_db.list_manual_recurring_charges(db_path, owner_id) == []
+
+
+def test_a_detected_bill_shows_up_in_the_personal_lane(client, db_path, owner_id):
+    _detected_bill(db_path, owner_id)
+    item = client.get("/api/review/items").json()["items"][0]
+    assert item["pipeline"] == "personal"

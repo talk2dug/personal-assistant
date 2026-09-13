@@ -258,3 +258,72 @@ def test_junk_log_503_when_mail_is_not_configured(db_path):
 def test_junk_log_requires_owner(db_path):
     c = _client(db_path, mail=FakeMailContext(FakeMailClient()), login_as="Partner")
     assert c.get("/api/email/junk-log").status_code == 403
+
+
+# --- bills: read-only visibility into what the bill scan detected (mail_bills.py) ----
+
+def _record_bill(db_path, **overrides):
+    from assistant.core import db as core_db, mail_db
+    mail_db.init_mail_db(db_path)
+    owner = core_db.get_user_by_chat_id(db_path, "111")["id"]
+    kwargs = dict(
+        folder="INBOX", uid="1", from_address="billing@citypower.example",
+        subject="Your October statement", received_at="2026-09-13", payee="City Power & Light",
+        amount_text="$142.53", amount=142.53, due_date="2026-10-01",
+        due_date_text="due October 1, 2026", is_recurring=True, cadence="monthly",
+        confidence="high", reasoning="Monthly electric statement with a balance due.",
+    )
+    kwargs.update(overrides)
+    return mail_db.create_bill(db_path, owner, **kwargs)
+
+
+def test_bills_returns_detected_bills(db_path):
+    _record_bill(db_path)
+    c = _client(db_path, mail=FakeMailContext(FakeMailClient()))
+    resp = c.get("/api/email/bills")
+    assert resp.status_code == 200
+    bills = resp.json()["bills"]
+    assert len(bills) == 1
+    assert bills[0]["payee"] == "City Power & Light"
+    assert bills[0]["amount"] == 142.53
+    assert bills[0]["amount_text"] == "$142.53"
+    assert bills[0]["due_date"] == "2026-10-01"
+    assert bills[0]["is_recurring"] is True
+    assert bills[0]["status"] == "detected"
+
+
+def test_bills_can_be_filtered_by_status(db_path):
+    from assistant.core import db as core_db, mail_db
+    bill_id = _record_bill(db_path)
+    owner = core_db.get_user_by_chat_id(db_path, "111")["id"]
+    mail_db.update_bill_status(db_path, owner, bill_id, "dismissed")
+    c = _client(db_path, mail=FakeMailContext(FakeMailClient()))
+    assert c.get("/api/email/bills?status=detected").json()["bills"] == []
+    assert len(c.get("/api/email/bills?status=dismissed").json()["bills"]) == 1
+
+
+def test_bills_empty_when_nothing_detected(db_path):
+    c = _client(db_path, mail=FakeMailContext(FakeMailClient()))
+    resp = c.get("/api/email/bills")
+    assert resp.status_code == 200
+    assert resp.json()["bills"] == []
+
+
+def test_bills_does_not_touch_the_mailbox(db_path):
+    """Purely a database read -- it must not issue a single IMAP call, the same as
+    junk-log."""
+    client = FakeMailClient()
+    _record_bill(db_path)
+    c = _client(db_path, mail=FakeMailContext(client))
+    assert c.get("/api/email/bills").status_code == 200
+    assert client.calls == []
+
+
+def test_bills_503_when_mail_is_not_configured(db_path):
+    c = _client(db_path, mail=None)
+    assert c.get("/api/email/bills").status_code == 503
+
+
+def test_bills_requires_owner(db_path):
+    c = _client(db_path, mail=FakeMailContext(FakeMailClient()), login_as="Partner")
+    assert c.get("/api/email/bills").status_code == 403

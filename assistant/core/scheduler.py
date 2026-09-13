@@ -10,8 +10,8 @@ from datetime import date, datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import (
-    agents, business_db, db, github_client, kitchen_db, location, mail_db, mail_triage, market_data,
-    paper_trading, personal_agents, personal_db, staff,
+    agents, business_db, db, github_client, kitchen_db, location, mail_bills, mail_db,
+    mail_triage, market_data, paper_trading, personal_agents, personal_db, staff,
 )
 from .mail_client import JUNK_FOLDER
 from .engine import handle_message
@@ -45,6 +45,7 @@ def start(
     personal=None, personal_research_minutes: int = 30, git_ops=None, recipe=None,
     mail_junk_scan_interval_seconds: int = 900, mail_junk_scan_limit: int = 25,
     mail_triage_interval_minutes: int = 30, mail_triage_scan_limit: int = 15,
+    mail_bills_interval_minutes: int = 180, mail_bills_scan_limit: int = 20,
     kroger_sync_interval_seconds: int = 3600,
     task_watchdog_interval_seconds: int = 60,
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
@@ -173,6 +174,25 @@ def start(
                 ),
                 "interval", minutes=mail_triage_interval_minutes, id="mail_triage_agent",
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+            )
+
+        # Bill detection (see mail_bills.py) -- same gate and same reasoning as
+        # mail_triage above (mail + a plain .chat()-capable llm, no web search needed,
+        # deliberately outside business_agents_enabled since the owner's own bills are
+        # not a print-business agent). Far slower cadence than triage on purpose: bills
+        # arrive a few times a week, not by the minute, and every message costs an LLM
+        # round trip the first time it's seen. It only ever writes email_bills, a
+        # reminder for a real due date, and a review card -- it cannot send, move, or
+        # delete anything, and it never touches manual_recurring_charges.
+        if owner is not None:
+            scheduler.add_job(
+                _guarded_simple(
+                    "mail_bills",
+                    lambda: mail_bills.run_mail_bill_scan_once(
+                        db_path, llm, mail.mcp_client, owner["id"], limit=mail_bills_scan_limit),
+                ),
+                "interval", minutes=mail_bills_interval_minutes, id="mail_bills_agent",
+                next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
             )
 
     if business is not None and llm is not None:

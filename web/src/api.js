@@ -148,6 +148,11 @@ export const api = {
   deleteEmail: (uid, folder = 'INBOX') =>
     request(`/api/email/messages/${encodeURIComponent(uid)}/delete?folder=${encodeURIComponent(folder)}`, { method: 'POST' }),
   mailJunkLog: (limit = 50) => request(`/api/email/junk-log?limit=${limit}`),
+  mailBills: (limit = 50, status) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (status) params.set('status', status)
+    return request(`/api/email/bills?${params.toString()}`)
+  },
 
   activeWork: () => request('/api/active-work'),
   sshHostsStatus: () => request('/api/infra/ssh-hosts'),

@@ -140,6 +140,20 @@ async def delete_message(uid: str, request: Request, folder: str = "INBOX"):
     return result
 
 
+@router.get("/bills")
+async def bills(request: Request, limit: int = 50, status: str | None = None):
+    """Read-only view of what the bill scan (mail_bills.py) has detected in incoming
+    mail -- amount, due date, whether it looks recurring, and whether a reminder was set.
+    Same shape and same reasoning as junk-log above: a background classifier's output is
+    worth nothing if the only place it lands is a server log. Acting on one happens in
+    the Review queue, not here; this endpoint changes nothing."""
+    owner = require_owner(request)
+    _mail(request)  # 503s the same as every other mail route when mail isn't configured
+    cfg = request.app.state.cfg
+    mail_db.init_mail_db(cfg.db_path)
+    return {"bills": mail_db.list_bills(cfg.db_path, owner["id"], status=status, limit=limit)}
+
+
 @router.get("/junk-log")
 async def junk_log(request: Request, limit: int = 50):
     """Read-only audit trail of what the autonomous junk-scan has actually done (see

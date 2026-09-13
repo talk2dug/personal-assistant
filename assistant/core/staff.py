@@ -808,7 +808,7 @@ def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> tuple[str,
 
 
 def _record_journal(db_path: str, obsidian, emp: dict, output: str,
-                    exec_result: dict | None, role: str) -> dict:
+                    exec_result: dict | None, role: str, work: dict | None = None) -> dict:
     """File this run's journal entry into the vault.
 
     Orchestrator-side on purpose, exactly like _apply_paper_orders above: the employee
@@ -827,19 +827,30 @@ def _record_journal(db_path: str, obsidian, emp: dict, output: str,
         if role == "trader":
             from . import paper_trading
             stats = paper_trading.performance(db_path)
-        if entry is None and (role == "analyst" or fills):
+        if entry is None and (role in ("analyst", "engineer") or fills):
             # Visible, not silent: a run that was supposed to journal and didn't is the
             # same class of event as a rejected order, and is logged like one.
             logger.warning("%s produced no ```journal block on a run that needed one",
                            emp["key"])
         result = crypto_journal.record_run(obsidian, emp["title"], entry, role=role,
-                                           fills=fills, stats=stats, db_path=db_path)
+                                           fills=fills, stats=stats, db_path=db_path,
+                                           work=work, output=output)
         logger.info("journal for %s: %s (%s)", emp["key"],
                     "written" if result.get("journaled") else "skipped", result.get("reason"))
         return result
     except Exception as e:
         logger.exception("journal write failed for %s", emp["key"])
         return {"journaled": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+def work_row_for(db_path: str, work_id: int) -> dict | None:
+    """One staff_work row by id -- the system's own record of what an assignment actually
+    did, as opposed to the employee's account of it. Read back after the row is finalised
+    so an engineer's journal entry carries the real status and error rather than the
+    'running' the row held while the work was in flight."""
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute("SELECT * FROM staff_work WHERE id = ?", (work_id,)).fetchone()
+        return dict(row) if row else None
 
 
 def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
@@ -883,9 +894,18 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
         conn.commit()
         work_id = cur.lastrowid
 
+    # Bound before the try, because the journal write below runs outside it and must not
+    # turn a failed assignment into a NameError that hides the real error.
+    feeds = emp.get("data_feeds") or ""
+    # A trader runs against a ledger, an engineer against a repository, an analyst only
+    # reports. That distinction sets what gets recorded, how often, and which vault folder
+    # it lands in -- see crypto_journal.role_for and record_run.
+    from . import crypto_journal
+    role = crypto_journal.role_for(emp)
+    exec_result = None
+
     try:
         # Employees have no tools, so any live data they need must be in the prompt.
-        feeds = emp.get("data_feeds") or ""
         briefing = build_feed_briefing(db_path, feeds)
         prompt = assignment + build_colleague_briefing(db_path, emp.get("briefing_from")) + briefing
         if "policy" in feeds:
@@ -895,9 +915,6 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             # tool loop, so anything it needs to know has to already be in the prompt.
             from . import agent_policy
             prompt += agent_policy.build_policy_briefing(obsidian)
-        # A trader runs against a ledger; an analyst only reports. That distinction also
-        # sets how often each journals -- see crypto_journal.record_run.
-        role = "trader" if "paper" in feeds else "analyst"
         journaling = "journal" in feeds and obsidian is not None
         if "journal" in feeds and obsidian is None:
             logger.warning("%s holds the journal feed but no vault client was wired; "
@@ -906,8 +923,7 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             logger.warning("%s holds the policy feed but no vault client was wired; "
                            "this run cannot see the owner's standing policy", key)
         if journaling:
-            from . import crypto_journal
-            prompt += crypto_journal.build_prior_context(obsidian, emp["title"])
+            prompt += crypto_journal.build_prior_context(obsidian, emp["title"], role=role)
         if "paper" in feeds:
             from . import paper_trading
             prompt += paper_trading.ORDER_INSTRUCTIONS.format(
@@ -937,7 +953,6 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
                 tools=REQUEST_CAPABILITY_TOOLS, employee_key=emp["key"])
         status, error = "delivered", None
 
-        exec_result = None
         if "paper" in feeds and output:
             # The employee proposed; the ledger decides. What actually happened is
             # appended to the stored output, so the work record reflects the fills rather
@@ -945,10 +960,6 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             # would otherwise leave a false trade history behind it.
             report, exec_result = _apply_paper_orders(db_path, output, emp["key"])
             output += report
-        if journaling and output:
-            # After the orders, never before: the journal entry carries the ledger's real
-            # fills, and running this first would record intentions as history.
-            _record_journal(db_path, obsidian, emp, output, exec_result, role)
     except Exception as e:
         output, status, error = None, "failed", f"{type(e).__name__}: {e}"
 
@@ -957,6 +968,18 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             """UPDATE staff_work SET output = ?, status = ?, error = ?, finished_at = ?
                WHERE id = ?""", (output, status, error, _now(), work_id))
         conn.commit()
+
+    # Journalled AFTER the work row is finalised, not inside the try above, for two
+    # reasons. An engineer's entry is built from that row -- its real status and error --
+    # so writing it earlier would record every run as still 'running'. And a FAILED
+    # assignment now gets journalled too, which the old placement made impossible: an
+    # exception jumped straight past the journal call, losing exactly the entry ("I tried
+    # this and it did not work, here is how far I got") the next run most needs.
+    if "journal" in feeds and obsidian is not None:
+        work_row = dict(work_row_for(db_path, work_id) or {})
+        if output or work_row.get("status") == "failed":
+            _record_journal(db_path, obsidian, emp, output or "", exec_result, role,
+                            work=work_row)
 
     return {"ok": status == "delivered", "work_id": work_id, "employee": emp["title"],
             "output": output, "error": error}

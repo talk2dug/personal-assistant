@@ -268,6 +268,11 @@ button.dash-card:hover {
   margin-top: 2px;
 }
 
+.dash-card-highlight {
+  color: var(--cyan);
+  font-weight: 700;
+}
+
 .dash-card-error,
 .dash-panel-error {
   color: var(--red);

@@ -65,6 +65,24 @@ SPENDING_RESPONSE = {
     })],
 }
 
+# Exact response shapes for these three haven't been captured via live testing the way the
+# ones above were (see db.upsert_era_insight's docstring) -- these fakes are plausible
+# shapes only, good enough to confirm refresh_era_cache caches whatever comes back opaquely.
+FORECAST_SPENDING_RESPONSE = {
+    "is_error": False,
+    "content": [json.dumps({"projected_total": 2100.50, "daily_rate": 68.5})],
+}
+
+CASH_FLOW_RESPONSE = {
+    "is_error": False,
+    "content": [json.dumps({"periods": [{"label": "August 2026", "income": 4759.86, "spending": 3200.11}]})],
+}
+
+COMPARE_SPENDING_RESPONSE = {
+    "is_error": False,
+    "content": [json.dumps({"period_a_total": 1327.71, "period_b_total": 1500.0, "delta_pct": -11.5})],
+}
+
 
 class FakeMCPClient:
     def call_tool(self, name, arguments):
@@ -74,6 +92,12 @@ class FakeMCPClient:
             return RECURRING_RESPONSE
         if name == "insights__analyze_spending":
             return SPENDING_RESPONSE
+        if name == "insights__forecast_spending":
+            return FORECAST_SPENDING_RESPONSE
+        if name == "insights__get_cash_flow":
+            return CASH_FLOW_RESPONSE
+        if name == "insights__compare_spending_periods":
+            return COMPARE_SPENDING_RESPONSE
         raise ValueError(f"unexpected tool: {name}")
 
 
@@ -122,3 +146,26 @@ def test_refresh_is_idempotent_on_rerun(db_path):
     assert len(db.list_era_accounts(db_path)) == 2
     assert len(db.list_era_recurring_charges(db_path)) == 2
     assert len(db.list_era_category_spending(db_path, "this_month")) == 1
+    # one net-worth snapshot per day, not one per refresh
+    assert len(db.list_net_worth_snapshots(db_path)) == 1
+
+
+def test_refresh_caches_era_insights_opaquely(db_path):
+    refresh_era_cache(FakeMCPClient(), db_path)
+
+    insights = db.list_era_insights(db_path)
+    assert insights["forecast_spending"]["payload"] == {"projected_total": 2100.50, "daily_rate": 68.5}
+    assert insights["cash_flow"]["payload"]["periods"][0]["label"] == "August 2026"
+    assert insights["compare_spending_periods"]["payload"]["delta_pct"] == -11.5
+
+
+def test_refresh_records_a_net_worth_snapshot(db_path):
+    refresh_era_cache(FakeMCPClient(), db_path)
+
+    snapshots = db.list_net_worth_snapshots(db_path)
+    assert len(snapshots) == 1
+    # Both fake accounts are Savings/Checking -- both cash, no investment or liability.
+    assert snapshots[0]["cash"] == 343.14 + 263.77
+    assert snapshots[0]["investment"] == 0.0
+    assert snapshots[0]["liability"] == 0.0
+    assert snapshots[0]["net_worth"] == 343.14 + 263.77

@@ -1065,6 +1065,214 @@ body::after {
   align-items: start;
 }
 
+/* --- grouped balance cards (cash / investment / liability) ------------------- */
+
+.balance-cards-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.balance-group-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.balance-group-label {
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.balance-group-total {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--cyan-bright);
+}
+
+.balance-group-investment .balance-group-total {
+  color: var(--amber);
+}
+
+.balance-group-liability .balance-group-total {
+  color: var(--red);
+}
+
+.balance-group-liability .card::before {
+  border-top: 2px solid var(--red);
+}
+
+/* --- safe to spend ------------------------------------------------------------ */
+
+.safe-to-spend-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--cyan);
+  clip-path: polygon(0 12px, 12px 0, 100% 0, 100% 100%, 0 100%);
+  padding: 14px 22px;
+  margin-bottom: 24px;
+  box-shadow: 0 0 20px rgba(34, 232, 255, 0.12);
+}
+
+.safe-to-spend-banner.safe-to-spend-negative {
+  border-color: var(--red);
+  box-shadow: 0 0 20px rgba(255, 70, 70, 0.15);
+}
+
+.safe-to-spend-label {
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.safe-to-spend-amount {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--cyan-bright);
+  text-shadow: 0 0 14px var(--cyan-glow);
+}
+
+.safe-to-spend-negative .safe-to-spend-amount {
+  color: var(--red);
+  text-shadow: none;
+}
+
+.safe-to-spend-message {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.safe-to-spend-buffer-toggle {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border-dim);
+  color: var(--text-dim);
+  padding: 5px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.safe-to-spend-buffer-toggle:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.safe-to-spend-buffer-form {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.safe-to-spend-buffer-form input {
+  width: 90px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-dim);
+  padding: 6px 8px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+}
+
+.safe-to-spend-buffer-form input:focus {
+  border-color: var(--cyan);
+}
+
+.safe-to-spend-buffer-form button {
+  background: var(--cyan-faint);
+  border: 1px solid var(--cyan);
+  color: var(--cyan-bright);
+  padding: 6px 10px;
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+/* --- spending insights (forecast / cash flow / period comparison) ------------ */
+
+.insights-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.insight-card {
+  background: var(--bg-panel);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-dim);
+  clip-path: polygon(0 12px, 12px 0, 100% 0, 100% 100%, 0 100%);
+  padding: 16px 18px;
+}
+
+.insight-card-title {
+  font-family: var(--font-hud);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.insight-fields {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.insight-field {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.insight-field dt {
+  color: var(--text-dim);
+  text-transform: capitalize;
+}
+
+.insight-field dd {
+  margin: 0;
+  color: var(--cyan-bright);
+  text-align: right;
+  word-break: break-word;
+}
+
+.insight-warnings {
+  margin: 0 0 10px;
+  padding-left: 16px;
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.net-worth-chart {
+  margin-top: 0;
+}
+
 /* --- calendar grid ----------------------------------------------------------- */
 
 .calendar-grid-widget {

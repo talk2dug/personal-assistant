@@ -96,7 +96,10 @@ def test_finance_summary_accessible_to_owner(client):
     client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
     resp = client.get("/api/finance/summary")
     assert resp.status_code == 200
-    assert resp.json() == {"accounts": [], "recurring_charges": [], "total_balance": 0}
+    assert resp.json() == {
+        "accounts": [], "recurring_charges": [], "total_balance": 0,
+        "cash_balance": 0, "investment_balance": 0, "liability_balance": 0,
+    }
 
 
 def test_savings_goal_crud(client):
@@ -269,3 +272,99 @@ def test_recurring_routes_require_owner_role(client):
     client.post("/api/login", json={"name": "GF", "password": "partnerpass"})
     assert client.get("/api/finance/recurring").status_code == 403
     assert client.post("/api/finance/recurring/manual", json={}).status_code == 403
+
+
+def test_summary_groups_balances_by_account_type(client, db_path):
+    client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    db.upsert_era_account(db_path, "acct-checking", "Checking", "Checking", 500.0, 500.0)
+    db.upsert_era_account(db_path, "acct-401k", "401k", "401k", 20000.0, 20000.0)
+    db.upsert_era_account(db_path, "acct-cc", "Credit Card", "Credit Card", 300.0, 300.0)
+
+    resp = client.get("/api/finance/summary").json()
+    assert resp["cash_balance"] == 500.0
+    assert resp["investment_balance"] == 20000.0
+    assert resp["liability_balance"] == 300.0
+    # total_balance is the spendable-cash total, not every account blended together
+    assert resp["total_balance"] == 500.0
+
+    groups_by_key = {a["account_key"]: a["balance_group"] for a in resp["accounts"]}
+    assert groups_by_key["acct-checking"] == "cash"
+    assert groups_by_key["acct-401k"] == "investment"
+    assert groups_by_key["acct-cc"] == "liability"
+
+
+def test_projection_excludes_investment_and_liability_from_starting_balance(client, db_path):
+    client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    db.upsert_era_account(db_path, "acct-checking", "Checking", "Checking", 500.0, 500.0)
+    db.upsert_era_account(db_path, "acct-401k", "401k", "401k", 20000.0, 20000.0)
+
+    resp = client.get("/api/finance/projection?horizon_days=5").json()
+    assert resp["series"][0]["balance"] == 500.0
+
+
+def test_safety_buffer_get_and_put_round_trip(client):
+    client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    assert client.get("/api/finance/safety-buffer").json() == {"safety_buffer": 0.0}
+
+    resp = client.put("/api/finance/safety-buffer", json={"safety_buffer": 150.0})
+    assert resp.status_code == 200
+    assert client.get("/api/finance/safety-buffer").json() == {"safety_buffer": 150.0}
+
+
+def test_safety_buffer_rejects_negative_value(client):
+    client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    resp = client.put("/api/finance/safety-buffer", json={"safety_buffer": -5})
+    assert resp.status_code == 422
+
+
+def test_safe_to_spend_without_enough_pay_period_data(client, db_path):
+    client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    db.upsert_era_account(db_path, "acct-checking", "Checking", "Checking", 500.0, 500.0)
+    resp = client.get("/api/finance/safe-to-spend").json()
+    assert resp["safe_to_spend"] is None
+
+
+def test_safe_to_spend_with_real_pay_period_data(client, db_path):
+    client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    db.upsert_era_account(db_path, "acct-checking", "Checking", "Checking", 1000.0, 1000.0)
+    dug = db.get_user_by_chat_id(db_path, "111")
+    db.create_manual_recurring_charge(
+        db_path, dug["id"], "Paycheck (15th)", 2000.0, "income", "monthly_on_day", "2026-09-15")
+    db.create_manual_recurring_charge(
+        db_path, dug["id"], "Paycheck (last day)", 2000.0, "income", "monthly_on_last_day", "2026-09-30")
+
+    resp = client.get("/api/finance/safe-to-spend").json()
+    assert resp["safe_to_spend"] is not None
+    assert resp["payday"] is not None
+
+    # the same number should also show up embedded in /projection
+    projection = client.get("/api/finance/projection").json()
+    assert projection["safe_to_spend"] == resp
+
+
+def test_insights_endpoint_returns_cached_era_payloads(client, db_path):
+    client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    assert client.get("/api/finance/insights").json() == {}
+
+    db.upsert_era_insight(db_path, "forecast_spending", {"projected_total": 2100.5})
+    resp = client.get("/api/finance/insights").json()
+    assert resp["forecast_spending"]["payload"] == {"projected_total": 2100.5}
+
+
+def test_net_worth_endpoint_returns_history(client, db_path):
+    client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
+    assert client.get("/api/finance/net-worth").json() == []
+
+    db.upsert_net_worth_snapshot(db_path, "2026-09-01", 500.0, 20000.0, 300.0, 20200.0)
+    db.upsert_net_worth_snapshot(db_path, "2026-09-02", 600.0, 20000.0, 300.0, 20300.0)
+    resp = client.get("/api/finance/net-worth").json()
+    assert [r["date"] for r in resp] == ["2026-09-01", "2026-09-02"]
+    assert resp[1]["net_worth"] == 20300.0
+
+
+def test_insights_and_net_worth_routes_require_owner_role(client):
+    client.post("/api/login", json={"name": "GF", "password": "partnerpass"})
+    assert client.get("/api/finance/insights").status_code == 403
+    assert client.get("/api/finance/net-worth").status_code == 403
+    assert client.get("/api/finance/safe-to-spend").status_code == 403
+    assert client.get("/api/finance/safety-buffer").status_code == 403

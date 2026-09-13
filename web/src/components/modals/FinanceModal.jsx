@@ -5,10 +5,13 @@ import Modal from './Modal'
 
 export default function FinanceModal({ onClose }) {
   const [summary, setSummary] = useState(null)
+  const [safeToSpend, setSafeToSpend] = useState(null)
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    api.financeSummary().then(setSummary).catch((e) => setError(e.message))
+    Promise.all([api.financeSummary(), api.financeSafeToSpend()])
+      .then(([s, sts]) => { setSummary(s); setSafeToSpend(sts) })
+      .catch((e) => setError(e.message))
   }, [])
 
   const upcoming = (summary?.recurring_charges || [])
@@ -23,9 +26,16 @@ export default function FinanceModal({ onClose }) {
       {!error && summary && (
         <>
           <div className="modal-section">
-            <div className="modal-section-title">Total balance</div>
+            <div className="modal-section-title">Spendable cash</div>
             <div className="dash-card-figure">{fmtUsd(summary.total_balance)}</div>
           </div>
+
+          {safeToSpend?.safe_to_spend != null && (
+            <div className="modal-section">
+              <div className="modal-section-title">Safe to spend until {safeToSpend.payday}</div>
+              <div className="dash-card-figure dash-card-highlight">{fmtUsd(safeToSpend.safe_to_spend)}</div>
+            </div>
+          )}
 
           <div className="modal-section">
             <div className="modal-section-title">Accounts ({summary.accounts.length})</div>

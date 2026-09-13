@@ -173,7 +173,28 @@ CREATE TABLE IF NOT EXISTS manual_recurring_charges (
     next_expected_date TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS era_insight_cache (
+    insight_key TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    last_synced_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS net_worth_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date TEXT NOT NULL UNIQUE,
+    cash REAL NOT NULL,
+    investment REAL NOT NULL,
+    liability REAL NOT NULL,
+    net_worth REAL NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
+
+# settings key for the owner-configurable safety buffer used by finance.safe_to_spend
+# (see meal_plan_db.get_safe_to_spend) -- a real, adjustable value rather than a hardcoded
+# guess at what "safe" means for him specifically. Defaults to 0 (no buffer) until he sets one.
+FINANCE_SAFETY_BUFFER_SETTING = "finance_safety_buffer"
 
 
 def init_db(db_path: str) -> None:
@@ -1008,3 +1029,73 @@ def delete_manual_recurring_charge(db_path: str, charge_id: int) -> bool:
         cur = conn.execute("DELETE FROM manual_recurring_charges WHERE id = ?", (charge_id,))
         conn.commit()
         return cur.rowcount > 0
+
+
+def list_forecast_charges(db_path: str, owner_user_id: int) -> list[dict]:
+    """Non-excluded Era-detected charges plus manually-entered ones — what projections,
+    the calendar view, and the safe-to-spend number should all use, as opposed to the raw
+    Era cache (which a management view shows in full, excluded ones included, so they can
+    be toggled). Lives here rather than duplicated between routes/finance.py and
+    personal_tools.py, both of which need exactly this same composed list."""
+    era_charges = list_era_recurring_charges(db_path, include_excluded=False)
+    manual_charges = list_manual_recurring_charges(db_path, owner_user_id)
+    return era_charges + manual_charges
+
+
+# --- Era insight cache (forecast/cash-flow/period-comparison — opaque payloads) ----
+#
+# Unlike the typed caches above, these three Era insight tools' exact response shapes
+# were never established via live testing against the real server the way analyze_spending's
+# was (see _era_payload's docstring in scheduler.py) -- so rather than guess at field names
+# and silently mis-render (or drop) real data, the raw payload is cached opaquely and the
+# frontend renders whatever keys are actually present.
+
+def upsert_era_insight(db_path: str, insight_key: str, payload: dict) -> None:
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO era_insight_cache (insight_key, payload, last_synced_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(insight_key) DO UPDATE SET
+                   payload = excluded.payload, last_synced_at = excluded.last_synced_at""",
+            (insight_key, json.dumps(payload), _now()),
+        )
+        conn.commit()
+
+
+def list_era_insights(db_path: str) -> dict:
+    with closing(_connect(db_path)) as conn:
+        rows = conn.execute("SELECT insight_key, payload, last_synced_at FROM era_insight_cache").fetchall()
+    return {r[0]: {"payload": json.loads(r[1]), "last_synced_at": r[2]} for r in rows}
+
+
+# --- net worth history (assets minus liabilities, one snapshot per calendar day) ---
+
+def upsert_net_worth_snapshot(
+    db_path: str, snapshot_date: str, cash: float, investment: float, liability: float, net_worth: float,
+) -> None:
+    """Keyed by snapshot_date so re-running the scheduler's cache refresh multiple times
+    in one day (it runs roughly every 20 min) updates that day's snapshot rather than
+    piling up duplicate rows -- one point per day is plenty for a net-worth-over-time chart."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO net_worth_snapshots (snapshot_date, cash, investment, liability, net_worth, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(snapshot_date) DO UPDATE SET
+                   cash = excluded.cash, investment = excluded.investment,
+                   liability = excluded.liability, net_worth = excluded.net_worth""",
+            (snapshot_date, cash, investment, liability, net_worth, _now()),
+        )
+        conn.commit()
+
+
+def list_net_worth_snapshots(db_path: str, limit: int = 365) -> list[dict]:
+    with closing(_connect(db_path)) as conn:
+        rows = conn.execute(
+            """SELECT snapshot_date, cash, investment, liability, net_worth FROM net_worth_snapshots
+               ORDER BY snapshot_date DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [
+        {"date": r[0], "cash": r[1], "investment": r[2], "liability": r[3], "net_worth": r[4]}
+        for r in reversed(rows)
+    ]

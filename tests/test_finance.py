@@ -1,6 +1,16 @@
 from datetime import date
 
-from assistant.core.finance import expand_occurrences, find_pay_periods, goal_progress, project_balance
+from assistant.core.finance import (
+    classify_account_type,
+    expand_occurrences,
+    find_pay_periods,
+    goal_progress,
+    group_account_balances,
+    net_worth,
+    project_balance,
+    safe_to_spend,
+    spendable_balance,
+)
 
 
 def test_no_charges_keeps_balance_flat():
@@ -196,6 +206,80 @@ def test_find_pay_periods_ignores_expense_charges():
     # Only one income date in range -- still not enough to form a period, even though
     # the expense charge would otherwise supply a second date.
     assert find_pay_periods(charges, today=date(2026, 9, 20), horizon_days=10) == []
+
+
+def test_classify_account_type_recognizes_liability_keywords():
+    assert classify_account_type("Credit Card") == "liability"
+    assert classify_account_type("Auto Loan") == "liability"
+    assert classify_account_type("Mortgage") == "liability"
+
+
+def test_classify_account_type_recognizes_investment_keywords():
+    assert classify_account_type("401k") == "investment"
+    assert classify_account_type("Brokerage") == "investment"
+    assert classify_account_type("Roth IRA") == "investment"
+
+
+def test_classify_account_type_defaults_unknown_and_missing_to_cash():
+    assert classify_account_type("Checking") == "cash"
+    assert classify_account_type("Savings") == "cash"
+    assert classify_account_type("Some Weird Type Era Invents") == "cash"
+    assert classify_account_type(None) == "cash"
+
+
+def test_group_account_balances_buckets_by_type():
+    accounts = [
+        {"account_type": "Checking", "balance": 500.0},
+        {"account_type": "Savings", "balance": 1000.0},
+        {"account_type": "401k", "balance": 20000.0},
+        {"account_type": "Credit Card", "balance": 300.0},
+    ]
+    assert group_account_balances(accounts) == {"cash": 1500.0, "investment": 20000.0, "liability": 300.0}
+
+
+def test_spendable_balance_excludes_investment_and_liability():
+    accounts = [
+        {"account_type": "Checking", "balance": 500.0},
+        {"account_type": "401k", "balance": 20000.0},
+        {"account_type": "Credit Card", "balance": 300.0},
+    ]
+    assert spendable_balance(accounts) == 500.0
+
+
+def test_net_worth_is_assets_minus_liabilities():
+    accounts = [
+        {"account_type": "Checking", "balance": 500.0},
+        {"account_type": "401k", "balance": 20000.0},
+        {"account_type": "Credit Card", "balance": 300.0},
+    ]
+    result = net_worth(accounts)
+    assert result["assets"] == 20500.0
+    assert result["liabilities"] == 300.0
+    assert result["net_worth"] == 20200.0
+
+
+def test_safe_to_spend_is_minimum_projected_balance_before_payday_minus_buffer():
+    today = date(2026, 9, 20)
+    charges = [
+        {"description": "Rent", "amount": 900.0, "direction": "expense",
+         "cadence": None, "next_expected_date": "2026-09-25"},
+        {"description": "Paycheck", "amount": 2000.0, "direction": "income",
+         "cadence": None, "next_expected_date": "2026-09-30"},
+    ]
+    pay_periods = [{"start_date": "2026-09-15", "end_date": "2026-09-30", "is_current": True}]
+
+    result = safe_to_spend(1000.0, charges, pay_periods, safety_buffer=50.0, today=today)
+
+    # balance dips to 100.0 on 09-25 (1000 - 900) and stays there until the 30th
+    # (excluded from the window since the payday itself isn't "before payday").
+    assert result["minimum_projected_balance"] == 100.0
+    assert result["safe_to_spend"] == 50.0
+    assert result["payday"] == "2026-09-30"
+
+
+def test_safe_to_spend_returns_none_without_a_current_period():
+    result = safe_to_spend(1000.0, [], pay_periods=[], safety_buffer=0.0, today=date(2026, 9, 20))
+    assert result is None
 
 
 def test_find_pay_periods_collapses_same_day_charges_into_one_boundary():

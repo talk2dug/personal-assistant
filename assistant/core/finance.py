@@ -30,6 +30,13 @@ MONTHLY_ON_DAY = "monthly_on_day"  # same day-of-month every month (clamped to s
 MONTHLY_ON_LAST_DAY = "monthly_on_last_day"  # the actual last calendar day every month
 _MAX_MONTHLY_ITERATIONS = 600  # ~50 years — a safety cap, not a real limit on how far this reaches
 
+# The full set of cadence values project_balance/expand_occurrences understand as real
+# recurring patterns (anything else falls back to being treated as a one-off — see
+# _occurrence_dates). Defined once here so the REST layer (routes/finance.py) and the
+# chat-tool layer (personal_tools.py) both validate manual recurring charges against the
+# exact same list instead of each maintaining their own copy that could drift apart.
+VALID_CADENCES = frozenset(CADENCE_DAYS) | {MONTHLY_ON_DAY, MONTHLY_ON_LAST_DAY}
+
 
 def _occurrence_dates(charge: dict, range_start: date, range_end: date) -> list[date]:
     """The dates a recurring charge falls due within [range_start, range_end], regardless
@@ -188,6 +195,110 @@ def find_pay_periods(income_charges: list[dict], today: date, horizon_days: int 
             "is_current": start_d <= today < end_d,
         })
     return periods
+
+
+# --- account-type classification (cash vs. investment vs. liability) -------------
+#
+# Era's own account_type taxonomy isn't documented anywhere reachable from this codebase,
+# and the only real values seen in this deployment so far (captured via live testing in
+# test_scheduler_era_cache.py) are plain "Checking"/"Savings" -- both cash. So rather than
+# hardcode an enum this classifies by keyword match on whatever string Era actually sends,
+# and defaults anything unrecognized to "cash" (the safer assumption for a spendable-cash
+# total: undercounting a real liability is worse than slightly overcounting an oddly-typed
+# account). Revisit this classification if/when a real 401k or credit card account is
+# actually connected and its real type string can be seen.
+LIABILITY_TYPE_KEYWORDS = ("credit card", "credit", "loan", "mortgage", "line of credit", "debt")
+INVESTMENT_TYPE_KEYWORDS = (
+    "invest", "401k", "401(k)", "403b", "403(b)", "ira", "retirement", "brokerage", "pension", "hsa",
+)
+
+
+def classify_account_type(account_type: str | None) -> str:
+    """Buckets an Era account_type string into 'cash' (spendable — checking/savings/money
+    market/anything unrecognized), 'investment' (retirement/brokerage — real money, but not
+    liquid for day-to-day spending), or 'liability' (credit cards/loans — owed, not owned)."""
+    if not account_type:
+        return "cash"
+    lowered = account_type.lower()
+    if any(k in lowered for k in LIABILITY_TYPE_KEYWORDS):
+        return "liability"
+    if any(k in lowered for k in INVESTMENT_TYPE_KEYWORDS):
+        return "investment"
+    return "cash"
+
+
+def group_account_balances(accounts: list[dict]) -> dict:
+    """Sums each account's balance into its classify_account_type() bucket instead of
+    blending every account into one number. Liability balances are summed exactly as Era
+    reports them (whatever sign convention it uses for "amount owed") -- this deployment
+    has never seen a real connected liability account, so callers computing net worth
+    should treat this figure as an amount to subtract, not assume it's already negative."""
+    totals = {"cash": 0.0, "investment": 0.0, "liability": 0.0}
+    for account in accounts:
+        bucket = classify_account_type(account.get("account_type"))
+        totals[bucket] += account.get("balance") or 0.0
+    return {k: round(v, 2) for k, v in totals.items()}
+
+
+def spendable_balance(accounts: list[dict]) -> float:
+    """The part of group_account_balances actually usable to cover upcoming bills --
+    excludes illiquid investment/retirement money and liability balances (owed, not
+    owned). This is what projections and the "safe to spend" number should start from,
+    not a blended total that overstates what's actually available to spend."""
+    return group_account_balances(accounts)["cash"]
+
+
+def net_worth(accounts: list[dict]) -> dict:
+    """assets (cash + investment) minus liabilities, plus the group breakdown, for the
+    net-worth-over-time history (see db.upsert_net_worth_snapshot)."""
+    groups = group_account_balances(accounts)
+    assets = round(groups["cash"] + groups["investment"], 2)
+    liabilities = groups["liability"]
+    return {**groups, "assets": assets, "liabilities": liabilities, "net_worth": round(assets - liabilities, 2)}
+
+
+# --- pay-period-aware "safe to spend" ---------------------------------------------
+
+def safe_to_spend(
+    current_balance: float, recurring_charges: list[dict], pay_periods: list[dict],
+    safety_buffer: float = 0.0, today: date | None = None,
+) -> dict | None:
+    """How much of current_balance can actually be spent right now without the projected
+    daily balance (after every known upcoming bill/income) ever dropping below
+    safety_buffer before the next payday: the lowest point project_balance's series hits
+    between now and the current pay period's end_date, minus safety_buffer.
+
+    pay_periods is meal_plan_db.get_pay_periods's output (or find_pay_periods's own, same
+    shape) -- this function doesn't resolve pay periods itself so callers reuse the
+    owner's real paycheck-date resolution (which prefers his manual corrections over
+    Era's noisier auto-detection) rather than duplicating it here.
+
+    Returns None when there's no current period to bound the window (not enough payday
+    data yet -- see find_pay_periods's own "needs at least 2 distinct paydays" note).
+    """
+    today = today or date.today()
+    current_period = next((p for p in pay_periods if p.get("is_current")), None)
+    if current_period is None:
+        return None
+    end_date = _parse_date(current_period["end_date"])
+    if end_date is None or end_date <= today:
+        return None
+
+    horizon_days = (end_date - today).days
+    series = project_balance(current_balance, recurring_charges, horizon_days=horizon_days, start_date=today)
+    # Exclude the payday itself: the question is "before the next payday", and the
+    # incoming paycheck landing on end_date would otherwise mask a real dip that happens
+    # right up until it arrives.
+    window = [p for p in series if p["date"] < current_period["end_date"]]
+    if not window:
+        window = series
+    minimum_projected_balance = min(p["balance"] for p in window)
+    return {
+        "safe_to_spend": round(minimum_projected_balance - safety_buffer, 2),
+        "minimum_projected_balance": round(minimum_projected_balance, 2),
+        "safety_buffer": safety_buffer,
+        "payday": current_period["end_date"],
+    }
 
 
 def goal_progress(projection_series: list[dict], target_amount: float) -> str | None:

@@ -250,6 +250,13 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ excluded }),
     }),
+
+  financeSafeToSpend: () => request('/api/finance/safe-to-spend'),
+  financeSafetyBuffer: () => request('/api/finance/safety-buffer'),
+  setFinanceSafetyBuffer: (safetyBuffer) =>
+    request('/api/finance/safety-buffer', { method: 'PUT', body: JSON.stringify({ safety_buffer: safetyBuffer }) }),
+  financeInsights: () => request('/api/finance/insights'),
+  financeNetWorth: () => request('/api/finance/net-worth'),
 }
 
 export { ApiError }

@@ -16,7 +16,7 @@ already is -- the sensitive_tools/pending_actions gate on LetterStreamContext, p
 test_engine_letterstream.py -- so a dispute letter can only ever actually be mailed after
 the owner explicitly confirms the recipient, the letter text, and the quoted cost.
 """
-from . import kitchen_tools, personal_db
+from . import db, finance, kitchen_tools, meal_plan_db, personal_db
 
 # The three national bureaus' published dispute-processing addresses, so the model isn't
 # asked to know or guess them and the owner isn't asked to type them every time. These
@@ -265,6 +265,136 @@ PERSONAL_TOOLS = [
             "dispute_letter_id": {"type": "integer"},
         }, "required": ["dispute_letter_id"]},
     }},
+
+    # --- budgets / manual recurring charges / savings goals -----------------------
+    # Thin chat-tool wrappers over db.py's already-working CRUD (the Finance page's REST
+    # layer calls the exact same functions) -- before these existed, the owner could only
+    # manage a budget, a manually-entered bill, or a savings goal by clicking through the
+    # Finance page, never by just telling Jarvis. None of these guess numbers on his
+    # behalf; they only ever record what he explicitly says.
+    {"type": "function", "function": {
+        "name": "list_budgets",
+        "description": "List the owner's monthly spending-category budget limits.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "set_budget",
+        "description": (
+            "Set (or update, if one already exists for this category) a monthly spending "
+            "limit for a category. Use the category_key/category_label he's discussing — "
+            "check list_budgets or recent spending-category context first rather than "
+            "inventing a key. Never pick a limit yourself; only record what he states."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "category_key": {"type": "string", "description": "e.g. 'fcat_dining' — Era's category key, not a display name."},
+            "category_label": {"type": "string", "description": "Human-readable label, e.g. 'Dining out'."},
+            "monthly_limit": {"type": "number"},
+        }, "required": ["category_key", "category_label", "monthly_limit"]},
+    }},
+    {"type": "function", "function": {
+        "name": "delete_budget",
+        "description": "Remove a monthly budget limit for a category.",
+        "parameters": {"type": "object", "properties": {
+            "budget_id": {"type": "integer"},
+        }, "required": ["budget_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_manual_recurring_charges",
+        "description": (
+            "List bills/income he's manually entered — for a real charge Era's own "
+            "detection missed or got wrong (wrong amount, wrong cadence, wrong next date)."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "add_manual_recurring_charge",
+        "description": (
+            "Record a recurring bill or income source by hand — use when he mentions a "
+            "real, regular charge that either isn't showing up in Era's own detection yet "
+            "or that Era has wrong. Never invent an amount or date; ask if unsure."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "description": {"type": "string"},
+            "amount": {"type": "number"},
+            "direction": {"type": "string", "enum": ["income", "expense"]},
+            "cadence": {
+                "type": "string", "enum": sorted(finance.VALID_CADENCES),
+                "description": (
+                    "monthly_on_day/monthly_on_last_day anchor to a real calendar date "
+                    "(e.g. paid on the 15th, rent due the last day of the month) without "
+                    "drifting over time — prefer these over 'monthly' for anything tied to "
+                    "a specific day."
+                ),
+            },
+            "next_expected_date": {"type": "string", "description": "Local ISO date of the next (or most recent) occurrence."},
+        }, "required": ["description", "amount", "direction", "cadence", "next_expected_date"]},
+    }},
+    {"type": "function", "function": {
+        "name": "delete_manual_recurring_charge",
+        "description": "Remove a manually-entered recurring bill/income entry.",
+        "parameters": {"type": "object", "properties": {
+            "charge_id": {"type": "integer"},
+        }, "required": ["charge_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_savings_goals",
+        "description": "List the owner's savings goals, including the projected date each becomes reachable.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "create_savings_goal",
+        "description": "Start tracking a new savings goal he names, with the amount he wants to save toward.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "What he's saving for, e.g. 'Japan trip'."},
+            "target_amount": {"type": "number"},
+            "target_date": {"type": "string", "description": "Optional local ISO date he's aiming for."},
+        }, "required": ["name", "target_amount"]},
+    }},
+    {"type": "function", "function": {
+        "name": "update_savings_goal",
+        "description": "Change a savings goal's name, target amount, or target date.",
+        "parameters": {"type": "object", "properties": {
+            "goal_id": {"type": "integer"},
+            "name": {"type": "string"},
+            "target_amount": {"type": "number"},
+            "target_date": {"type": "string", "description": "Local ISO date, or empty string to clear it."},
+        }, "required": ["goal_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "delete_savings_goal",
+        "description": "Remove a savings goal.",
+        "parameters": {"type": "object", "properties": {
+            "goal_id": {"type": "integer"},
+        }, "required": ["goal_id"]},
+    }},
+
+    # --- pay-period-aware "safe to spend" -------------------------------------------
+    {"type": "function", "function": {
+        "name": "get_safe_to_spend",
+        "description": (
+            "How much of his current spendable cash balance can actually be spent right "
+            "now without the projected balance dropping below his safety buffer before "
+            "the next payday — the real answer to 'what can I actually spend right now'. "
+            "Returns null if there isn't enough pay-period data yet to bound the window."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "get_safety_buffer",
+        "description": "The current safety-buffer cushion used by get_safe_to_spend (defaults to $0 until he sets one).",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "set_safety_buffer",
+        "description": (
+            "Set the safety-buffer cushion get_safe_to_spend subtracts — how far above $0 "
+            "he wants his projected balance to stay before the next payday. Only set this "
+            "to a number he actually states; never pick one for him."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "safety_buffer": {"type": "number", "description": "A non-negative dollar amount."},
+        }, "required": ["safety_buffer"]},
+    }},
 ]
 
 PERSONAL_SYSTEM_NOTE = (
@@ -291,6 +421,16 @@ PERSONAL_SYSTEM_NOTE = (
     "instant an authorization actually succeeds, call record_dispute_letter_mailed so the "
     "tracker reflects reality — but only then, never before, and never as a stand-in for "
     "getting the confirmation itself."
+    " You also manage his finances conversationally, not just through the Finance page: "
+    "set_budget/delete_budget for monthly category spending limits, "
+    "add_manual_recurring_charge/delete_manual_recurring_charge for a bill or income source "
+    "Era's own detection missed or got wrong, and create_savings_goal/update_savings_goal/"
+    "delete_savings_goal for what he's saving toward. Never invent a budget limit, a bill "
+    "amount, or a savings target yourself — record only numbers he actually states. When he "
+    "asks what he can actually spend right now, use get_safe_to_spend: it's the lowest his "
+    "projected balance will hit before his next payday, minus his safety buffer "
+    "(get_safety_buffer/set_safety_buffer) — a real pay-period-aware answer, not a flat "
+    "category cap."
 )
 
 
@@ -392,6 +532,58 @@ class PersonalClient:
 
         if name == "track_dispute_letter":
             return self._track_dispute_letter(arguments)
+
+        if name == "list_budgets":
+            return {"budgets": db.list_budgets(db_path, owner)}
+        if name == "set_budget":
+            budget_id = db.create_budget(
+                db_path, owner, arguments["category_key"], arguments["category_label"], arguments["monthly_limit"])
+            return {"ok": True, "budget_id": budget_id}
+        if name == "delete_budget":
+            ok = db.delete_budget(db_path, arguments["budget_id"])
+            return {"ok": ok}
+
+        if name == "list_manual_recurring_charges":
+            return {"charges": db.list_manual_recurring_charges(db_path, owner)}
+        if name == "add_manual_recurring_charge":
+            if arguments["direction"] not in ("income", "expense"):
+                return {"error": "direction must be 'income' or 'expense'"}
+            if arguments["cadence"] not in finance.VALID_CADENCES:
+                return {"error": f"cadence must be one of {sorted(finance.VALID_CADENCES)}"}
+            charge_id = db.create_manual_recurring_charge(
+                db_path, owner, arguments["description"], arguments["amount"],
+                arguments["direction"], arguments["cadence"], arguments["next_expected_date"])
+            return {"ok": True, "charge_id": charge_id}
+        if name == "delete_manual_recurring_charge":
+            ok = db.delete_manual_recurring_charge(db_path, arguments["charge_id"])
+            return {"ok": ok}
+
+        if name == "list_savings_goals":
+            return {"goals": db.list_savings_goals(db_path, owner)}
+        if name == "create_savings_goal":
+            goal_id = db.create_savings_goal(
+                db_path, owner, arguments["name"], arguments["target_amount"], arguments.get("target_date"))
+            return {"ok": True, "goal_id": goal_id}
+        if name == "update_savings_goal":
+            kwargs = {"name": arguments.get("name"), "target_amount": arguments.get("target_amount")}
+            if "target_date" in arguments:
+                kwargs["target_date"] = arguments["target_date"] or None
+            ok = db.update_savings_goal(db_path, arguments["goal_id"], **kwargs)
+            return {"ok": ok}
+        if name == "delete_savings_goal":
+            ok = db.delete_savings_goal(db_path, arguments["goal_id"])
+            return {"ok": ok}
+
+        if name == "get_safe_to_spend":
+            return meal_plan_db.get_safe_to_spend(db_path, owner)
+        if name == "get_safety_buffer":
+            return {"safety_buffer": float(db.get_setting(db_path, db.FINANCE_SAFETY_BUFFER_SETTING, "0") or 0)}
+        if name == "set_safety_buffer":
+            value = arguments["safety_buffer"]
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                return {"error": "safety_buffer must be a non-negative number"}
+            db.set_setting(db_path, db.FINANCE_SAFETY_BUFFER_SETTING, str(float(value)))
+            return {"ok": True, "safety_buffer": float(value)}
 
         if name in _KITCHEN_TOOL_NAMES:
             return kitchen_tools.dispatch(db_path, owner, name, arguments, kroger_mcp_client=self.kroger)

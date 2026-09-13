@@ -15,6 +15,7 @@ from . import (
 )
 from .engine import handle_message
 from .finance import CADENCE_DAYS
+from . import finance
 
 logger = logging.getLogger(__name__)
 
@@ -609,6 +610,38 @@ def refresh_era_cache(mcp_client, db_path: str) -> None:
                 db_path, group["category_key"], period, group.get("label", ""),
                 group["amount"], group.get("percent_of_total"), group.get("transaction_count"),
             )
+
+    # Era's forecast/cash-flow/period-comparison insight tools are already chat-reachable
+    # but were never surfaced on the dashboard -- cache them here the same way
+    # analyze_spending is cached above, so the finance page can show them without a live
+    # per-request Era round trip. Unlike analyze_spending's typed cache table, these
+    # payloads are cached opaquely (see db.upsert_era_insight's docstring) since their
+    # exact shapes were never confirmed via live testing the way analyze_spending's was.
+    db.upsert_era_insight(
+        db_path, "forecast_spending",
+        _era_payload(mcp_client.call_tool("insights__forecast_spending", {"period": "this_month"})),
+    )
+    db.upsert_era_insight(
+        db_path, "cash_flow",
+        _era_payload(mcp_client.call_tool("insights__get_cash_flow", {"granularity": "month", "num_periods": 6})),
+    )
+    db.upsert_era_insight(
+        db_path, "compare_spending_periods",
+        _era_payload(mcp_client.call_tool(
+            "insights__compare_spending_periods",
+            {"group_by": "total", "period_a": "this_month", "period_b": "last_month"},
+        )),
+    )
+
+    # A net worth snapshot for today, from the balances just refreshed above -- one row
+    # per calendar day (db.upsert_net_worth_snapshot upserts on snapshot_date), so this
+    # builds a real net-worth-over-time history for free out of a job that already runs
+    # periodically, using Phase 1's cash/investment/liability account-type grouping.
+    net_worth = finance.net_worth(db.list_era_accounts(db_path))
+    db.upsert_net_worth_snapshot(
+        db_path, date.today().isoformat(),
+        net_worth["cash"], net_worth["investment"], net_worth["liability"], net_worth["net_worth"],
+    )
 
 
 def run_mail_junk_scan(mcp_client, limit: int = 25) -> dict:

@@ -6,6 +6,9 @@ import CalendarGrid from '../components/finance/CalendarGrid'
 import GoalsList from '../components/finance/GoalsList'
 import SpendingByCategory from '../components/finance/SpendingByCategory'
 import RecurringCharges from '../components/finance/RecurringCharges'
+import SafeToSpendBanner from '../components/finance/SafeToSpendBanner'
+import InsightsPanel from '../components/finance/InsightsPanel'
+import NetWorthChart from '../components/finance/NetWorthChart'
 
 export default function Finance() {
   const [summary, setSummary] = useState(null)
@@ -34,7 +37,14 @@ export default function Finance() {
 
   return (
     <div className="finance-page">
-      <BalanceCards accounts={summary.accounts} totalBalance={summary.total_balance} />
+      <SafeToSpendBanner data={projection.safe_to_spend} onChange={refreshProjection} />
+
+      <BalanceCards
+        accounts={summary.accounts}
+        totalBalance={summary.total_balance}
+        investmentBalance={summary.investment_balance}
+        liabilityBalance={summary.liability_balance}
+      />
 
       <section>
         <h3>Recurring bills &amp; income</h3>
@@ -61,6 +71,16 @@ export default function Finance() {
           <GoalsList goals={projection.goals} onChange={refreshProjection} />
         </section>
       </div>
+
+      <section>
+        <h3>Spending insights</h3>
+        <InsightsPanel />
+      </section>
+
+      <section>
+        <h3>Net worth over time</h3>
+        <NetWorthChart />
+      </section>
     </div>
   )
 }

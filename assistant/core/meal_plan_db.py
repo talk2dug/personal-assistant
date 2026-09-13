@@ -139,6 +139,32 @@ def get_pay_periods(db_path: str, owner_user_id: int, today: date | None = None)
     return finance.find_pay_periods(charges, today or date.today())
 
 
+def get_safe_to_spend(db_path: str, owner_user_id: int, today: date | None = None) -> dict:
+    """Composes get_pay_periods (real paycheck dates, above) with finance.project_balance /
+    finance.safe_to_spend to answer "how much can he actually spend right now without the
+    projected balance dropping below his safety buffer before the next payday". Lives here
+    rather than in finance.py (deliberately pure/I-O-free) or db.py (which would need to
+    import this module for get_pay_periods, and this module already imports db -- a cycle).
+    Both the finance REST routes and the finance chat tools call this so the composition
+    isn't duplicated between them.
+
+    Always returns a dict, unlike finance.safe_to_spend itself: when there's no current
+    pay period to bound the window yet, safe_to_spend is None and message explains why --
+    so neither caller needs its own None-handling fallback."""
+    as_of = today or date.today()
+    charges = db.list_forecast_charges(db_path, owner_user_id)
+    periods = get_pay_periods(db_path, owner_user_id, as_of)
+    balance = finance.spendable_balance(db.list_era_accounts(db_path))
+    safety_buffer = float(db.get_setting(db_path, db.FINANCE_SAFETY_BUFFER_SETTING, "0") or 0)
+    result = finance.safe_to_spend(balance, charges, periods, safety_buffer=safety_buffer, today=as_of)
+    if result is None:
+        return {
+            "safe_to_spend": None, "safety_buffer": safety_buffer,
+            "message": "Not enough pay-period data yet to compute this.",
+        }
+    return result
+
+
 # --- meal plans --------------------------------------------------------------------
 
 _MEAL_TYPE_ORDER = "CASE meal_type WHEN 'breakfast' THEN 0 WHEN 'lunch' THEN 1 ELSE 2 END"

@@ -81,6 +81,50 @@ def test_get_pay_periods_excluded_era_income_is_ignored(db_path, owner_id):
     assert all(p["end_date"] != "2026-09-20" for p in periods)
 
 
+def test_get_safe_to_spend_composes_balance_pay_periods_and_buffer(db_path, owner_id):
+    db.upsert_era_account(db_path, "acct-checking", "Checking", "Checking", 1000.0, 1000.0)
+    db.create_manual_recurring_charge(
+        db_path, owner_id, "Paycheck (15th)", 2000.0, "income", "monthly_on_day", "2026-09-15")
+    db.create_manual_recurring_charge(
+        db_path, owner_id, "Paycheck (last day)", 2000.0, "income", "monthly_on_last_day", "2026-09-30")
+    db.create_manual_recurring_charge(
+        db_path, owner_id, "Rent", 700.0, "expense", "monthly_on_day", "2026-09-25")
+    db.set_setting(db_path, db.FINANCE_SAFETY_BUFFER_SETTING, "100")
+
+    result = meal_plan_db.get_safe_to_spend(db_path, owner_id, today=date(2026, 9, 20))
+
+    # Balance dips to 300.0 (1000 - 700 rent on the 25th) before the 30th payday.
+    assert result["minimum_projected_balance"] == 300.0
+    assert result["safe_to_spend"] == 200.0
+    assert result["payday"] == "2026-09-30"
+
+
+def test_get_safe_to_spend_returns_a_dict_without_enough_pay_period_data(db_path, owner_id):
+    """Always a dict, never a bare None -- both routes/finance.py and personal_tools.py
+    check .safe_to_spend rather than each needing their own None-handling fallback."""
+    db.upsert_era_account(db_path, "acct-checking", "Checking", "Checking", 1000.0, 1000.0)
+    result = meal_plan_db.get_safe_to_spend(db_path, owner_id, today=date(2026, 9, 20))
+    assert result["safe_to_spend"] is None
+    assert result["safety_buffer"] == 0.0
+    assert "message" in result
+
+
+def test_get_safe_to_spend_ignores_investment_and_liability_balances(db_path, owner_id):
+    """The starting balance must come from spendable cash only -- an untouchable 401k or a
+    credit card balance shouldn't make it look like more is safe to spend."""
+    db.upsert_era_account(db_path, "acct-checking", "Checking", "Checking", 500.0, 500.0)
+    db.upsert_era_account(db_path, "acct-401k", "401k", "401k", 50000.0, 50000.0)
+    db.upsert_era_account(db_path, "acct-cc", "Credit Card", "Credit Card", 300.0, 300.0)
+    db.create_manual_recurring_charge(
+        db_path, owner_id, "Paycheck (15th)", 2000.0, "income", "monthly_on_day", "2026-09-15")
+    db.create_manual_recurring_charge(
+        db_path, owner_id, "Paycheck (last day)", 2000.0, "income", "monthly_on_last_day", "2026-09-30")
+
+    result = meal_plan_db.get_safe_to_spend(db_path, owner_id, today=date(2026, 9, 20))
+
+    assert result["minimum_projected_balance"] == 500.0
+
+
 def test_get_pay_periods_with_no_income_data_at_all_returns_empty(db_path, owner_id):
     assert meal_plan_db.get_pay_periods(db_path, owner_id, today=date(2026, 9, 20)) == []
 

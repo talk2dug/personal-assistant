@@ -194,7 +194,8 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     queue = work_queue.WorkQueue(cfg.db_path)
     client = BusinessClient(cfg.db_path, owner_user_id, llm=llm, profile=cfg.business, bridge=bridge,
                             ssh_ops=ssh_ops, work_queue=queue,
-                            obsidian=obsidian.mcp_client if obsidian is not None else None)
+                            obsidian=obsidian.mcp_client if obsidian is not None else None,
+                            media_dir=cfg.generated_media_path)
     scheduled = cfg.business_agents_enabled and hasattr(llm, "research")
     logger.info(
         "Business: %s (%s), agents %s", cfg.business.name, cfg.business.location,

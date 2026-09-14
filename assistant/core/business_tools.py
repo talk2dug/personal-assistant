@@ -137,6 +137,67 @@ REQUEST_CAPABILITY_TOOLS = [
     }},
 ]
 
+# Vinyl cutter (Blue Ridge Custom Co). Split out for the same reason as OPS_PLAN_TOOLS:
+# a narrow, self-contained capability that reads better as its own list than as two more
+# entries in the big one.
+#
+# **Neither of these drives the blade.** File generation is safe and testable; sending a job
+# to a cutting head is not something to wire into an unattended chat turn, so loading the
+# sheet and starting the cut stays a manual step the owner takes himself. The driver that
+# could do it is preserved in vendor/inkscape-silhouette, deliberately unconnected.
+CUTTER_TOOLS = [
+    {"type": "function", "function": {
+        "name": "generate_sticker_cut_sheet",
+        "description": (
+            "Make a printable sticker sheet and its matching cut file for the Silhouette "
+            "Cameo. Produces two files: a PNG to print (which carries the registration "
+            "marks the cutter reads optically) and an SVG of cut lines only. "
+            "This does NOT cut anything and does not talk to the machine -- he prints the "
+            "PNG, loads it, and starts the cut himself. Tell him where both files landed. "
+            "Images need transparent backgrounds; anything opaque is rejected rather than "
+            "traced, because tracing an opaque image just cuts a rectangle around it."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "source_dir": {
+                "type": "string",
+                "description": "Folder of PNG images to lay out. Use this or images, not both.",
+            },
+            "images": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Specific image files, when he named particular ones.",
+            },
+            "name": {"type": "string", "description": "Base name for the two output files."},
+            "material": {
+                "type": "string", "enum": ["sticker", "vinyl"],
+                "description": (
+                    "sticker = print-and-cut, smooth tracing, registration marks. "
+                    "vinyl = die-cut, hard blocky edges, no marks. Defaults to sticker."
+                ),
+            },
+            "offset_mm": {
+                "type": "number",
+                "description": (
+                    "How far outside the artwork the blade runs. Defaults to 2 mm. Only "
+                    "change it if he asks -- this figure was unresolved in the old system "
+                    "and 2 mm is the settled value."
+                ),
+            },
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "cutter_settings",
+        "description": (
+            "The calibrated Silhouette Cameo settings: blade speed/pressure/depth for "
+            "stickers vs vinyl, registration-mark geometry, and sheet sizes. Use when he "
+            "asks what to set the machine to, or what the numbers are. These came off real "
+            "cuts and are the only surviving record of them, so quote them exactly."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "material": {"type": "string", "enum": ["sticker", "vinyl"]},
+        }, "required": []},
+    }},
+]
+
 BUSINESS_TOOLS = [
     {"type": "function", "function": {
         "name": "business_status",
@@ -783,7 +844,7 @@ BUSINESS_TOOLS = [
             "limit": {"type": "integer"},
         }, "required": []},
     }},
-] + OPS_PLAN_TOOLS
+] + OPS_PLAN_TOOLS + CUTTER_TOOLS
 
 BUSINESS_SYSTEM_NOTE = (
     " You are also the owner's second in command for his business, {business_name}, based in "
@@ -865,6 +926,15 @@ BUSINESS_SYSTEM_NOTE = (
     "back on a vague condition or a very short interval: an alert he learns to ignore is "
     "worse than none, and every run is a real web search. Use manage_employee with "
     "action 'set_schedule' to change any of this later without re-hiring."
+    " For the cutting side of the business you can build print-and-cut jobs: "
+    "generate_sticker_cut_sheet lays images out and writes a printable PNG plus a cut SVG, "
+    "and cutter_settings has the calibrated blade numbers and registration-mark geometry. "
+    "Be exact about what that does and does not do — it produces two files and nothing else. "
+    "You cannot drive the cutter, and there is no tool that does; he prints the sheet, loads "
+    "it and starts the cut himself, so never say a job is cutting or has been sent. Tell him "
+    "the PNG must print at 100% scale, because fit-to-page moves the registration marks and "
+    "the machine then cannot find them. Those calibration numbers came off real cuts and the "
+    "server that held them is gone, so quote them, don't estimate them."
     "{gpu_note}"
 )
 
@@ -970,9 +1040,12 @@ class BusinessClient:
     """Executes the business tools. Same call_tool shape as the other integrations."""
 
     def __init__(self, db_path: str, owner_user_id: int, llm=None, profile=None, bridge=None, ssh_ops=None,
-                 work_queue=None, obsidian=None):
+                 work_queue=None, obsidian=None, media_dir: str = "generated"):
         self.db_path = db_path
         self.owner_user_id = owner_user_id
+        # Cut sheets are written under generated/, same convention as vision_faces and
+        # kitchen_photos, so they are already outside the repo and already gitignored.
+        self.media_dir = media_dir
         self.llm = llm
         self.profile = profile
         self.bridge = bridge
@@ -1547,5 +1620,80 @@ class BusinessClient:
                     if not employee_key or j["employee_key"] == employee_key
                 ]
             return {"work": work, "queued": queued}
+
+        # -- vinyl cutter: generates files, never drives the blade --------------
+
+        if name == "cutter_settings":
+            from . import vinyl_cutter  # noqa: PLC0415 -- pulls in cv2, so not at import time
+
+            which = arguments.get("material")
+            recipes = vinyl_cutter.RECIPES if which is None else {which: vinyl_cutter.RECIPES[which]}
+            return {
+                "blade_recipes": {
+                    k: {"tool": r.tool, "speed": r.speed, "pressure": r.pressure,
+                        "depth": r.depth, "registration_marks": r.regmarks}
+                    for k, r in recipes.items()
+                },
+                "registration_marks": {
+                    "count": 3, "positions": "top-left, top-right, bottom-left (there is no fourth)",
+                    "square_mm": vinyl_cutter.REGMARK_SQUARE_MM,
+                    "arm_mm": vinyl_cutter.REGMARK_ARM_MM,
+                    "stroke_mm": vinyl_cutter.REGMARK_STROKE_MM,
+                    "page_margin_mm": vinyl_cutter.REGMARK_MARGIN_MM,
+                    "mark_to_mark_mm": [round(vinyl_cutter.REGMARK_SPACING_X_MM, 1),
+                                        round(vinyl_cutter.REGMARK_SPACING_Y_MM, 1)],
+                    "note": "printed sheet only -- the Cameo reads them optically off the print",
+                },
+                "sheet": {"size_mm": [vinyl_cutter.SHEET_WIDTH_MM, vinyl_cutter.SHEET_HEIGHT_MM],
+                          "dpi": vinyl_cutter.PRINT_DPI,
+                          "min_text_height_mm": vinyl_cutter.MIN_TEXT_HEIGHT_MM},
+                "cut_offset_mm": vinyl_cutter.DEFAULT_CUT_OFFSET_MM,
+                "machine_limits": {"max_pressure": 33,
+                                   "track_enhancing_at_pressure": 19,
+                                   "blade_diameter_mm": 0.9},
+            }
+
+        if name == "generate_sticker_cut_sheet":
+            import pathlib  # noqa: PLC0415
+
+            from . import vinyl_cutter  # noqa: PLC0415
+
+            images = [pathlib.Path(p) for p in (arguments.get("images") or [])]
+            source_dir = arguments.get("source_dir")
+            if source_dir:
+                d = pathlib.Path(source_dir)
+                if not d.is_dir():
+                    return {"error": f"{source_dir} is not a folder"}
+                images += sorted(d.glob("*.png"))
+            if not images:
+                return {"error": "no images given -- pass source_dir or images"}
+
+            material = arguments.get("material") or "sticker"
+            preset = vinyl_cutter.PRESETS.get(material, vinyl_cutter.PRESET_STICKER)
+            recipe = vinyl_cutter.RECIPES.get(material, vinyl_cutter.RECIPE_STICKER)
+            name_arg = arguments.get("name") or f"sheet_{date.today().isoformat()}"
+            out_dir = pathlib.Path(self.media_dir) / "cut_sheets"
+
+            try:
+                result = vinyl_cutter.generate_cut_sheet(
+                    images, out_dir, name=name_arg, preset=preset,
+                    offset_mm=float(arguments.get("offset_mm") or vinyl_cutter.DEFAULT_CUT_OFFSET_MM),
+                )
+            except vinyl_cutter.VinylCutterError as e:
+                # Surfaced rather than swallowed. The predecessor's defining bug was a
+                # failure that returned plausible output instead of saying anything.
+                return {"error": str(e)}
+
+            result["blade_settings"] = {
+                "tool": recipe.tool, "speed": recipe.speed,
+                "pressure": recipe.pressure, "depth": recipe.depth,
+                "registration_marks": recipe.regmarks,
+            }
+            result["next_step"] = (
+                "Print the PNG at 100% scale (no fit-to-page, or the registration marks move "
+                "and the cutter will not find them), then load it and send the SVG from "
+                "Silhouette Studio. Jarvis does not drive the cutter."
+            )
+            return result
 
         return {"error": f"unknown business tool {name}"}

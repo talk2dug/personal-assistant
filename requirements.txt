@@ -25,3 +25,9 @@ numpy>=1.26.0
 # by device/deploy_to_pi.py and scripts/scan_network_media.py without ever being declared
 # here -- both only worked because it happened to already be installed by hand.
 paramiko>=3.4.0
+# USB transport for the vendored Silhouette Cameo driver (vendor/inkscape-silhouette).
+# That driver shipped its own copy of pyusb 1.0.2 as a *fallback* (Graphtec.py appends it to
+# sys.path, so an installed pyusb already won); we dropped the vendored copy and declare it
+# here instead. Importing nothing at module scope in Jarvis -- only vinyl_cutter's optional
+# hardware path needs it, and file generation works fine without a cutter attached.
+pyusb>=1.2.1

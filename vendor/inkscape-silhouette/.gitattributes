@@ -1,0 +1,5 @@
+# This directory is a preservation archive, not working source. The repo has
+# core.autocrlf=true, which would rewrite these files' line endings on checkout; `-text`
+# switches that off so what lands on disk is byte-for-byte what was recovered from the one
+# surviving copy. Do not remove -- fidelity here is the whole point of the directory.
+* -text

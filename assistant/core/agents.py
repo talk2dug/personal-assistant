@@ -334,6 +334,20 @@ def _medium_guidance(product_type: str | None) -> str:
     return MEDIUM_GUIDANCE["sticker"]
 
 
+def _concept_detail(concept: dict) -> str:
+    """The parts of a concept he needs in order to judge it, as readable text rather than
+    raw JSON -- price and production notes especially, since 'can this shop actually make
+    it, at that price' is the whole decision."""
+    parts = []
+    for label, key in (("Type", "product_type"), ("Audience", "target_customer"),
+                       ("Price estimate", "price_estimate"), ("Production", "production_notes"),
+                       ("From trend", "trend_topic")):
+        value = concept.get(key)
+        if value not in (None, ""):
+            parts.append(f"{label}: {value}")
+    return "\n".join(parts) or None
+
+
 def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: int = 4) -> dict:
     """Turns the best unworked trend leads into concrete, makeable product concepts."""
     run_id = business_db.start_agent_run(db_path, "product_creator")
@@ -378,7 +392,7 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
             if not isinstance(concept, dict) or not concept.get("name"):
                 continue
             price = concept.get("price_estimate")
-            _, created = business_db.create_product_concept(
+            concept_id, created = business_db.create_product_concept(
                 db_path, owner_user_id, str(concept["name"]), concept.get("product_type"),
                 concept.get("description"), concept.get("target_customer"),
                 float(price) if isinstance(price, (int, float)) else None,
@@ -387,6 +401,21 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
             )
             if created:
                 new_count += 1
+                # Without this the whole creative pipeline deadlocks, silently and
+                # indefinitely: a concept lands at status 'proposed', art_director and
+                # store_manager both only pick up APPROVED concepts, and nothing ever put
+                # the concept in front of him to approve. It ran that way for eight days
+                # and produced 60 unreachable concepts while every downstream agent
+                # reported "no approved concepts waiting" and looked idle rather than
+                # blocked. source_agent is not decoration -- review_examples filters on it
+                # to feed his past verdicts back into the next run's prompt.
+                business_db.create_review_item(
+                    db_path, owner_user_id, str(concept["name"]), kind="concept",
+                    summary=concept.get("description"),
+                    detail=_concept_detail(concept),
+                    source_agent="product_creator",
+                    ref_table="product_concepts", ref_id=concept_id,
+                )
 
         summary = f"Product creator: {new_count} new concepts proposed."
         business_db.finish_agent_run(db_path, run_id, "ok", summary, json.dumps(concepts)[:4000])
@@ -430,10 +459,20 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
             brief = _extract_json(raw)
             if not isinstance(brief, dict) or not brief.get("image_prompt"):
                 continue
-            business_db.create_art_brief(
+            brief_id = business_db.create_art_brief(
                 db_path, owner_user_id, title=concept["name"], concept_id=concept["id"],
                 style_direction=brief.get("style_direction"), image_prompt=brief.get("image_prompt"),
                 negative_prompt=NEGATIVE_PROMPT, aspect=brief.get("aspect"), notes=brief.get("notes"),
+            )
+            business_db.create_review_item(
+                db_path, owner_user_id, f"Art direction: {concept['name']}", kind="art",
+                summary=brief.get("style_direction"),
+                detail="\n\n".join(p for p in (
+                    f"Image prompt:\n{brief.get('image_prompt')}",
+                    f"Aspect: {brief.get('aspect')}" if brief.get("aspect") else None,
+                    f"Notes: {brief.get('notes')}" if brief.get("notes") else None,
+                ) if p),
+                source_agent="art_director", ref_table="art_briefs", ref_id=brief_id,
             )
             new_count += 1
 
@@ -475,11 +514,21 @@ def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int
             if not isinstance(listing, dict) or not listing.get("title"):
                 continue
             price = listing.get("price")
-            business_db.create_store_listing(
+            listing_id = business_db.create_store_listing(
                 db_path, owner_user_id, title=str(listing["title"]), concept_id=concept["id"],
                 description=listing.get("description"), seo_tags=listing.get("seo_tags"),
                 price=float(price) if isinstance(price, (int, float)) else None,
                 variants=listing.get("variants"),
+            )
+            business_db.create_review_item(
+                db_path, owner_user_id, f"Listing: {listing['title']}", kind="listing",
+                summary=listing.get("description"),
+                detail="\n\n".join(p for p in (
+                    f"Price: {price}" if price not in (None, "") else None,
+                    f"SEO tags: {listing.get('seo_tags')}" if listing.get("seo_tags") else None,
+                    f"Variants: {listing.get('variants')}" if listing.get("variants") else None,
+                ) if p),
+                source_agent="store_manager", ref_table="store_listings", ref_id=listing_id,
             )
             new_count += 1
 
@@ -531,12 +580,23 @@ def run_social_director(db_path: str, llm, owner_user_id: int, profile, limit: i
             for post in posts:
                 if not isinstance(post, dict) or not post.get("caption"):
                     continue
-                business_db.create_social_post(
-                    db_path, owner_user_id, platform=str(post.get("platform") or "instagram"),
+                platform = str(post.get("platform") or "instagram")
+                post_id = business_db.create_social_post(
+                    db_path, owner_user_id, platform=platform,
                     hook=post.get("hook"), caption=post.get("caption"), hashtags=post.get("hashtags"),
                     call_to_action=post.get("call_to_action"),
                     reason=f"Launch post for '{listing['title']}'",
                     listing_id=listing["id"], concept_id=listing.get("concept_id"),
+                )
+                business_db.create_review_item(
+                    db_path, owner_user_id, f"{platform.title()} post: {listing['title']}",
+                    kind="post", summary=post.get("hook"),
+                    detail="\n\n".join(p for p in (
+                        post.get("caption"),
+                        f"Hashtags: {post.get('hashtags')}" if post.get("hashtags") else None,
+                        f"CTA: {post.get('call_to_action')}" if post.get("call_to_action") else None,
+                    ) if p),
+                    source_agent="social_director", ref_table="social_posts", ref_id=post_id,
                 )
                 new_count += 1
 

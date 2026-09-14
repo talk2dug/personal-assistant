@@ -246,6 +246,39 @@ def test_product_creator_turns_trends_into_concepts(db_path):
     assert concept["trend_lead_id"] is not None  # traceable back to its signal
 
 
+def test_a_new_concept_actually_reaches_the_review_queue(db_path):
+    """The deadlock this closes ran for eight days in production and looked like nothing
+    was wrong. product_creator wrote concepts at status 'proposed'; art_director and
+    store_manager only ever pick up APPROVED concepts; and no code path put a concept in
+    front of the owner to approve. So 60 concepts accumulated unreachable while every
+    downstream agent reported "no approved concepts waiting" -- reading as idle rather
+    than blocked. Asserts the card exists and points back at the concept, because the
+    card is the only thing that can break the cycle.
+    """
+    business_db.upsert_trend_lead(db_path, 1, "RVA local pride", "reddit", 78, "skyline decal", "rising")
+    llm = FakeResearchLLM(json.dumps([
+        {"name": "RVA Skyline Die-Cut Decal", "product_type": "sticker",
+         "description": "4in matte white vinyl", "target_customer": "Richmond locals",
+         "price_estimate": 6.0, "production_notes": "Cut on the vinyl cutter",
+         "trend_topic": "RVA local pride"},
+    ]))
+    agents.run_product_creator(db_path, llm, 1, PROFILE)
+
+    concept = business_db.list_product_concepts(db_path, 1)[0]
+    pending = business_db.list_review_items(db_path, 1, status="pending")
+    cards = [r for r in pending if r["ref_table"] == "product_concepts"]
+    assert len(cards) == 1, "a proposed concept with no review card can never be approved"
+    assert cards[0]["ref_id"] == concept["id"]
+    # source_agent is load-bearing, not decoration: review_examples filters on it to feed
+    # his past verdicts back into this agent's next prompt.
+    assert cards[0]["source_agent"] == "product_creator"
+    # and approving that card must actually unblock the chain
+    business_db.decide_review_item(db_path, 1, cards[0]["id"], "approved")
+    business_db.set_concept_status(db_path, 1, concept["id"], "approved")
+    assert business_db.concepts_without(db_path, 1, "art_briefs", limit=3), \
+        "approving the card should leave the concept visible to the art director"
+
+
 def test_downstream_agents_wait_for_owner_approval(db_path):
     """The gate that makes this safe: an unapproved concept is invisible to the Art
     Director and E-Store Manager."""

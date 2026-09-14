@@ -70,6 +70,16 @@ class Config:
     # real-world false-positive/negative rates only show up once real mail is flowing.
     mail_junk_scan_interval_seconds: int = 900
     mail_junk_score_threshold: float = 4.0
+    # How often the three forward-looking mail passes run. Tunable here rather than
+    # hardcoded in scheduler.start() because these are latency dials, not cost dials:
+    # every pass keeps a judged-once-ever ledger (email_bill_scans, email_importance_scans,
+    # email_drafts), so raising the frequency does NOT re-judge messages or multiply LLM
+    # calls -- the same mail gets looked at, sooner. Only the per-run IMAP connection
+    # repeats. The one real coupling is mail_importance_max_flags_per_run, which is a cap
+    # PER RUN, so more runs raises the daily ceiling on review cards.
+    mail_triage_interval_minutes: int = 30
+    mail_bills_interval_minutes: int = 60
+    mail_importance_interval_minutes: int = 60
     # The two brakes on provisional importance flagging (see mail_importance.py): the
     # model's own 0-1 confidence a message must clear before it becomes a review card,
     # and how many cards one pass may raise at all. Tunable for the same reason the junk
@@ -338,6 +348,9 @@ def load_config(path: str = "config.json") -> Config:
         # is that it doesn't wait on a chat confirmation for every scan.
         mail_junk_scan_interval_seconds=data.get("mail_junk_scan_interval_seconds", 900),
         mail_junk_score_threshold=data.get("mail_junk_score_threshold", 4.0),
+        mail_triage_interval_minutes=data.get("mail_triage_interval_minutes", 30),
+        mail_bills_interval_minutes=data.get("mail_bills_interval_minutes", 60),
+        mail_importance_interval_minutes=data.get("mail_importance_interval_minutes", 60),
         mail_importance_confidence_threshold=data.get("mail_importance_confidence_threshold", 0.75),
         mail_importance_max_flags_per_run=data.get("mail_importance_max_flags_per_run", 3),
         mail_debts_interval_minutes=data.get("mail_debts_interval_minutes", 360),

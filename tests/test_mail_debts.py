@@ -771,6 +771,98 @@ def test_the_debt_sweep_is_registered_on_its_own_slow_backlog_cadence(tmp_path):
         started.shutdown(wait=False)
 
 
+def test_main_wires_every_schedulable_config_field_into_the_scheduler():
+    """The bug this guards against is 'added a config field, forgot to wire it'.
+
+    mail_triage/bills/importance_interval_minutes existed as scheduler.start() parameters
+    with sensible defaults, so everything looked fine and every direct-call test passed --
+    but main.py never passed cfg's values, so config.json could not actually move them.
+    A silently-ignored setting is worse than a missing one: it reads as configurable.
+
+    Asserts structurally (via AST, not a substring search) that every AppConfig field which
+    scheduler.start() is willing to accept is actually handed over at the real call site.
+    """
+    import ast
+    import dataclasses
+    import inspect
+    from pathlib import Path
+
+    from assistant import config as config_mod
+    from assistant.core import scheduler
+
+    accepted = set(inspect.signature(scheduler.start).parameters)
+    cfg_fields = {f.name for f in dataclasses.fields(config_mod.Config)}
+    schedulable = accepted & cfg_fields
+
+    # Deliberately not passed from main.py. Add here WITH a reason, never to silence a
+    # genuine miss.
+    not_wired_on_purpose = {
+        # Name collision only: Config.business is the BusinessProfile (name, location),
+        # while scheduler.start's `business` is the built BusinessContext object. Passing
+        # cfg.business here would be wrong, not missing.
+        "business",
+    }
+
+    positional = list(inspect.signature(scheduler.start).parameters)
+    source = Path(inspect.getfile(config_mod)).parent / "main.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    passed: set[str] = set()
+
+    def _is_cfg_attr(node, name):
+        return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == "cfg" and node.attr == name)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name != "start":
+            continue
+        # positional: cfg.db_path and cfg.poll_interval_seconds are passed this way
+        for index, arg in enumerate(node.args):
+            if index < len(positional) and _is_cfg_attr(arg, positional[index]):
+                passed.add(positional[index])
+        # keyword: only count `field=cfg.field`, not a renamed or literal value
+        for kw in node.keywords:
+            if kw.arg and _is_cfg_attr(kw.value, kw.arg):
+                passed.add(kw.arg)
+
+    missing = schedulable - passed - not_wired_on_purpose
+    assert not missing, (
+        "these AppConfig fields are accepted by scheduler.start() but main.py never passes "
+        f"them, so setting them in config.json does nothing: {sorted(missing)}")
+
+
+def test_every_mail_pass_takes_its_cadence_from_config(tmp_path):
+    """Regression: the triage/bills/importance intervals used to be hardcoded defaults in
+    scheduler.start()'s own signature, so config.json could not reach them -- only the junk
+    scan and the debt sweep were tunable. These are latency dials the owner should be able
+    to move without a code change, since the right value only shows up once real mail is
+    flowing. Asserts each job's real trigger, not just that the parameter is accepted.
+    """
+    from assistant.core import scheduler
+
+    path = str(tmp_path / "sched.db")
+    db.init_db(path)
+    db.upsert_user(path, "111", "Dug", "owner")
+    started = scheduler.start(
+        path, notify=lambda *a: None, poll_interval_seconds=3600,
+        mail=_MailContext(FakeMailClient()), llm=FakeLLM([]),
+        mail_triage_interval_minutes=11,
+        mail_bills_interval_minutes=22,
+        mail_importance_interval_minutes=33,
+    )
+    try:
+        for job_id, minutes in [("mail_triage_agent", 11), ("mail_bills_agent", 22),
+                                ("mail_importance_agent", 33)]:
+            job = started.get_job(job_id)
+            assert job is not None, f"{job_id} was not registered"
+            assert job.trigger.interval.total_seconds() == minutes * 60, job_id
+    finally:
+        started.shutdown(wait=False)
+
+
 def test_no_debt_sweep_without_an_llm(tmp_path):
     from assistant.core import scheduler
 

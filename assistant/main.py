@@ -176,6 +176,12 @@ def main() -> None:
         # interval, independent of business_agents_enabled (see scheduler.py's
         # docstring for why this isn't gated behind that switch).
         mail_junk_scan_interval_seconds=cfg.mail_junk_scan_interval_seconds,
+        # The other forward-looking passes. Latency dials, not cost dials -- each keeps a
+        # judged-once-ever ledger, so a shorter interval means mail is seen sooner, not
+        # more often (see config.py).
+        mail_triage_interval_minutes=cfg.mail_triage_interval_minutes,
+        mail_bills_interval_minutes=cfg.mail_bills_interval_minutes,
+        mail_importance_interval_minutes=cfg.mail_importance_interval_minutes,
         # Provisional importance flagging: both brakes come from config, because the
         # cost of getting them wrong is the owner ignoring the review queue.
         mail_importance_confidence_threshold=cfg.mail_importance_confidence_threshold,

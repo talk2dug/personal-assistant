@@ -83,6 +83,27 @@ function ReviewCard({ review }) {
   )
 }
 
+/** What he picked, kept visible after the card has left the queue. */
+function Chosen({ chosen }) {
+  if (!chosen) return null
+  return (
+    <div className={`pl-chosen is-${chosen.decision}`}>
+      <span className="pl-chosen-flag">
+        {chosen.decision === 'approved' ? 'You picked' : `You ${chosen.decision} this`}
+      </span>
+      <figure className="pl-option">
+        {chosen.has_image
+          ? <img src={`/api/review/media/${chosen.id}`} alt={chosen.label || 'chosen'} />
+          : <div className="pl-option-noimg">no image</div>}
+        <figcaption>
+          <span className="pl-option-label">{chosen.label}</span>
+          {chosen.description && <span className="pl-option-desc">{chosen.description}</span>}
+        </figcaption>
+      </figure>
+    </div>
+  )
+}
+
 function ArtItem({ brief }) {
   return (
     <div className="pl-item">
@@ -91,6 +112,7 @@ function ArtItem({ brief }) {
         <span className={`pl-status is-${brief.status}`}>{brief.status}</span>
       </div>
       {brief.style_direction && <p className="pl-item-line">{brief.style_direction}</p>}
+      <Chosen chosen={brief.chosen} />
       {brief.image_prompt && <p className="pl-prompt">{brief.image_prompt}</p>}
       {brief.reviews?.map((r) => <ReviewCard key={r.id} review={r} />)}
     </div>
@@ -110,6 +132,7 @@ function ListingItem({ listing }) {
         {listing.variants?.length > 0 && <span>{listing.variants.length} variants</span>}
       </div>
       {listing.description && <p className="pl-item-line">{listing.description}</p>}
+      <Chosen chosen={listing.chosen} />
       {listing.reviews?.map((r) => <ReviewCard key={r.id} review={r} />)}
     </div>
   )
@@ -125,6 +148,7 @@ function PostItem({ post }) {
       {post.hook && <p className="pl-item-line"><b>{post.hook}</b></p>}
       {post.caption && <p className="pl-item-line">{post.caption}</p>}
       {post.hashtags && <p className="pl-tags">{post.hashtags}</p>}
+      <Chosen chosen={post.chosen} />
       {post.reviews?.map((r) => <ReviewCard key={r.id} review={r} />)}
     </div>
   )
@@ -234,6 +258,7 @@ export default function Pipelines() {
                       {c.price_estimate != null && <span>~${Number(c.price_estimate).toFixed(2)}</span>}
                     </div>
                     {c.production_notes && <p className="pl-prompt">{c.production_notes}</p>}
+                    <Chosen chosen={c.chosen} />
                   </div>
                 ))}
 

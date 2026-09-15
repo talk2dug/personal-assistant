@@ -11,7 +11,7 @@ import json
 import pytest
 
 from assistant.config import BusinessProfile
-from assistant.core import agents, business_db, ops_plans, staff
+from assistant.core import agents, business_db, business_tools, ops_plans, staff
 from assistant.core.business_tools import BUSINESS_TOOLS, BusinessClient
 from assistant.core.engine import BusinessContext, _dispatch_tool_call, build_system_prompt, select_tools
 
@@ -308,6 +308,155 @@ def test_art_director_uses_medium_specific_direction(db_path):
     brief = business_db.list_art_briefs(db_path, 1)[0]
     assert brief["negative_prompt"] and "deformed" in brief["negative_prompt"]
     assert brief["status"] == "draft"
+
+
+class FakeImageBridge:
+    """A GPU bridge that always renders, so the art director's flipped order is testable
+    without a graphics card."""
+
+    def __init__(self, mode="available"):
+        self.prompts = []
+        self.mode = mode
+
+    def get_mode(self):
+        return {"mode": self.mode, "reason": "racing" if self.mode == "reserved" else None}
+
+    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900):
+        self.prompts.append(prompt)
+        name = f"generated/render{len(self.prompts)}.png"
+        return {"status": "done", "result": json.dumps({"files": [name], "count": 1})}
+
+
+THREE_DIRECTIONS = {
+    "style_direction": "bold and current",
+    "aspect": "1:1",
+    "notes": "two colours max",
+    "directions": [
+        {"label": "Neon night", "rationale": "for the late crowd", "image_prompt": "neon squirrel"},
+        {"label": "Woodcut", "rationale": "for the market stall", "image_prompt": "woodcut squirrel"},
+        {"label": "Flat vector", "rationale": "cheapest to cut", "image_prompt": "flat squirrel"},
+    ],
+}
+
+
+def _approved_concept(db_path, name="Squirrel Decal", kind="sticker"):
+    business_db.create_product_concept(db_path, 1, name, kind, "desc")
+    concept_id = business_db.list_product_concepts(db_path, 1)[0]["id"]
+    business_db.set_concept_status(db_path, 1, concept_id, "approved")
+    return concept_id
+
+
+def test_art_director_renders_before_asking_for_approval(db_path):
+    """The owner's complaint was exact: "I also need to see the art work and not just
+    text." Approving a prompt is approving a guess about what the prompt will produce, so
+    the render happens first and the card is a pick-one between real images."""
+    _approved_concept(db_path)
+    bridge = FakeImageBridge()
+
+    result = agents.run_art_director(
+        db_path, FakeResearchLLM(json.dumps(THREE_DIRECTIONS)), 1, PROFILE, bridge=bridge)
+
+    assert result["rendered"] == 3
+    assert bridge.prompts == ["neon squirrel", "woodcut squirrel", "flat squirrel"]
+
+    item = business_db.list_review_items(db_path, 1, status="pending")[0]
+    assert [o["label"] for o in item["options"]] == ["Neon night", "Woodcut", "Flat vector"]
+    assert all(o["media_path"] for o in item["options"]), "every option is a real picture"
+
+
+def test_art_director_asks_for_genuinely_different_directions(db_path):
+    """Three renders of the same idea reworded costs him three slots on the card and
+    gives him no decision to make."""
+    _approved_concept(db_path)
+    llm = FakeResearchLLM(json.dumps(THREE_DIRECTIONS))
+    agents.run_art_director(db_path, llm, 1, PROFILE, bridge=FakeImageBridge())
+    assert "GENUINELY DIFFERENT" in llm.prompts[0]
+
+
+def test_art_director_still_files_when_there_is_no_renderer(db_path):
+    """The old text-only behaviour is the floor, not an error: without a GPU the work the
+    model already did must not be thrown away."""
+    _approved_concept(db_path)
+
+    result = agents.run_art_director(
+        db_path, FakeResearchLLM(json.dumps(THREE_DIRECTIONS)), 1, PROFILE, bridge=None)
+
+    assert result["new"] == 1 and result["rendered"] == 0
+    item = business_db.list_review_items(db_path, 1, status="pending")[0]
+    assert len(item["options"]) == 3
+    assert all(o["media_path"] is None for o in item["options"])
+    assert "Could not render" in item["detail"], "a card with no pictures has to say why"
+
+
+def test_art_director_accepts_the_older_single_prompt_shape(db_path):
+    """The model is asked for a directions list but sometimes answers the old way.
+    Accepting both turns "it phrased it differently today" from a lost concept into a
+    card with one option instead of three."""
+    _approved_concept(db_path)
+
+    result = agents.run_art_director(
+        db_path,
+        FakeResearchLLM(json.dumps({"style_direction": "s", "image_prompt": "one squirrel",
+                                    "aspect": "1:1"})),
+        1, PROFILE, bridge=FakeImageBridge())
+
+    assert result["new"] == 1
+    item = business_db.list_review_items(db_path, 1, status="pending")[0]
+    assert [o["body"] for o in item["options"]] == ["one squirrel"]
+
+
+def test_approving_a_direction_adopts_its_prompt(db_path):
+    """Otherwise the pick is decorative: the brief keeps whichever prompt happened to be
+    first, and the listing and social copy written from it downstream describe a picture
+    he passed over."""
+    _approved_concept(db_path)
+    agents.run_art_director(
+        db_path, FakeResearchLLM(json.dumps(THREE_DIRECTIONS)), 1, PROFILE,
+        bridge=FakeImageBridge())
+
+    item = business_db.list_review_items(db_path, 1, status="pending")[0]
+    woodcut = next(o for o in item["options"] if o["label"] == "Woodcut")
+    decided = business_db.decide_review_item(db_path, 1, item["id"], "approved",
+                                             option_id=woodcut["id"])
+    business_tools.apply_review_decision(db_path, 1, decided, "approved")
+
+    brief = business_db.list_art_briefs(db_path, 1)[0]
+    assert brief["image_prompt"] == "woodcut squirrel"
+    assert brief["status"] == "approved"
+
+
+def test_rejecting_art_leaves_the_working_prompt_alone(db_path):
+    _approved_concept(db_path)
+    agents.run_art_director(
+        db_path, FakeResearchLLM(json.dumps(THREE_DIRECTIONS)), 1, PROFILE,
+        bridge=FakeImageBridge())
+
+    item = business_db.list_review_items(db_path, 1, status="pending")[0]
+    woodcut = next(o for o in item["options"] if o["label"] == "Woodcut")
+    decided = business_db.decide_review_item(db_path, 1, item["id"], "rejected",
+                                             option_id=woodcut["id"], note="too busy")
+    business_tools.apply_review_decision(db_path, 1, decided, "rejected")
+
+    brief = business_db.list_art_briefs(db_path, 1)[0]
+    assert brief["image_prompt"] == "neon squirrel"
+    assert brief["status"] == "rejected"
+
+
+def test_art_director_waits_rather_than_filing_text_while_the_card_is_reserved(db_path):
+    """Racing wins. Every render would block for its full timeout and the run would end
+    up filing exactly the text-only cards this was rewritten to stop filing -- after
+    spending a web-searching model call per concept to do it."""
+    _approved_concept(db_path)
+    bridge = FakeImageBridge(mode="reserved")
+    llm = FakeResearchLLM(json.dumps(THREE_DIRECTIONS))
+
+    result = agents.run_art_director(db_path, llm, 1, PROFILE, bridge=bridge)
+
+    assert result["status"] == "skipped"
+    assert "racing" in result["summary"]
+    assert llm.prompts == [], "and it costs nothing while it waits"
+    assert business_db.list_art_briefs(db_path, 1) == []
+    assert business_db.concepts_without(db_path, 1, "art_briefs", limit=3),         "the concept is untouched, so the next tick picks it up"
 
 
 def test_store_manager_then_social_director_chain(db_path):

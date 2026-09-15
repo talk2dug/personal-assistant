@@ -155,6 +155,9 @@ def main() -> None:
         # background work, same as reminders and the Era cache.
         business=business, llm=llm, tz_name=cfg.timezone,
         business_agents_enabled=cfg.business_agents_enabled,
+        # The art director renders each direction before filing it for approval, so it
+        # needs the same queue everything else draws the card through.
+        bridge=bridge,
         # Location watching needs HA for GPS and the other contexts so a routine's
         # prompt has the same tools a chat turn would.
         home_assistant=home_assistant, phone=phone, mail=mail, obsidian=obsidian,

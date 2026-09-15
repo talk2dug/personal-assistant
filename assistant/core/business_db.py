@@ -751,6 +751,23 @@ def set_art_brief_status(db_path: str, owner_user_id: int, brief_id: int, status
         return cur.rowcount > 0
 
 
+def set_art_brief_prompt(db_path: str, owner_user_id: int, brief_id: int, image_prompt: str) -> bool:
+    """Adopts the direction the owner actually picked as the brief's working prompt.
+
+    The art director proposes several directions and renders each one, so the card he
+    decides is a pick-one between real images. Without this the pick is decorative: the
+    brief would keep whichever prompt happened to be first, and the store and social
+    copy written from it downstream would describe a picture he did not choose.
+    """
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "UPDATE art_briefs SET image_prompt = ? WHERE id = ? AND owner_user_id = ?",
+            (image_prompt, brief_id, owner_user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def create_store_listing(
     db_path: str, owner_user_id: int, title: str, concept_id: int | None = None,
     description: str | None = None, seo_tags: str | None = None, price: float | None = None,

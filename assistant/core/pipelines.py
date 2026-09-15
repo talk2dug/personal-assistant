@@ -148,6 +148,30 @@ def _options_for(conn, item_ids: list[int]) -> dict:
     return out
 
 
+def _chosen_options(conn, owner_user_id: int) -> dict:
+    """The option the owner picked on each already-decided card, by what it was about.
+
+    Pending cards are only half the board. Once he approves an art direction the card
+    leaves the queue, and without this the artwork he chose leaves with it -- the stage
+    would go back to reading "approved" and nothing else, which is the text-only view
+    this was built to replace. Looking back at a finished pipeline should show the
+    picture that won.
+    """
+    out = {}
+    for row in conn.execute(
+            "SELECT i.ref_table, i.ref_id, i.status, i.decided_at, "
+            "       o.id, o.label, o.description, o.body, o.media_path "
+            "FROM review_items i JOIN review_options o ON o.item_id = i.id "
+            "WHERE i.owner_user_id = ? AND i.status != 'pending' AND o.chosen = 1",
+            (owner_user_id,)):
+        out[(row["ref_table"], row["ref_id"])] = {
+            "id": row["id"], "label": row["label"], "description": row["description"],
+            "body": row["body"], "has_image": bool(row["media_path"]),
+            "decision": row["status"], "decided_at": row["decided_at"],
+        }
+    return out
+
+
 def list_pipelines(db_path: str, owner_user_id: int, market: str | None = None,
                    limit: int = 200) -> list[dict]:
     """Every concept as a pipeline summary, newest first.
@@ -264,6 +288,7 @@ def get_pipeline(db_path: str, owner_user_id: int, concept_id: int) -> dict | No
         pending = _pending_reviews(conn, owner_user_id)
         review_ids = [i["id"] for items in pending.values() for i in items]
         options = _options_for(conn, review_ids)
+        chosen = _chosen_options(conn, owner_user_id)
 
     def reviews_for(table, ref_id):
         items = [dict(i) for i in pending.get((table, ref_id), [])]
@@ -271,19 +296,25 @@ def get_pipeline(db_path: str, owner_user_id: int, concept_id: int) -> dict | No
             item["options"] = options.get(item["id"], [])
         return items
 
+    def decorate(table, row):
+        """One artefact with both what is waiting on it and what was already decided."""
+        return {**row, "reviews": reviews_for(table, row["id"]),
+                "chosen": chosen.get((table, row["id"]))}
+
     stages = [
         {"stage": "idea", "items": [lead] if lead else [],
          "reviews": []},
-        {"stage": "concept", "items": [concept],
+        {"stage": "concept",
+         "items": [{**concept, "chosen": chosen.get(("product_concepts", concept_id))}],
          "reviews": reviews_for("product_concepts", concept_id)},
         {"stage": "art",
-         "items": [{**b, "reviews": reviews_for("art_briefs", b["id"])} for b in briefs],
+         "items": [decorate("art_briefs", b) for b in briefs],
          "reviews": [r for b in briefs for r in reviews_for("art_briefs", b["id"])]},
         {"stage": "listing",
-         "items": [{**l, "reviews": reviews_for("store_listings", l["id"])} for l in listings],
+         "items": [decorate("store_listings", l) for l in listings],
          "reviews": [r for l in listings for r in reviews_for("store_listings", l["id"])]},
         {"stage": "social",
-         "items": [{**p, "reviews": reviews_for("social_posts", p["id"])} for p in posts],
+         "items": [decorate("social_posts", p) for p in posts],
          "reviews": [r for p in posts for r in reviews_for("social_posts", p["id"])]},
     ]
 

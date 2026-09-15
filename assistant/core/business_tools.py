@@ -1011,6 +1011,13 @@ def apply_review_decision(db_path: str, owner: int, item: dict, decision: str, s
             business_db.set_concept_status(db_path, owner, ref_id, target)
         elif ref_table == "art_briefs":
             business_db.set_art_brief_status(db_path, owner, ref_id, target)
+            # He picked between rendered images, so adopt the prompt behind the one he
+            # chose. Otherwise the brief keeps the first direction's prompt and every
+            # stage downstream describes a picture he passed over.
+            chosen = next((o for o in (item.get("options") or [])
+                           if o.get("chosen") and o.get("body")), None)
+            if target == "approved" and chosen:
+                business_db.set_art_brief_prompt(db_path, owner, ref_id, chosen["body"])
         elif ref_table == "store_listings":
             business_db.update_store_listing(db_path, owner, ref_id, status=target)
         elif ref_table == "social_posts":
@@ -1085,8 +1092,11 @@ class BusinessClient:
                 self.db_path, self.llm, self.profile, obsidian=self.obsidian),
             "product_creator": lambda: agents.run_product_creator(
                 self.db_path, self.llm, self.owner_user_id, self.profile),
+            # bridge, so a run he triggers from chat renders its options the same way
+            # the scheduled one does -- an art card with pictures from the timer and a
+            # text-only one from "run the art director" would be a baffling difference.
             "art_director": lambda: agents.run_art_director(
-                self.db_path, self.llm, self.owner_user_id, self.profile),
+                self.db_path, self.llm, self.owner_user_id, self.profile, bridge=self.bridge),
             "store_manager": lambda: agents.run_store_manager(
                 self.db_path, self.llm, self.owner_user_id, self.profile),
             "social_director": lambda: agents.run_social_director(

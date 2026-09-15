@@ -76,7 +76,7 @@ def start(
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
     github_watchdog_interval_seconds: int = 180,
     local_llm=None, local_llm_keepalive_interval_seconds: int = 600,
-    staff_assignment_timeout_seconds: int = 10800,
+    staff_assignment_timeout_seconds: int = 10800, bridge=None,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -474,7 +474,11 @@ def start(
 
             def _pipeline_tick():
                 agents.run_product_creator(db_path, llm, owner["id"], profile)
-                agents.run_art_director(db_path, llm, owner["id"], profile)
+                # The art director renders its options before filing them, so this tick
+                # can now sit on the GPU queue for a few minutes. That is fine here -- it
+                # runs every 12 hours and the renders respect the same reservation
+                # everything else does -- but it is why the bridge has to reach it.
+                agents.run_art_director(db_path, llm, owner["id"], profile, bridge=bridge)
                 agents.run_store_manager(db_path, llm, owner["id"], profile)
                 agents.run_social_director(db_path, llm, owner["id"], profile)
 

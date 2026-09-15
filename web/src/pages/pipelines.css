@@ -308,3 +308,28 @@
   }
   .pl-rail-list { max-height: 240px; }
 }
+
+/* --- what he already decided --------------------------------------------- */
+
+/* Deliberately quieter than a pending card: this is the record of a call already
+   made, and it must not compete for attention with the one still waiting. */
+.pl-chosen {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 2px solid var(--steel-mid);
+  padding: 6px 0 6px 10px;
+  max-width: 220px;
+}
+
+.pl-chosen.is-rejected { border-left-color: var(--text-faint); opacity: 0.6; }
+
+.pl-chosen-flag {
+  font-family: var(--font-display);
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--steel-mid);
+}
+
+.pl-chosen.is-rejected .pl-chosen-flag { color: var(--text-faint); }

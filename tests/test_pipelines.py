@@ -220,6 +220,56 @@ class TestDetail:
         option = next(s for s in detail["stages"] if s["stage"] == "concept")["reviews"][0]["options"][0]
         assert option["has_image"] is True
 
+    def test_the_artwork_he_approved_stays_visible_after_the_card_is_decided(self, db_path, owner):
+        """Pending cards are only half the board. Approving an art direction takes the
+        card out of the queue, and the picture must not leave with it -- otherwise looking
+        back at a finished pipeline shows the word "approved" and nothing else, which is
+        the text-only view this replaced."""
+        cid = _concept(db_path, owner, "Thing")
+        brief = business_db.create_art_brief(db_path, owner, concept_id=cid, title="A",
+                                             image_prompt="x")
+        item = business_db.create_review_item(
+            db_path, owner, title="Pick art", kind="art", summary="s", detail="d",
+            source_agent="art_director", ref_table="art_briefs", ref_id=brief,
+            options=[{"label": "Neon", "media_path": "generated/a.png"},
+                     {"label": "Woodcut", "media_path": "generated/b.png"}])
+        decided = business_db.get_review_item(db_path, owner, item)
+        woodcut = next(o for o in decided["options"] if o["label"] == "Woodcut")
+        business_db.decide_review_item(db_path, owner, item, "approved", option_id=woodcut["id"])
+
+        art = next(s for s in pipelines.get_pipeline(db_path, owner, cid)["stages"]
+                   if s["stage"] == "art")["items"][0]
+        assert art["reviews"] == [], "it is decided, so nothing is waiting"
+        assert art["chosen"]["label"] == "Woodcut"
+        assert art["chosen"]["has_image"] is True
+        assert art["chosen"]["decision"] == "approved"
+
+    def test_an_undecided_card_contributes_no_chosen_option(self, db_path, owner):
+        cid = _concept(db_path, owner, "Thing")
+        brief = business_db.create_art_brief(db_path, owner, concept_id=cid, title="A",
+                                             image_prompt="x")
+        business_db.create_review_item(
+            db_path, owner, title="Pick art", kind="art", summary="s", detail="d",
+            source_agent="art_director", ref_table="art_briefs", ref_id=brief,
+            options=[{"label": "Neon", "media_path": "generated/a.png"}])
+        art = next(s for s in pipelines.get_pipeline(db_path, owner, cid)["stages"]
+                   if s["stage"] == "art")["items"][0]
+        assert art["chosen"] is None
+        assert len(art["reviews"]) == 1
+
+    def test_a_chosen_option_never_leaks_its_filesystem_path_either(self, db_path, owner):
+        cid = _concept(db_path, owner, "Thing")
+        item = business_db.create_review_item(
+            db_path, owner, title="Pick art", kind="art", summary="s", detail="d",
+            source_agent="art_director", ref_table="product_concepts", ref_id=cid,
+            options=[{"label": "Neon", "media_path": r"D:\Jarvis Generated\secret.png"}])
+        option = business_db.get_review_item(db_path, owner, item)["options"][0]
+        business_db.decide_review_item(db_path, owner, item, "approved", option_id=option["id"])
+
+        detail = pipelines.get_pipeline(db_path, owner, cid)
+        assert "secret.png" not in str(detail)
+        assert detail["stages"][1]["items"][0]["chosen"]["has_image"] is True
+
     def test_a_missing_pipeline_is_none_not_an_error(self, db_path, owner):
         assert pipelines.get_pipeline(db_path, owner, 424242) is None
 

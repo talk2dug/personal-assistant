@@ -75,6 +75,12 @@ class Config:
     # owner's mail, money, calendar and front door. Empty means nobody -- it fails
     # closed, and no default here is deliberate. See core/cellular.is_allowed.
     sms_allowed_numbers: list[str] = None
+    # WAN failover: when the house connection drops, send Jarvis's outbound traffic
+    # through the proxy on the Pi that holds the LTE modem. Off by default -- it spends
+    # a metered cellular plan, so it has to be switched on deliberately.
+    wan_failover_enabled: bool = False
+    wan_failover_proxy: str | None = None
+    wan_failover_interval_seconds: int = 60
     mail_sensitive_tools: list[str] = None
     # How often the autonomous junk-flagging pass runs (see scheduler.py's
     # mail_junk_scan job) and the score (junk_filter.score_message) a message needs to
@@ -349,6 +355,9 @@ def load_config(path: str = "config.json") -> Config:
         phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
         stt_model_size=data.get("stt_model_size", "base.en"),
         sms_allowed_numbers=data.get("sms_allowed_numbers") or [],
+        wan_failover_enabled=data.get("wan_failover_enabled", False),
+        wan_failover_proxy=data.get("wan_failover_proxy"),
+        wan_failover_interval_seconds=data.get("wan_failover_interval_seconds", 60),
         # Matches the phone/Era gating policy: only tools with a real, hard-to-fully-undo
         # consequence require confirmation. send_email leaves the account for good;
         # archive_email/delete_email each remove a message from wherever the user currently

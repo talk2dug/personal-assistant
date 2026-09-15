@@ -12,7 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from . import (
     agents, business_db, crypto_journal, db, github_client, kitchen_db, location,
     mail_bills, mail_db, mail_debts, mail_importance, mail_triage, market_data,
-    paper_trading, personal_agents, personal_db, staff,
+    paper_trading, personal_agents, personal_db, staff, wan_failover,
 )
 from .mail_client import JUNK_FOLDER
 from .engine import handle_message
@@ -68,6 +68,8 @@ def start(
     mail_importance_max_flags_per_run: int = mail_importance.DEFAULT_MAX_FLAGS_PER_RUN,
     mail_debts_interval_minutes: int = 360,
     mail_debts_per_run_limit: int = mail_debts.DEFAULT_PER_RUN_LIMIT,
+    wan_failover_enabled: bool = False, wan_failover_proxy: str | None = None,
+    wan_failover_interval_seconds: int = 60,
     mail_debts_shortlist_limit: int = mail_debts.DEFAULT_SHORTLIST_LIMIT,
     kroger_sync_interval_seconds: int = 3600,
     task_watchdog_interval_seconds: int = 60,
@@ -136,6 +138,24 @@ def start(
             db.mark_reminder_sent(db_path, reminder["id"])
 
     scheduler.add_job(_tick, "interval", seconds=poll_interval_seconds, id="reminder_poll")
+
+    if wan_failover_enabled and wan_failover_proxy:
+        # Watches the house connection and, when it dies, moves Jarvis's outbound calls
+        # onto the LTE modem's proxy. Runs on its own short interval because the whole
+        # value is in noticing quickly -- and it is cheap: three TCP connects when the
+        # WAN is healthy, which is nearly always.
+        def _wan_tick():
+            try:
+                result = wan_failover.evaluate(db_path, wan_failover_proxy, enabled=True)
+                if result.get("changed"):
+                    logger.warning("WAN failover state changed: %s", result)
+            except Exception:
+                logger.exception("WAN failover check failed")
+
+        scheduler.add_job(_wan_tick, "interval",
+                          seconds=wan_failover_interval_seconds, id="wan_failover")
+        logger.info("WAN failover armed: proxy %s, every %ss",
+                    wan_failover_proxy, wan_failover_interval_seconds)
 
     if calendar is not None:
         owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)

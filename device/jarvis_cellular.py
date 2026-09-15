@@ -137,8 +137,88 @@ class Server:
     def confirm(self, message_id: int, ok: bool, detail: str | None = None) -> None:
         self._call(f"/api/cellular/sent/{message_id}", {"ok": ok, "detail": detail})
 
+    def link_wanted(self) -> bool:
+        return bool(self._call("/api/cellular/link").get("data_wanted"))
 
-def tick(idx: str, server: Server) -> None:
+
+# The APN for the data bearer. Verizon consumer/hotspot.
+DATA_APN = "vzwinternet"
+
+
+def connect_data(idx: str) -> None:
+    """Bring the cellular data bearer up and make it this Pi's route to the internet.
+
+    Changing THIS box's default route is safe and is the point: during an outage its
+    normal route runs through a router whose WAN is dead. The LAN route is left alone so
+    the server can still reach it, and nothing on any other machine is touched -- the
+    whole reason the proxy design was chosen over making this a gateway.
+    """
+    out = mmcli("-m", idx, f"--simple-connect=apn={DATA_APN}", timeout=90)
+    log.info("cellular data: %s", out.strip()[:80])
+
+    block = mmcli("-m", idx)
+    bearer = re.findall(r"/org/freedesktop/ModemManager1/Bearer/\d+", block)
+    if not bearer:
+        raise RuntimeError("connected but no bearer path")
+    cfg = mmcli("-b", bearer[-1])
+    addr = _field(cfg, "address")
+    prefix = _field(cfg, "prefix")
+    gw = _field(cfg, "gateway")
+    mtu = _field(cfg, "mtu")
+    if not (addr and prefix and gw):
+        raise RuntimeError("bearer came up without an IPv4 configuration")
+
+    run = lambda *a: subprocess.run(["sudo", "-n", *a], capture_output=True, text=True)
+    run("ip", "link", "set", "wwan0", "up")
+    run("ip", "addr", "flush", "dev", "wwan0")
+    run("ip", "addr", "add", f"{addr}/{prefix}", "dev", "wwan0")
+    if mtu:
+        run("ip", "link", "set", "wwan0", "mtu", mtu)
+    # Metric 50 beats wifi's 600, so this becomes the default while it exists. Deleted
+    # again the moment the WAN comes back.
+    run("ip", "route", "replace", "default", "via", gw, "dev", "wwan0", "metric", "50")
+    log.warning("cellular data UP: %s/%s via %s", addr, prefix, gw)
+
+
+def disconnect_data(idx: str) -> None:
+    run = lambda *a: subprocess.run(["sudo", "-n", *a], capture_output=True, text=True)
+    run("ip", "route", "del", "default", "dev", "wwan0")
+    run("ip", "addr", "flush", "dev", "wwan0")
+    run("ip", "link", "set", "wwan0", "down")
+    try:
+        mmcli("-m", idx, "--simple-disconnect", timeout=60)
+    except RuntimeError as e:
+        log.debug("disconnect: %s", e)
+    log.warning("cellular data DOWN, back to the LAN route")
+
+
+def manage_link(idx: str, server: Server, state: dict) -> None:
+    """Hold the data bearer up only while the server says the WAN is down.
+
+    Idempotent and driven by the server's flag rather than by this Pi's own view of the
+    network: the machine that needs the internet is the one that should decide when it
+    has lost it.
+    """
+    try:
+        wanted = server.link_wanted()
+    except Exception as e:
+        log.debug("could not read the link flag: %s", e)
+        return
+    if wanted and not state.get("data_up"):
+        try:
+            connect_data(idx)
+            state["data_up"] = True
+        except Exception:
+            log.exception("could not bring the cellular data link up")
+    elif not wanted and state.get("data_up"):
+        disconnect_data(idx)
+        state["data_up"] = False
+
+
+def tick(idx: str, server: Server, state: dict | None = None) -> None:
+    if state is not None:
+        manage_link(idx, server, state)
+
     for msg in list_inbound(idx):
         log.info("inbound from %s: %s", msg["number"], msg["text"][:60])
         try:
@@ -198,14 +278,15 @@ def main() -> int:
         return 0
 
     server = Server(args.server, args.key)
+    state: dict = {"data_up": False}
     if args.once:
-        tick(modem_index(), server)
+        tick(modem_index(), server, state)
         return 0
 
     log.info("polling every %ss, server %s", POLL_SECONDS, args.server)
     while True:
         try:
-            tick(modem_index(), server)
+            tick(modem_index(), server, state)
         except Exception:
             # Never exit the loop. This agent is the last channel standing during an
             # outage; dying on a transient modem or network error is the one behaviour

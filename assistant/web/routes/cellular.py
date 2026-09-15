@@ -21,7 +21,7 @@ import secrets
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ...core import cellular
+from ...core import cellular, wan_failover
 from ...core.engine import handle_message
 from ..auth import require_owner
 
@@ -147,3 +147,32 @@ async def messages(request: Request, limit: int = 50):
     endpoints above: this is a conversation history, not a device task."""
     require_owner(request)
     return {"messages": cellular.recent(request.app.state.cfg.db_path, limit)}
+
+
+@router.get("/link")
+async def link(request: Request):
+    """Whether the Pi should be holding its cellular DATA bearer up.
+
+    The Pi polls this rather than the server pushing, keeping the one direction this
+    whole channel uses. The flag is set by the WAN monitor when the house connection
+    drops (see core/wan_failover.evaluate) and cleared the moment it returns, because a
+    bearer held up for no reason spends data allowance and battery.
+    """
+    _require_device_key(request)
+    cfg = request.app.state.cfg
+    return {"data_wanted": wan_failover.link_wanted(cfg.db_path)}
+
+
+@router.get("/status")
+async def status(request: Request):
+    """How Jarvis is currently reaching the internet. Owner-only -- this is diagnostics,
+    not a device task."""
+    require_owner(request)
+    cfg = request.app.state.cfg
+    return {
+        "data_wanted": wan_failover.link_wanted(cfg.db_path),
+        "using_proxy": bool(wan_failover.proxy_active()),
+        "proxy": wan_failover.proxy_active(),
+        "proxy_configured": getattr(cfg, "wan_failover_proxy", None),
+        "enabled": bool(getattr(cfg, "wan_failover_enabled", False)),
+    }

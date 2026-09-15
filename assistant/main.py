@@ -192,6 +192,12 @@ def main() -> None:
         # always behind by design.
         mail_debts_interval_minutes=cfg.mail_debts_interval_minutes,
         mail_debts_per_run_limit=cfg.mail_debts_per_run_limit,
+
+        wan_failover_enabled=cfg.wan_failover_enabled,
+
+        wan_failover_proxy=cfg.wan_failover_proxy,
+
+        wan_failover_interval_seconds=cfg.wan_failover_interval_seconds,
         mail_debts_shortlist_limit=cfg.mail_debts_shortlist_limit,
         kroger_sync_interval_seconds=cfg.kroger_sync_interval_seconds,
         # Watchdog: notices a due personal task or a Review item nobody came back to,

@@ -26,6 +26,7 @@ class FakeConfig:
     web_session_secret: str = "test-secret"
     device_api_key: str = KEY
     sms_allowed_numbers: list = field(default_factory=list)
+    sms_guest_numbers: list = field(default_factory=list)
     claude_tools_api_key: str | None = None
     ha_conversation_api_key: str | None = None
 
@@ -221,3 +222,83 @@ class TestTrimForSms:
     def test_an_empty_reply_is_never_queued(self, db_path):
         with pytest.raises(ValueError):
             cellular.queue_outbound(db_path, "+12027408240", "   ")
+
+
+# --- the guest tier -----------------------------------------------------------
+#
+# Added after a real incident: a friend texted Jarvis, was refused, and adding her to the
+# allow-list would have handed her the owner's identity outright -- every allowed SMS runs
+# as the owner. A guest talks to Jarvis and reaches none of his life.
+
+GUEST = "+15406540555"
+
+
+def _guest_client(db_path, llm=None):
+    cfg = FakeConfig(db_path=db_path, sms_allowed_numbers=["+12027408240"],
+                     sms_guest_numbers=[GUEST], users=[
+        UserConfig(telegram_chat_id="111", display_name="Dug", role="owner", web_password="pw"),
+    ])
+    app = create_app(cfg, llm or FakeLLM(), era=None, calendar=None, static_dir=None)
+    return TestClient(app)
+
+
+class TestGuestTier:
+    def test_a_guest_number_is_accepted(self, db_path):
+        r = _post(_guest_client(db_path), number=GUEST, text="hi Jarvis")
+        assert r.json()["accepted"] is True
+
+    def test_a_guest_is_marked_as_one_in_the_log(self, db_path):
+        _post(_guest_client(db_path), number=GUEST, text="hi Jarvis")
+        row = next(r for r in cellular.recent(db_path) if r["direction"] == "inbound")
+        assert row["detail"] == "guest"
+
+    def test_a_guest_does_not_run_as_the_owner(self, db_path):
+        """The whole point. A guest gets its own user row, so conversation history and
+        any privately-scoped read stay isolated by construction."""
+        _post(_guest_client(db_path), number=GUEST, text="hi Jarvis")
+        owner = db.get_user_by_chat_id(db_path, "111")
+        guest_id = cellular.guest_user_id(db_path, GUEST)
+        assert guest_id != owner["id"]
+
+    def test_two_guests_never_share_a_conversation(self, db_path):
+        assert cellular.guest_user_id(db_path, GUEST) != \
+               cellular.guest_user_id(db_path, "+15555550199")
+
+    def test_the_same_guest_keeps_one_identity_across_formats(self, db_path):
+        assert cellular.guest_user_id(db_path, "+15406540555") == \
+               cellular.guest_user_id(db_path, "(540) 654-0555")
+
+    def test_an_unlisted_number_is_still_refused(self, db_path):
+        r = _post(_guest_client(db_path), number="+15555550123", text="hi")
+        assert r.json()["accepted"] is False
+
+    def test_the_owner_list_wins_over_the_guest_list(self, db_path):
+        """A more specific grant must not be weakened by also appearing on the weaker one."""
+        assert cellular.classify("+12027408240", ["+12027408240"], ["+12027408240"]) == "owner"
+
+
+class TestGuestContexts:
+    def test_everything_personal_is_genuinely_absent(self, db_path):
+        """Absent, not discouraged -- the model cannot decline to use a tool it never got."""
+        ctx = {"era": object(), "mail": object(), "personal": object(),
+               "business": object(), "ccxt": object(), "kroger": object(),
+               "letterstream": object(), "obsidian": object(), "git_ops": object(),
+               "calendar": object(), "phone": object()}
+        gated = cellular.guest_contexts(ctx)
+        assert all(v is None for v in gated.values()), gated
+
+    def test_a_remote_guest_cannot_touch_the_house(self, db_path):
+        """presence.py lets a VOICE-terminal guest use Home Assistant, because they are
+        standing in the house and could flip the switch by hand. A guest texting from
+        anywhere on earth must not be able to unlock a door."""
+        assert cellular.guest_contexts({"home_assistant": object()})["home_assistant"] is None
+
+    def test_harmless_lookups_survive(self, db_path):
+        keep = {"recipe": object(), "ticketmaster": object(), "airbnb": object()}
+        assert all(v is not None for v in cellular.guest_contexts(keep).values())
+
+    def test_it_is_default_deny_so_a_new_integration_is_not_exposed(self, db_path):
+        """A block-list would silently expose the next capability wired into Jarvis on
+        the day it shipped."""
+        assert cellular.guest_contexts({"some_future_integration": object()}) == \
+               {"some_future_integration": None}

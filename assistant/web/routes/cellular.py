@@ -67,8 +67,10 @@ async def inbound(request: Request):
     if not number or not text:
         raise HTTPException(400, "number and text are required")
 
-    allowed = getattr(cfg, "sms_allowed_numbers", None)
-    if not cellular.is_allowed(number, allowed):
+    tier = cellular.classify(number,
+                             getattr(cfg, "sms_allowed_numbers", None),
+                             getattr(cfg, "sms_guest_numbers", None))
+    if tier == "refused":
         # Recorded, not dropped: "who has been texting this number" is something the
         # owner should be able to look at, and a refused message is exactly the kind of
         # thing worth noticing on a line nobody is supposed to know about yet.
@@ -79,14 +81,10 @@ async def inbound(request: Request):
         # retry. A 4xx would make a well-behaved forwarder keep resending.
         return {"accepted": False, "reason": "sender not allowed"}
 
-    message_id = cellular.record_inbound(cfg.db_path, number, text, "received", stamp)
+    message_id = cellular.record_inbound(cfg.db_path, number, text, "received", stamp,
+                                         detail=None if tier == "owner" else "guest")
     if message_id is None:
         return {"accepted": True, "duplicate": True}
-
-    user_id = _owner_user_id(request)
-    if user_id is None:
-        cellular.set_inbound_status(cfg.db_path, message_id, "failed", "no owner user")
-        raise HTTPException(503, "no owner configured")
 
     contexts = {
         "era": request.app.state.era, "calendar": request.app.state.calendar,
@@ -100,6 +98,20 @@ async def inbound(request: Request):
         "git_ops": request.app.state.git_ops, "recipe": request.app.state.recipe,
         "local_llm": request.app.state.local_llm,
     }
+    if tier == "owner":
+        user_id = _owner_user_id(request)
+        if user_id is None:
+            cellular.set_inbound_status(cfg.db_path, message_id, "failed", "no owner user")
+            raise HTTPException(503, "no owner configured")
+    else:
+        # A guest runs as its OWN user row with the owner's integrations genuinely
+        # removed -- not merely told not to use them. Same belt-and-braces as the voice
+        # terminals: even if some future tool bypassed the context gate, it would be
+        # running as a user that owns no private data to leak.
+        user_id = cellular.guest_user_id(cfg.db_path, number)
+        contexts = cellular.guest_contexts(contexts)
+        logger.info("cellular: handling a GUEST message from %s", number)
+
     call = functools.partial(
         handle_message, cfg.db_path, request.app.state.llm, user_id, text,
         tz_name=cfg.timezone, **contexts)

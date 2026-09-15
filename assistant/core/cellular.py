@@ -93,6 +93,20 @@ def normalize_number(number: str) -> str:
     return digits
 
 
+def classify(number: str, allowed: list[str] | None,
+             guests: list[str] | None) -> str:
+    """'owner', 'guest', or 'refused' for an incoming sender.
+
+    The owner list wins if a number is somehow on both -- the more specific grant should
+    not be weakened by also appearing on the weaker one.
+    """
+    if is_allowed(number, allowed):
+        return "owner"
+    if is_allowed(number, guests):
+        return "guest"
+    return "refused"
+
+
 def is_allowed(number: str, allowed: list[str] | None) -> bool:
     """Whether this sender may drive Jarvis.
 
@@ -105,6 +119,52 @@ def is_allowed(number: str, allowed: list[str] | None) -> bool:
     if not target:
         return False
     return any(normalize_number(a) == target for a in allowed)
+
+
+# --- guests -------------------------------------------------------------------
+#
+# A second, weaker tier. Someone on this list can talk to Jarvis but reaches none of the
+# owner's life.
+#
+# DEFAULT DENY: this enumerates what a guest KEEPS, not what it loses. A block-list
+# silently exposes every integration added later -- the next capability wired into the
+# assistant would be reachable by a stranger the day it shipped, and nobody would notice.
+# With an allow-list the new thing is unavailable to guests until someone decides
+# otherwise, which is the failure direction worth having.
+#
+# Note `home_assistant` is deliberately NOT here, even though presence.py lets a voice-
+# terminal guest use it. That is not an inconsistency: a guest at a kiosk is standing in
+# the house and could flip the switch by hand. A guest with this number is texting from
+# anywhere on earth, and must not be able to unlock a door.
+GUEST_KEEPS_CONTEXTS = (
+    "recipe",         # recipe lookups -- public data, nothing personal
+    "ticketmaster",   # event search
+    "airbnb",         # listing search
+    "local_llm",      # the local fast path, no data of its own
+)
+
+GUEST_KEY_PREFIX = "__sms_guest__:"
+
+
+def guest_contexts(contexts: dict) -> dict:
+    """The same contexts with everything a guest may not reach forced to None.
+
+    Genuinely absent rather than merely discouraged -- the model cannot decline to use a
+    tool it was never given, which is the only version of this that holds.
+    """
+    return {k: (v if k in GUEST_KEEPS_CONTEXTS else None) for k, v in contexts.items()}
+
+
+def guest_user_id(db_path: str, number: str) -> int:
+    """A per-NUMBER guest row, mirroring presence.py's per-device one.
+
+    Per number rather than one shared guest so two people texting never inherit each
+    other's conversation, and neither ever touches the owner's history.
+    """
+    from . import db as core_db
+    key = normalize_number(number)
+    return core_db.get_or_create_guest_user(
+        db_path, f"{GUEST_KEY_PREFIX}{key}", f"SMS guest ({key})")
 
 
 def fingerprint(number: str, text: str, stamp: str | None) -> str:

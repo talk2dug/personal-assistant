@@ -364,3 +364,58 @@ class TestFencedBlockScanning:
         bare = '```\n{"orders": [{"side": "sell", "code": "SOL", "qty": "all"}]}\n```'
         assert paper_trading.parse_orders(bare)[0]["side"] == "sell"
         assert paper_trading.fenced_blocks(bare, {""})
+
+
+# --- incoherent exit levels ---------------------------------------------------
+#
+# A long position's plan only makes sense as stop_loss < fill price < take_profit.
+# _parse_level checked only "is this a positive number", so a stop ABOVE the entry was
+# accepted and check_stops() then closed the position on its next tick at a price that
+# had not moved. This is not hypothetical: on 2026-09-14 TAO was bought at $235.13 with
+# a stop of $250 and was stopped out in the same minute for the cost of two fees.
+
+def test_a_stop_above_the_entry_is_refused_rather_than_instantly_stopping_out(db):
+    r = paper_trading.execute_orders(db, [
+        {"side": "buy", "code": "SOL", "usd": 1000, "stop_loss": 250.0},   # entry is $200
+    ])
+    assert not r["fills"]
+    assert "at or above" in r["rejections"][0]["reason"]
+    # And crucially the money never left: an order refused after the cash was debited
+    # would silently burn the balance.
+    assert r["portfolio"]["cash"] == pytest.approx(10_000.0)
+    assert r["portfolio"]["positions"] == []
+
+
+def test_a_target_below_the_entry_is_refused_too(db):
+    r = paper_trading.execute_orders(db, [
+        {"side": "buy", "code": "SOL", "usd": 1000, "take_profit": 150.0},  # entry is $200
+    ])
+    assert not r["fills"]
+    assert "at or below" in r["rejections"][0]["reason"]
+    assert r["portfolio"]["cash"] == pytest.approx(10_000.0)
+
+
+def test_a_coherent_plan_still_fills_and_stores_both_levels(db):
+    r = paper_trading.execute_orders(db, [
+        {"side": "buy", "code": "SOL", "usd": 1000, "stop_loss": 180.0, "take_profit": 240.0},
+    ])
+    assert not r["rejections"]
+    pos = r["portfolio"]["positions"][0]
+    assert pos["stop_loss"] == 180.0
+    assert pos["take_profit"] == 240.0
+
+
+def test_the_refusal_is_measured_against_the_fill_price_not_the_previous_stop(db):
+    """Adding to a position inherits its stored levels. If the price has since run past
+    the old stop, the inherited level is now incoherent and the top-up must be refused
+    rather than opening a bigger position that closes on the next tick."""
+    paper_trading.execute_orders(db, [
+        {"side": "buy", "code": "SOL", "usd": 1000, "stop_loss": 180.0},
+    ])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE market_coins SET rate = 170.0 WHERE code = 'SOL'")   # fell below the stop
+    conn.commit(); conn.close()
+
+    r = paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 500}])
+    assert not r["fills"]
+    assert "at or above" in r["rejections"][0]["reason"]

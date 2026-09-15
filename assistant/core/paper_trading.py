@@ -441,17 +441,47 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 if usd + fee > cash + 1e-9:
                     reject(order, f"insufficient cash: need ${usd + fee:,.2f}, have ${cash:,.2f}")
                     continue
-                qty = usd / price
-                new_qty = (pos["qty"] if pos else 0.0) + qty
-                # Fees fold into cost basis, so realised P&L is the round-trip result.
-                new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd + fee) / new_qty
-                cash -= usd + fee
                 stop_loss = _parse_level(order.get("stop_loss"))
                 take_profit = _parse_level(order.get("take_profit"))
                 if stop_loss is None and pos is not None:
                     stop_loss = pos["stop_loss"]
                 if take_profit is None and pos is not None:
                     take_profit = pos["take_profit"]
+
+                # Every position here is LONG, so a coherent plan is
+                # stop_loss < fill price < take_profit. _parse_level only ever checked
+                # "is it a positive number", which let a stop ABOVE the entry through --
+                # and check_stops() then closed the position on its very next tick, at a
+                # price that had not moved, for the cost of two fees.
+                #
+                # This actually happened: TAO was bought at $235.13 with a stop of $250
+                # and was stopped out in the same minute (2026-09-14T07:52), turning a
+                # thesis the analyst had researched into a $0.20 round-trip to nowhere.
+                #
+                # Refused rather than silently repaired: dropping the bad level would
+                # leave the position running with no stop at all, and quietly rewriting
+                # it to something "sensible" would invent a risk decision the model never
+                # made. A rejection is also the only one of the three the model is told
+                # about -- rejections are counted back to it in its own briefing.
+                if stop_loss is not None and stop_loss >= price:
+                    reject(order, f"stop_loss ${stop_loss:,.6g} is at or above the "
+                                  f"${price:,.6g} fill price -- a long's stop must sit "
+                                  f"below it, or the position is closed the moment it opens")
+                    continue
+                if take_profit is not None and take_profit <= price:
+                    reject(order, f"take_profit ${take_profit:,.6g} is at or below the "
+                                  f"${price:,.6g} fill price -- a long's target must sit "
+                                  f"above it, or the position is closed the moment it opens")
+                    continue
+
+                # Cash moves only once the order is known to be fillable -- every refusal
+                # above this line must leave the balance untouched.
+                qty = usd / price
+                new_qty = (pos["qty"] if pos else 0.0) + qty
+                # Fees fold into cost basis, so realised P&L is the round-trip result.
+                new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd + fee) / new_qty
+                cash -= usd + fee
+
                 conn.execute(
                     """INSERT INTO paper_positions (account_id, code, qty, avg_cost,
                                                      stop_loss, take_profit, updated_at)

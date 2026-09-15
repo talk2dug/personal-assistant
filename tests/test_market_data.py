@@ -115,6 +115,47 @@ class TestRefreshSupplemental:
         assert tao["source"] == "kraken"
         assert tao["last_seen"] is not None
 
+    def test_kraken_rows_also_land_in_the_price_series(self, db, monkeypatch):
+        """The seven codes this feed exists to cover were priceable but had NO history,
+        so change_since() returned None for every one of them and movers() could never
+        surface them -- the desk was blind on exactly the coins it had just been given
+        permission to trade. TAO and ETHFI were both bought in that state."""
+        monkeypatch.setattr(market_data.urllib.request, "urlopen",
+                             lambda url, timeout=15: FakeHTTPResponse(KRAKEN_TICKER_FIXTURE))
+
+        result = market_data.refresh_supplemental(db, {"TAO": "TAOUSD", "WLD": "WLDUSD"})
+        assert result["history_points"] == 2
+
+        with closing(sqlite3.connect(db)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = {r["code"]: r for r in conn.execute(
+                "SELECT code, rate, market_cap FROM market_history")}
+        assert set(rows) == {"TAO", "WLD"}
+        assert rows["TAO"]["rate"] == pytest.approx(237.768)
+        # A ticker response carries no market cap; inventing one would be worse than null.
+        assert rows["TAO"]["market_cap"] is None
+
+    def test_change_since_works_for_a_kraken_coin_once_two_polls_have_run(self, db, monkeypatch):
+        first = {"error": [], "result": {"TAOUSD": {"c": ["200.0", "1"], "o": "199.0",
+                                                     "v": ["10", "5000"]}}}
+        second = {"error": [], "result": {"TAOUSD": {"c": ["220.0", "1"], "o": "199.0",
+                                                      "v": ["12", "6000"]}}}
+        monkeypatch.setattr(market_data.urllib.request, "urlopen",
+                             lambda url, timeout=15: FakeHTTPResponse(first))
+        market_data.refresh_supplemental(db, {"TAO": "TAOUSD"})
+        monkeypatch.setattr(market_data.urllib.request, "urlopen",
+                             lambda url, timeout=15: FakeHTTPResponse(second))
+        market_data.refresh_supplemental(db, {"TAO": "TAOUSD"})
+
+        change = market_data.change_since(db, "TAO", minutes=60)
+        assert change is not None, "a Kraken-sourced coin must be answerable here"
+        assert change["change_pct"] == pytest.approx(10.0)
+        # Kraken's volume is [today, last 24h] -- the 24h figure is the comparable one.
+        with closing(sqlite3.connect(db)) as conn:
+            vols = [r[0] for r in conn.execute(
+                "SELECT volume FROM market_history WHERE code='TAO' ORDER BY id")]
+        assert vols == [5000.0, 6000.0]
+
     def test_a_code_missing_from_the_kraken_response_is_simply_skipped(self, db, monkeypatch):
         """If a pair name goes stale (renamed/delisted on Kraken), that one code should be
         skipped rather than the whole refresh failing -- the other requested codes still

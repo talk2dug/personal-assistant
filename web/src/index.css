@@ -1,34 +1,49 @@
 /* ============================================================================
-   J.A.R.V.I.S. — HUD design system
-   Deep-black telemetry aesthetic: electric cyan = nominal, amber = caution,
-   red = critical. Angular clipped panels with reticle-style corner brackets.
+   J.A.R.V.I.S. — blueprint HUD design system
+   Steel-on-near-black: a drafting table lit from above rather than a neon
+   dashboard. Steel blue = nominal, amber = wants your attention, red =
+   critical. Panels are drawn as blueprint frames — a hairline box with
+   registration marks pulled outside its corners (.blueprint / .corner below).
+
+   Typography is the other half of it: Barlow Condensed for anything that
+   labels or counts (it sets tight and takes wide letter-spacing without
+   falling apart), Barlow for anything you actually read.
    ========================================================================== */
 
 :root {
-  --bg: #050708;
-  --bg-panel: rgba(7, 15, 18, 0.68);
-  --bg-panel-solid: #0a1418;
-  --bg-inset: rgba(0, 229, 255, 0.045);
+  --bg: #070a0e;
+  --bg-panel: rgba(148, 188, 227, 0.03);
+  --bg-panel-solid: #0b1119;
+  --bg-inset: rgba(148, 188, 227, 0.05);
 
-  --cyan: #22e8ff;
-  --cyan-bright: #a9f8ff;
-  --cyan-dim: rgba(34, 232, 255, 0.4);
-  --cyan-faint: rgba(34, 232, 255, 0.14);
-  --cyan-glow: rgba(34, 232, 255, 0.55);
+  /* The steel ramp, brightest first. Named --cyan-* for continuity: every
+     stylesheet in this app already references these names, and renaming them
+     across 3,000 lines would be churn with no user-visible payoff. */
+  --steel-bright: #e6f1fb;
+  --steel: #b5d9fd;
+  --steel-mid: #94bce3;
+  --steel-deep: #5980a6;
+  --divider: rgba(148, 188, 227, 0.22);
 
-  --amber: #ffb020;
-  --amber-dim: rgba(255, 176, 32, 0.4);
+  --cyan: #94bce3;
+  --cyan-bright: #b5d9fd;
+  --cyan-dim: rgba(148, 188, 227, 0.4);
+  --cyan-faint: rgba(148, 188, 227, 0.14);
+  --cyan-glow: rgba(148, 188, 227, 0.55);
+
+  --amber: #e8a33d;
+  --amber-dim: rgba(232, 163, 61, 0.4);
   --red: #ff4d4d;
   --red-dim: rgba(255, 77, 77, 0.4);
 
-  --text: #d3f3fa;
-  --text-dim: #5f8a94;
-  --text-faint: #3c5960;
-  --border: rgba(34, 232, 255, 0.28);
-  --border-dim: rgba(34, 232, 255, 0.14);
+  --text: #c9dcec;
+  --text-dim: #7ea3c4;
+  --text-faint: #5d82a4;
+  --border: rgba(148, 188, 227, 0.28);
+  --border-dim: rgba(148, 188, 227, 0.14);
 
-  --font-display: 'Michroma', sans-serif;
-  --font-hud: 'Rajdhani', sans-serif;
+  --font-display: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+  --font-hud: 'Barlow', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 
   color-scheme: dark;
@@ -53,9 +68,9 @@ body::before {
   content: '';
   position: fixed;
   inset: 0;
-  background-image: linear-gradient(rgba(34, 232, 255, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(34, 232, 255, 0.05) 1px, transparent 1px);
-  background-size: 44px 44px;
+  background-image: linear-gradient(rgba(148, 188, 227, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 188, 227, 0.05) 1px, transparent 1px);
+  background-size: 56px 56px;
   mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, black 0%, transparent 75%);
   -webkit-mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, black 0%, transparent 75%);
   pointer-events: none;
@@ -67,8 +82,8 @@ body::after {
   content: '';
   position: fixed;
   inset: 0;
-  background: radial-gradient(ellipse 700px 500px at 8% -5%, rgba(34, 232, 255, 0.1), transparent 60%),
-    radial-gradient(ellipse 600px 500px at 100% 105%, rgba(34, 232, 255, 0.06), transparent 60%);
+  background: radial-gradient(1200px 700px at 50% -10%, rgba(18, 32, 44, 0.9), transparent 62%),
+    radial-gradient(ellipse 600px 500px at 100% 105%, rgba(148, 188, 227, 0.05), transparent 60%);
   pointer-events: none;
   z-index: 0;
 }
@@ -256,7 +271,7 @@ body::after {
   width: 28px;
   height: 28px;
   flex-shrink: 0;
-  background: linear-gradient(155deg, rgba(34, 232, 255, 0.22), rgba(34, 232, 255, 0.04));
+  background: linear-gradient(155deg, rgba(148, 188, 227, 0.22), rgba(148, 188, 227, 0.04));
   border: 1px solid var(--cyan-dim);
   color: var(--cyan-bright);
   font-size: 14px;
@@ -344,6 +359,12 @@ body::after {
   padding: 32px 40px;
 }
 
+/* Single-page mode: the Command Center is the whole window and draws its own
+   padding, so the shell must add none of its own -- the 32px the old nav layout
+   put above every page was pushing the board's bottom edge off the screen. */
+.app-shell.is-single-page { display: block; height: 100vh; }
+.app-shell.is-single-page > .app-main { padding: 0; height: 100vh; overflow: hidden; }
+
 /* --- login --------------------------------------------------------------- */
 
 .login-screen {
@@ -421,7 +442,7 @@ body::after {
 
 .login-card input:focus {
   border-color: var(--cyan);
-  box-shadow: 0 0 0 1px var(--cyan-dim), 0 0 16px rgba(34, 232, 255, 0.2);
+  box-shadow: 0 0 0 1px var(--cyan-dim), 0 0 16px rgba(148, 188, 227, 0.2);
 }
 
 .login-card button {
@@ -442,7 +463,7 @@ body::after {
 
 .login-card button:hover:not(:disabled) {
   background: var(--cyan-dim);
-  box-shadow: 0 0 20px rgba(34, 232, 255, 0.35);
+  box-shadow: 0 0 20px rgba(148, 188, 227, 0.35);
 }
 
 .login-card button:disabled {
@@ -576,7 +597,7 @@ body::after {
   border-color: var(--cyan);
   color: var(--cyan-bright);
   background: var(--cyan-faint);
-  box-shadow: 0 0 12px rgba(34, 232, 255, 0.25);
+  box-shadow: 0 0 12px rgba(148, 188, 227, 0.25);
 }
 
 .voice-name-tag {
@@ -634,7 +655,7 @@ body::after {
 
 .chat-input-row button:hover:not(:disabled) {
   background: var(--cyan-dim);
-  box-shadow: 0 0 16px rgba(34, 232, 255, 0.3);
+  box-shadow: 0 0 16px rgba(148, 188, 227, 0.3);
 }
 
 /* --- orb voice UI ----------------------------------------------------------- */
@@ -682,7 +703,7 @@ body::after {
   width: 40%;
   height: 40%;
   border-radius: 50%;
-  background: radial-gradient(circle at 50% 45%, rgba(34, 232, 255, 0.32) 0%, rgba(34, 232, 255, 0.08) 42%, rgba(5, 8, 11, 0) 72%);
+  background: radial-gradient(circle at 50% 45%, rgba(148, 188, 227, 0.32) 0%, rgba(148, 188, 227, 0.08) 42%, rgba(5, 8, 11, 0) 72%);
   filter: blur(2px);
   animation: hud-pulse 4.6s ease-in-out infinite;
   transition: opacity 0.4s ease;
@@ -759,7 +780,7 @@ body::after {
   display: flex;
   flex-direction: column;
   padding: 18px 22px;
-  box-shadow: 0 0 40px rgba(34, 232, 255, 0.15);
+  box-shadow: 0 0 40px rgba(148, 188, 227, 0.15);
 }
 
 .chat-modal-header {
@@ -891,7 +912,7 @@ body::after {
   display: flex;
   flex-direction: column;
   padding: 18px 22px;
-  box-shadow: 0 0 40px rgba(34, 232, 255, 0.15);
+  box-shadow: 0 0 40px rgba(148, 188, 227, 0.15);
 }
 
 .camera-modal-body {
@@ -1040,7 +1061,7 @@ body::after {
   background: rgba(6, 12, 15, 0.92);
   border: 1px solid var(--cyan);
   padding: 8px 12px;
-  box-shadow: 0 0 20px rgba(34, 232, 255, 0.25);
+  box-shadow: 0 0 20px rgba(148, 188, 227, 0.25);
 }
 
 .chart-tooltip-date {
@@ -1121,7 +1142,7 @@ body::after {
   clip-path: polygon(0 12px, 12px 0, 100% 0, 100% 100%, 0 100%);
   padding: 14px 22px;
   margin-bottom: 24px;
-  box-shadow: 0 0 20px rgba(34, 232, 255, 0.12);
+  box-shadow: 0 0 20px rgba(148, 188, 227, 0.12);
 }
 
 .safe-to-spend-banner.safe-to-spend-negative {
@@ -1377,13 +1398,13 @@ body::after {
 }
 
 .calendar-item.income {
-  background: rgba(34, 232, 255, 0.12);
+  background: rgba(148, 188, 227, 0.12);
   color: var(--cyan-bright);
   border-left-color: var(--cyan);
 }
 
 .calendar-item.expense {
-  background: rgba(255, 176, 32, 0.12);
+  background: rgba(232, 163, 61, 0.12);
   color: var(--amber);
   border-left-color: var(--amber);
 }
@@ -1932,7 +1953,7 @@ body::after {
 .office-stage {
   display: flex; justify-content: center; padding: 14px;
   border: 1px solid var(--border); background: #06090b;
-  box-shadow: inset 0 0 60px rgba(34, 232, 255, 0.06);
+  box-shadow: inset 0 0 60px rgba(148, 188, 227, 0.06);
   overflow: auto;
 }
 /* Nearest-neighbour everywhere, or the whole point of pixel art is lost. */
@@ -1969,7 +1990,7 @@ body::after {
 .staff-list, .queue-list, .tray-list { list-style: none; margin: 0; padding: 0; }
 .staff-row {
   display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center;
-  padding: 6px 0; border-bottom: 1px solid rgba(34, 232, 255, 0.08); font-size: 13px;
+  padding: 6px 0; border-bottom: 1px solid rgba(148, 188, 227, 0.08); font-size: 13px;
 }
 .staff-pip { width: 8px; height: 8px; background: var(--text-faint); }
 .staff-name { color: var(--text); }
@@ -1990,7 +2011,7 @@ body::after {
 
 .queue-row {
   display: grid; grid-template-columns: 46px 1fr auto auto; gap: 10px; align-items: center;
-  padding: 6px 0; font-size: 12px; border-bottom: 1px solid rgba(34, 232, 255, 0.08);
+  padding: 6px 0; font-size: 12px; border-bottom: 1px solid rgba(148, 188, 227, 0.08);
   font-family: var(--font-mono, monospace);
 }
 .queue-job { color: var(--text-faint); }
@@ -2001,7 +2022,7 @@ body::after {
 
 .tray-list li {
   display: flex; justify-content: space-between; padding: 5px 0; font-size: 13px;
-  color: var(--text-dim); border-bottom: 1px solid rgba(34, 232, 255, 0.08);
+  color: var(--text-dim); border-bottom: 1px solid rgba(148, 188, 227, 0.08);
 }
 .tray-list li.has-items { color: var(--text); }
 .tray-count { font-family: var(--font-mono, monospace); color: var(--text-faint); }
@@ -2220,11 +2241,11 @@ body::after {
 .device-orb canvas { width: 100%; height: 100%; display: block; }
 .device-glow {
   position: absolute; inset: 22%; border-radius: 50%; transition: background 0.4s, opacity 0.4s;
-  background: radial-gradient(circle, rgba(34, 232, 255, 0.16), transparent 70%);
+  background: radial-gradient(circle, rgba(148, 188, 227, 0.16), transparent 70%);
 }
-.glow-listening { background: radial-gradient(circle, rgba(255, 176, 32, 0.24), transparent 70%); }
-.glow-thinking { background: radial-gradient(circle, rgba(34, 232, 255, 0.26), transparent 70%); }
-.glow-speaking { background: radial-gradient(circle, rgba(34, 232, 255, 0.34), transparent 70%); }
+.glow-listening { background: radial-gradient(circle, rgba(232, 163, 61, 0.24), transparent 70%); }
+.glow-thinking { background: radial-gradient(circle, rgba(148, 188, 227, 0.26), transparent 70%); }
+.glow-speaking { background: radial-gradient(circle, rgba(148, 188, 227, 0.34), transparent 70%); }
 .glow-offline { opacity: 0.25; }
 
 .device-caption {
@@ -2398,7 +2419,7 @@ body::after {
 }
 .media-table tbody tr { border-bottom: 1px solid var(--border-dim); }
 .media-table tbody tr:hover { background: var(--bg-inset); }
-.media-table tbody tr.is-selected { background: rgba(34, 232, 255, 0.07); }
+.media-table tbody tr.is-selected { background: rgba(148, 188, 227, 0.07); }
 .media-table td { padding: 0.45rem 0.6rem; vertical-align: middle; }
 
 .col-check { width: 32px; }
@@ -2994,4 +3015,45 @@ body::after {
   padding: 8px 12px; font-family: var(--font-hud); font-size: 11px; font-weight: 700;
   letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer;
 }
-.cart-clear-btn:hover { border-color: var(--amber); background: rgba(255, 176, 32, 0.1); }
+.cart-clear-btn:hover { border-color: var(--amber); background: rgba(232, 163, 61, 0.1); }
+
+
+/* ---------------------------------------------------------------------------
+   Blueprint frame — the redesign's core panel shape. A hairline box whose
+   corner registration marks sit OUTSIDE the box, the way a drawing is squared
+   up on a drafting table. Used by the Command Center's panels and by every
+   modal, so a drilled-down view is visibly the same object as the tile that
+   opened it.
+
+   Marks are drawn by four <i class="corner tl|tr|bl|br"> children rather than
+   by pseudo-elements on the box itself, because ::before/::after are already
+   spoken for on most of these panels (scanlines, glows) and a frame that
+   fights the panel it wraps isn't reusable.
+   --------------------------------------------------------------------------- */
+.blueprint {
+  position: relative;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+}
+
+.blueprint > .corner {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  color: rgba(148, 188, 227, 0.55);
+  pointer-events: none;
+}
+
+.blueprint > .corner::before,
+.blueprint > .corner::after {
+  content: '';
+  position: absolute;
+  background: currentColor;
+}
+
+.blueprint > .corner::before { left: 5px; top: 0; width: 1px; height: 100%; }
+.blueprint > .corner::after { top: 5px; left: 0; width: 100%; height: 1px; }
+.blueprint > .corner.tl { top: -6px; left: -6px; }
+.blueprint > .corner.tr { top: -6px; right: -6px; }
+.blueprint > .corner.bl { bottom: -6px; left: -6px; }
+.blueprint > .corner.br { bottom: -6px; right: -6px; }

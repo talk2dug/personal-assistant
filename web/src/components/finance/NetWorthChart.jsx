@@ -12,10 +12,10 @@ import { api } from '../../api'
 
 // Same charting approach as ProjectionChart.jsx (recharts AreaChart, same HUD styling)
 // rather than introducing a second charting library for one more chart.
-const CYAN = '#22e8ff'
-const CYAN_BRIGHT = '#a9f8ff'
-const GRID = 'rgba(34, 232, 255, 0.12)'
-const DIM_TEXT = '#5f8a94'
+const CYAN = '#94bce3'
+const CYAN_BRIGHT = '#b5d9fd'
+const GRID = 'rgba(148, 188, 227, 0.12)'
+const DIM_TEXT = '#7ea3c4'
 
 function formatMoney(amount) {
   return (amount ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })

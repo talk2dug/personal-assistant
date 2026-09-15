@@ -159,6 +159,10 @@ export const api = {
     return request(`/api/email/importance?${params.toString()}`)
   },
 
+  // One aggregated read for the Command Center board -- see routes/command_center.py
+  // for why the cheap panels travel together instead of one endpoint each.
+  commandCenter: () => request('/api/command-center/snapshot'),
+
   activeWork: () => request('/api/active-work'),
   sshHostsStatus: () => request('/api/infra/ssh-hosts'),
 

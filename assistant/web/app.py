@@ -43,6 +43,7 @@ from .routes.active_work import router as active_work_router
 from .routes.agents import router as agents_router
 from .routes.chat import router as chat_router
 from .routes.cameras import router as cameras_router
+from .routes.command_center import router as command_center_router
 from .routes.credit import router as credit_router
 from .routes.debts import router as debts_router
 from .routes.crypto import router as crypto_router
@@ -119,6 +120,7 @@ def create_app(
     app.include_router(credit_router)
     app.include_router(debts_router)
     app.include_router(vision_router)
+    app.include_router(command_center_router)
 
     if static_dir and Path(static_dir).is_dir():
         app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")

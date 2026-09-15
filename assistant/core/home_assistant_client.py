@@ -1,8 +1,9 @@
-﻿"""Read/control access to Home Assistant via its REST API and a long-lived access
+"""Read/control access to Home Assistant via its REST API and a long-lived access
 token. Exposes call_tool(name, arguments) matching the shape Era/phone/mail/Obsidian
 already use so it plugs into the same dispatch machinery in engine.py.
 """
 import logging
+import time
 
 import httpx
 
@@ -15,6 +16,28 @@ class HomeAssistantClient:
         # Which phone to push to when a caller doesn't name one.
         self.default_notify_target = default_notify_target
         self._headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        # See raw_states() — one shared, short-lived snapshot of every entity.
+        self._states_cache: list[dict] | None = None
+        self._states_cached_at = 0.0
+
+    def raw_states(self, max_age_seconds: float = 4.0) -> list[dict]:
+        """Every entity with its attributes, from ONE /api/states call, cached briefly.
+
+        list_entities() below drops attributes, which is fine for the LLM but useless to
+        a dashboard that needs units, device classes and setpoints. The cache exists
+        because the Command Center polls this several times a minute: without it every
+        poll would be a fresh round trip to the HA box for 200+ entities, which is the
+        same per-entity-fetch latency problem the entity batching fix already solved
+        once. Raises on failure — callers decide whether a dead HA is fatal.
+        """
+        now = time.monotonic()
+        if self._states_cache is not None and (now - self._states_cached_at) < max_age_seconds:
+            return self._states_cache
+        resp = httpx.get(f"{self.base_url}/api/states", headers=self._headers, timeout=10.0)
+        resp.raise_for_status()
+        self._states_cache = resp.json()
+        self._states_cached_at = now
+        return self._states_cache
 
     def list_entities(self, domain: str | None = None) -> dict:
         resp = httpx.get(f"{self.base_url}/api/states", headers=self._headers, timeout=15.0)

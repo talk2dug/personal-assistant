@@ -15,8 +15,123 @@ import io
 import logging
 import re
 import wave
+from typing import Iterator
 
 logger = logging.getLogger(__name__)
+
+# Chunks shorter than this get glued onto the next one. Synthesising "Yes." on its own
+# costs a whole model invocation and produces an audio file barely longer than the gap
+# it introduces -- the seam is more noticeable than the latency it saves.
+MIN_CHUNK_CHARS = 25
+
+# Past this, a "sentence" is really a paragraph and waiting for all of it defeats the
+# point, so it gets broken at the nearest clause boundary instead.
+MAX_CHUNK_CHARS = 240
+
+# Abbreviations whose full stop does NOT end a sentence. Without these, "Mr. Swayze" and
+# "approx. 40 minutes" each split mid-phrase and the voice takes a breath in the wrong
+# place -- which is far more audible than it sounds on paper.
+_ABBREVIATIONS = {
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "eg", "ie",
+    "approx", "est", "dept", "inc", "ltd", "co", "no", "fig", "al", "am", "pm",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+}
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])[\s]+")
+_CLAUSE_SPLIT = re.compile(r"(?<=[,;:])\s+")
+
+
+def _ends_sentence(fragment: str) -> bool:
+    """Whether a fragment ending in . ! or ? is really the end of a sentence."""
+    stripped = fragment.rstrip()
+    if not stripped or stripped[-1] not in ".!?":
+        return False
+    if stripped[-1] in "!?":
+        return True
+    # "...costs $4.50" / "version 1.2" -- a digit either side of the dot is a number.
+    if len(stripped) >= 2 and stripped[-2].isdigit():
+        return False
+    last_word = re.split(r"[\s(]", stripped[:-1])[-1].lower().strip(".,;:\"'")
+    if last_word in _ABBREVIATIONS:
+        return False
+    # A single initial ("J." in "J. Swayze") is not a sentence end either.
+    if len(last_word) == 1 and last_word.isalpha():
+        return False
+    return True
+
+
+def _hard_wrap(text: str) -> list[str]:
+    """Break on word boundaries, used only when nothing better exists."""
+    if len(text) <= MAX_CHUNK_CHARS:
+        return [text]
+    out, acc = [], ""
+    for word in text.split():
+        if acc and len(acc) + len(word) + 1 > MAX_CHUNK_CHARS:
+            out.append(acc)
+            acc = word
+        else:
+            acc = f"{acc} {word}".strip() if acc else word
+    if acc:
+        out.append(acc)
+    return out
+
+
+def split_for_speech(text: str) -> list[str]:
+    """Break cleaned text into chunks that can each be spoken on their own.
+
+    This exists so speech can START while the rest is still being synthesised. The whole
+    voice round trip was strictly sequential -- transcribe, think, synthesise the entire
+    reply, then finally play it -- so a long answer stayed silent for its whole synthesis
+    time. Splitting on sentences means the first one can be playing while the second is
+    still being made.
+
+    The seams have to fall where a person would pause, which is the entire difficulty:
+    a break after "Mr." or inside "$63.41" is instantly audible as a machine reading
+    badly, and is worse than the delay it saved.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    # First pass: real sentence boundaries.
+    raw, buf = [], ""
+    for piece in _SENTENCE_END.split(text):
+        buf = f"{buf} {piece}".strip() if buf else piece
+        if _ends_sentence(buf):
+            raw.append(buf)
+            buf = ""
+    if buf.strip():
+        raw.append(buf.strip())
+
+    # Second pass: break anything still too long, and merge anything too short.
+    chunks: list[str] = []
+    for sentence in raw:
+        if len(sentence) <= MAX_CHUNK_CHARS:
+            candidates = [sentence]
+        else:
+            candidates, acc = [], ""
+            for clause in _CLAUSE_SPLIT.split(sentence):
+                if acc and len(acc) + len(clause) + 1 > MAX_CHUNK_CHARS:
+                    candidates.append(acc.strip())
+                    acc = clause
+                else:
+                    acc = f"{acc} {clause}".strip() if acc else clause
+            if acc.strip():
+                candidates.append(acc.strip())
+            # Last resort: text with no punctuation at all has neither sentence nor
+            # clause boundaries to break on, and would otherwise come back as one
+            # enormous chunk -- exactly the "stays silent for ages" case this whole
+            # function exists to prevent. Break on whitespace instead; an unpunctuated
+            # wall of words has no good seam anyway.
+            candidates = [c for part in candidates for c in _hard_wrap(part)]
+
+        for candidate in candidates:
+            if chunks and len(chunks[-1]) < MIN_CHUNK_CHARS:
+                chunks[-1] = f"{chunks[-1]} {candidate}".strip()
+            else:
+                chunks.append(candidate)
+
+    return [c for c in chunks if c.strip()]
 
 
 class Speaker:
@@ -69,8 +184,39 @@ class Speaker:
         spoken = self.clean(text)
         if not spoken:
             raise ValueError("nothing to say")
-        voice = self._ensure_loaded()
+        return self._synthesize_one(spoken)
 
+    def synthesize_stream(self, text: str) -> Iterator[bytes]:
+        """One complete WAV per speakable chunk, yielded as each is ready.
+
+        The point is time-to-first-sound, not total throughput -- the caller can start
+        playing chunk one while chunk two is still being made, so a long answer begins
+        speaking almost immediately instead of after its whole synthesis.
+
+        Each chunk is a self-contained WAV rather than raw PCM on purpose: every client
+        here already knows how to play a WAV (the kiosks hand bytes straight to an audio
+        player), and a bare PCM stream would mean teaching all of them the sample format.
+        The cost is a 44-byte header per chunk, which is nothing next to the audio.
+
+        A chunk that fails to synthesise is skipped rather than aborting the rest -- a
+        reply that loses one sentence is better than one that goes silent halfway.
+        """
+        spoken = self.clean(text)
+        if not spoken:
+            raise ValueError("nothing to say")
+        chunks = split_for_speech(spoken)
+        if not chunks:
+            return
+        for chunk in chunks:
+            try:
+                yield self._synthesize_one(chunk)
+            except Exception:
+                logger.exception("tts: skipping a chunk that failed to synthesise")
+
+    def _synthesize_one(self, spoken: str) -> bytes:
+        """Synthesise already-cleaned text. Shared by synthesize and synthesize_stream so
+        the two can never drift in pacing or format."""
+        voice = self._ensure_loaded()
         buffer = io.BytesIO()
         with wave.open(buffer, "wb") as wav:
             try:

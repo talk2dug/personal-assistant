@@ -62,7 +62,13 @@ class Config:
     web_port: int = 8080
     phone_mcp_url: str | None = None
     phone_sensitive_tools: list[str] = None
-    stt_model_size: str = "small.en"
+    # Whisper size for voice input. base.en by default, measured rather than assumed:
+    # on this CPU, over 8 realistic Jarvis commands, base.en ran 3x faster than small.en
+    # (7.5x vs 2.5x realtime) for a 9.3% vs 8.6% word error rate -- inside the noise.
+    # tiny.en was another 1.8x faster again but nearly doubled the error rate to 15.6%,
+    # which is the wrong trade for spoken commands that name devices and tickers.
+    # Speech-to-text was ~46% of the whole voice round trip before this.
+    stt_model_size: str = "base.en"
     mail_sensitive_tools: list[str] = None
     # How often the autonomous junk-flagging pass runs (see scheduler.py's
     # mail_junk_scan job) and the score (junk_filter.score_message) a message needs to
@@ -335,7 +341,7 @@ def load_config(path: str = "config.json") -> Config:
         # command) require explicit confirmation; everything else (camera, mic, location, contacts,
         # SMS read, call log, device controls) executes immediately.
         phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
-        stt_model_size=data.get("stt_model_size", "small.en"),
+        stt_model_size=data.get("stt_model_size", "base.en"),
         # Matches the phone/Era gating policy: only tools with a real, hard-to-fully-undo
         # consequence require confirmation. send_email leaves the account for good;
         # archive_email/delete_email each remove a message from wherever the user currently

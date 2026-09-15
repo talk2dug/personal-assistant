@@ -69,6 +69,12 @@ class Config:
     # which is the wrong trade for spoken commands that name devices and tickers.
     # Speech-to-text was ~46% of the whole voice round trip before this.
     stt_model_size: str = "base.en"
+    # Who may drive Jarvis by text message. THIS IS A SECURITY BOUNDARY, not a
+    # convenience filter: anyone in the world can text the LTE line, and an unlisted
+    # sender reaching handle_message() would be an unauthenticated stranger with the
+    # owner's mail, money, calendar and front door. Empty means nobody -- it fails
+    # closed, and no default here is deliberate. See core/cellular.is_allowed.
+    sms_allowed_numbers: list[str] = None
     mail_sensitive_tools: list[str] = None
     # How often the autonomous junk-flagging pass runs (see scheduler.py's
     # mail_junk_scan job) and the score (junk_filter.score_message) a message needs to
@@ -342,6 +348,7 @@ def load_config(path: str = "config.json") -> Config:
         # SMS read, call log, device controls) executes immediately.
         phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
         stt_model_size=data.get("stt_model_size", "base.en"),
+        sms_allowed_numbers=data.get("sms_allowed_numbers") or [],
         # Matches the phone/Era gating policy: only tools with a real, hard-to-fully-undo
         # consequence require confirmation. send_email leaves the account for good;
         # archive_email/delete_email each remove a message from wherever the user currently

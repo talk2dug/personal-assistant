@@ -51,6 +51,22 @@ CREATE TABLE IF NOT EXISTS sms_messages (
     sent_at TEXT
 );
 
+-- Who Jarvis is allowed to text on the owner's behalf, by name.
+--
+-- Separate from sms_allowed_numbers (who may text IN) and from known_people (faces the
+-- cameras recognise). Three different questions about a person -- may they command
+-- Jarvis, may Jarvis contact them, does the camera know their face -- and conflating any
+-- two of them would eventually grant one because of another.
+CREATE TABLE IF NOT EXISTS sms_contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    -- Normalised digits, so a lookup cannot miss on formatting.
+    number TEXT NOT NULL UNIQUE,
+    relationship TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sms_status ON sms_messages(status, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_fingerprint ON sms_messages(fingerprint)
     WHERE fingerprint IS NOT NULL;
@@ -258,3 +274,71 @@ def recent(db_path: str, limit: int = 50) -> list[dict]:
     with closing(_connect(db_path)) as conn:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM sms_messages ORDER BY id DESC LIMIT ?", (limit,))]
+
+
+# --- contacts -----------------------------------------------------------------
+
+def add_contact(db_path: str, name: str, number: str, relationship: str | None = None,
+                note: str | None = None) -> int:
+    digits = normalize_number(number)
+    if not digits:
+        raise ValueError("a contact needs a real phone number")
+    if not (name or "").strip():
+        raise ValueError("a contact needs a name")
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO sms_contacts (name, number, relationship, note, created_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(number) DO UPDATE SET
+                   name = excluded.name,
+                   relationship = COALESCE(excluded.relationship, sms_contacts.relationship),
+                   note = COALESCE(excluded.note, sms_contacts.note)""",
+            (name.strip(), digits, relationship, note, _now()))
+        conn.commit()
+        row = conn.execute("SELECT id FROM sms_contacts WHERE number = ?", (digits,)).fetchone()
+        return row["id"] if row else cur.lastrowid
+
+
+def list_contacts(db_path: str) -> list[dict]:
+    with closing(_connect(db_path)) as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, name, number, relationship, note FROM sms_contacts ORDER BY name")]
+
+
+def find_contact(db_path: str, who: str) -> dict | None:
+    """Resolve a name or a number to a contact.
+
+    Name matching is case-insensitive and accepts a first name alone, because that is how
+    anyone actually refers to a person out loud. An AMBIGUOUS name returns None rather
+    than guessing -- picking one of two Sarahs and texting her is exactly the mistake
+    this whole confirmation flow exists to prevent.
+    """
+    if not (who or "").strip():
+        return None
+    digits = normalize_number(who)
+    with closing(_connect(db_path)) as conn:
+        if digits and len(digits) >= 10:
+            row = conn.execute("SELECT * FROM sms_contacts WHERE number = ?", (digits,)).fetchone()
+            if row:
+                return dict(row)
+        needle = who.strip().lower()
+        rows = [dict(r) for r in conn.execute("SELECT * FROM sms_contacts")]
+    exact = [r for r in rows if r["name"].lower() == needle]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        return None
+    partial = [r for r in rows if needle in r["name"].lower()
+               or r["name"].lower().split()[0] == needle]
+    return partial[0] if len(partial) == 1 else None
+
+
+def thread_with(db_path: str, number: str, limit: int = 20) -> list[dict]:
+    """The recent conversation with one person, oldest last -- so Jarvis can answer
+    "what did she say" without being handed the whole message table."""
+    digits = normalize_number(number)
+    with closing(_connect(db_path)) as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT direction, number, text, status, created_at FROM sms_messages "
+            "ORDER BY id DESC LIMIT 400")]
+    return [r for r in rows if normalize_number(r["number"]) == digits][:limit]

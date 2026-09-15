@@ -79,6 +79,10 @@ class Config:
     # with the owner's integrations genuinely absent (core/cellular.guest_contexts).
     # Also fails closed.
     sms_guest_numbers: list[str] = None
+    # Whether Jarvis may send texts on the owner's behalf. Off by default: every send
+    # still needs his explicit confirmation, but the capability itself should be a
+    # deliberate choice rather than something that appears because a modem was plugged in.
+    sms_sending_enabled: bool = False
     # WAN failover: when the house connection drops, send Jarvis's outbound traffic
     # through the proxy on the Pi that holds the LTE modem. Off by default -- it spends
     # a metered cellular plan, so it has to be switched on deliberately.
@@ -360,6 +364,7 @@ def load_config(path: str = "config.json") -> Config:
         stt_model_size=data.get("stt_model_size", "base.en"),
         sms_allowed_numbers=data.get("sms_allowed_numbers") or [],
         sms_guest_numbers=data.get("sms_guest_numbers") or [],
+        sms_sending_enabled=data.get("sms_sending_enabled", False),
         wan_failover_enabled=data.get("wan_failover_enabled", False),
         wan_failover_proxy=data.get("wan_failover_proxy"),
         wan_failover_interval_seconds=data.get("wan_failover_interval_seconds", 60),

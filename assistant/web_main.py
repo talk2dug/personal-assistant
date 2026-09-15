@@ -8,7 +8,7 @@ from .config import load_config
 from .core import business_db, cellular, db, media_scan, ui_content, vision
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
-    build_era_context, build_git_ops_context, build_gpu_bridge, build_home_assistant_context,
+    build_era_context, build_git_ops_context, build_gpu_bridge, build_cellular_context, build_home_assistant_context,
     build_kroger_context, build_letterstream_context, build_llm, build_local_llm_context,
     build_mail_context, build_obsidian_context, build_personal_context, build_phone_context,
     build_recipe_context, build_ticketmaster_context,
@@ -85,6 +85,8 @@ def main() -> None:
         cfg, owner_row["id"] if owner_row else None, letterstream=letterstream, kroger=kroger)
     git_ops = build_git_ops_context(cfg)
     recipe = build_recipe_context(cfg)
+
+    cellular_ctx = build_cellular_context(cfg)
     local_llm = build_local_llm_context(cfg)
     stt = Transcriber(model_size=cfg.stt_model_size)
     speaker = Speaker(voice_path=cfg.piper_voice_path)
@@ -93,7 +95,7 @@ def main() -> None:
         cfg, llm, era, calendar, phone, stt, mail=mail, obsidian=obsidian, home_assistant=home_assistant,
         business=business, personal=personal, bridge=bridge, speaker=speaker, static_dir="web/dist",
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops, recipe=recipe, local_llm=local_llm,
+        git_ops=git_ops, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
     )
 
     logger.info("Jarvis web UI starting on port %d", cfg.web_port)

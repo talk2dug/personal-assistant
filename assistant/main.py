@@ -8,7 +8,7 @@ from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_notifier,
-    build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
+    build_cellular_context, build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
     build_local_llm_context, build_mail_context, build_obsidian_context, build_personal_context,
     build_phone_context, build_recipe_context, build_ticketmaster_context,
 )
@@ -84,6 +84,8 @@ def main() -> None:
         cfg, owner_row["id"] if owner_row else None, letterstream=letterstream, kroger=kroger)
     git_ops = build_git_ops_context(cfg)
     recipe = build_recipe_context(cfg)
+
+    cellular_ctx = build_cellular_context(cfg)
     local_llm = build_local_llm_context(cfg)
     # The bridge worker lives in this process alongside the scheduler — one place owns
     # all background work, so there's exactly one queue draining the GPU.
@@ -103,7 +105,7 @@ def main() -> None:
         cfg.telegram_bot_token, cfg.db_path, llm, cfg.timezone, era=era, calendar=calendar, phone=phone, mail=mail,
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops, recipe=recipe, local_llm=local_llm,
+        git_ops=git_ops, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
     )
     # Routed through the user's notification policy: reminders follow the same
     # 'phone when I'm out' preference as anything else Jarvis sends unprompted.

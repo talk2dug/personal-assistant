@@ -70,7 +70,7 @@ async def call_tool(request: Request):
         airbnb=request.app.state.airbnb, ticketmaster=request.app.state.ticketmaster,
         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
         letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
-        recipe=request.app.state.recipe,
+        recipe=request.app.state.recipe, cellular_ctx=request.app.state.cellular_ctx,
         employee_key=employee_key, llm=request.app.state.llm,
     )
     result = await loop.run_in_executor(None, call)

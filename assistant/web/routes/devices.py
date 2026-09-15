@@ -206,6 +206,7 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
         # available from a voice terminal regardless of who presence identifies as
         # speaking, same as before presence gating existed.
         "git_ops": request.app.state.git_ops, "recipe": request.app.state.recipe,
+        "cellular_ctx": request.app.state.cellular_ctx,
         "local_llm": request.app.state.local_llm,
     }
 

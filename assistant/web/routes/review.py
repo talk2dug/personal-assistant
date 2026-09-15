@@ -142,6 +142,7 @@ async def decide(item_id: int, request: Request):
                         mail=request.app.state.mail, home_assistant=request.app.state.home_assistant,
                         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
                         letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,
+                        cellular_ctx=request.app.state.cellular_ctx,
                     )
                     written_through = f"pending_actions#{ref_id} -> executed {pending['tool_name']} ({result})"
                 except Exception as e:

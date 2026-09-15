@@ -20,6 +20,7 @@ from .business_tools import (
     GPU_BRIDGE_NOTE,
 )
 from .personal_tools import PERSONAL_SYSTEM_NOTE, PERSONAL_TOOLS
+from .sms_tools import SMS_SYSTEM_NOTE, SMS_TOOLS
 from .kitchen_tools import (
     KITCHEN_ALWAYS_TOOLS, KITCHEN_SYSTEM_NOTE, KITCHEN_TOOLS, _select_kitchen_gated_tools,
 )
@@ -74,6 +75,41 @@ class MailContext:
     @property
     def tool_names(self) -> set[str]:
         return {t["function"]["name"] for t in MAIL_TOOLS}
+
+
+class _SmsClient:
+    """Adapter so the cellular tools fit the same call_tool shape every other context
+    uses -- that way execute_pending_action needs no special case for them, and a
+    confirmed text executes through exactly the path a confirmed Kroger write does."""
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+
+    def call_tool(self, name: str, arguments: dict):
+        from . import sms_tools
+        if name == "send_text":
+            return json.loads(sms_tools.execute_send(self.db_path, arguments))
+        return json.loads(sms_tools.handle(self.db_path, name, arguments))
+
+
+@dataclass
+class CellularContext:
+    """Sending texts on the owner's behalf over the house LTE modem.
+
+    send_text is the only sensitive tool, and the reason is not distrust of the model:
+    a text to another human cannot be recalled, reads as having come from the owner, and
+    lands on someone who never opted into being messaged by software. A wrong one is not
+    a bug you fix, it is a thing you have to explain to a person. Reading the thread is
+    ungated -- those messages are already the owner's own, and an assistant that can send
+    but cannot see the reply is useless for the job this exists to do."""
+
+    mcp_client: object
+    sensitive_tools: set[str]
+
+    @property
+    def tool_names(self) -> set[str]:
+        from .sms_tools import SMS_TOOL_NAMES
+        return SMS_TOOL_NAMES
 
 
 @dataclass
@@ -1180,6 +1216,7 @@ SYSTEM_PROMPT = (
     "list_cameras shows what's registered, and add_camera registers a new one from a stream URL."
     "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{kitchen_note}{web_note}"
     "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}{recipe_note}"
+    "{sms_note}"
 )
 
 WEB_SEARCH_SYSTEM_NOTE = (
@@ -1344,7 +1381,7 @@ def build_system_prompt(
     tz_name: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     now: str | None = None, web_search: bool = False, business=None, personal=None,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
-    recipe=None,
+    recipe=None, cellular_ctx=None,
 ) -> str:
     """Builds Jarvis's system prompt with whichever integration notes apply.
 
@@ -1392,13 +1429,14 @@ def build_system_prompt(
         letterstream_note=LETTERSTREAM_SYSTEM_NOTE if letterstream is not None else "",
         git_note=GIT_SYSTEM_NOTE if git_ops is not None else "",
         recipe_note=RECIPE_SYSTEM_NOTE if recipe is not None else "",
+        sms_note=SMS_SYSTEM_NOTE if cellular_ctx is not None else "",
     )
 
 
 def select_tools(
     user_text: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     route: bool = True, business=None, personal=None, airbnb=None, ticketmaster=None, kroger=None,
-    ccxt=None, letterstream=None, git_ops=None, recipe=None,
+    ccxt=None, letterstream=None, git_ops=None, recipe=None, cellular_ctx=None,
 ) -> list[dict]:
     """The tool set for one turn, in Ollama's function-schema format.
 
@@ -1438,6 +1476,7 @@ def select_tools(
             + (LETTERSTREAM_TOOLS if letterstream is not None else [])
             + (git_ops.git_tools if git_ops is not None else [])
             + (recipe.recipe_tools if recipe is not None else [])
+            + (SMS_TOOLS if cellular_ctx is not None else [])
         )
     return (
         TOOLS
@@ -1481,6 +1520,9 @@ def select_tools(
         # (branch/write/push/PR-open are all reversible; only merge is gated).
         + (git_ops.git_tools if git_ops is not None else [])
         + (_select_recipe_tools(recipe, user_text) if recipe is not None else [])
+        # Not keyword-gated: "ask Nadia if she's free Thursday" names no SMS keyword at
+        # all, and three schemas is nowhere near the tool-count budget.
+        + (SMS_TOOLS if cellular_ctx is not None else [])
     )
 
 
@@ -1507,6 +1549,7 @@ def _dispatch_tool_call(
     letterstream: "LetterStreamContext | None" = None,
     git_ops: "GitOpsContext | None" = None,
     recipe: "RecipeContext | None" = None,
+    cellular_ctx: "CellularContext | None" = None,
     employee_key: str | None = None,
     llm=None,
 ) -> str:
@@ -1744,6 +1787,36 @@ def _dispatch_tool_call(
     if recipe is not None and name in recipe.tool_names:
         try:
             return json.dumps(recipe.mcp_client.call_tool(name, arguments))
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    if cellular_ctx is not None and name in cellular_ctx.tool_names:
+        if name in cellular_ctx.sensitive_tools:
+            # A text to another person cannot be recalled and reads as having come from
+            # the owner. He sees the exact recipient and the exact words first -- and
+            # resolving the name HERE means the confirmation shows who it will actually
+            # reach, not the nickname the model happened to use.
+            from . import sms_tools
+            number, display, error = sms_tools.resolve_recipient(
+                db_path, str(arguments.get("to") or ""))
+            if error:
+                return json.dumps({"error": error})
+            body = str(arguments.get("message") or "").strip()
+            if not body:
+                return json.dumps({"error": "refusing to propose an empty message"})
+            create_pending_action_and_review(
+                db_path, requesting_user_id, name, arguments,
+                note=f"Text to {display or number} ({number}): {body!r}")
+            return json.dumps({
+                "status": "awaiting_confirmation",
+                "message": (
+                    f"Nothing has been sent. Show the owner exactly this and ask him to "
+                    f"confirm yes or no: to {display or number} at {number}, the message "
+                    f"{body!r}."
+                ),
+            })
+        try:
+            return json.dumps(cellular_ctx.mcp_client.call_tool(name, arguments))
         except Exception as e:
             return json.dumps({"error": str(e)})
 
@@ -2024,6 +2097,7 @@ def execute_pending_action(
     mail: MailContext | None = None, home_assistant: HomeAssistantContext | None = None,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
+    cellular_ctx: "CellularContext | None" = None,
 ):
     """Finds whichever context owns this pending action's tool and calls it for real.
     Shared by the chat confirmation flow (_resolve_pending_action) and the Review page's
@@ -2043,6 +2117,8 @@ def execute_pending_action(
         context = letterstream
     elif git_ops is not None and pending["tool_name"] in git_ops.tool_names:
         context = git_ops
+    elif cellular_ctx is not None and pending["tool_name"] in cellular_ctx.tool_names:
+        context = cellular_ctx
     else:
         context = home_assistant
     return context.mcp_client.call_tool(pending["tool_name"], pending["arguments"])
@@ -2064,6 +2140,7 @@ def _resolve_pending_action(
     home_assistant: HomeAssistantContext | None, pending: dict, user_text: str,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
+    cellular_ctx: "CellularContext | None" = None,
 ) -> str:
     db.add_message(db_path, pending["user_id"], "user", user_text)
     decision = _classify_confirmation(llm, user_text)
@@ -2074,7 +2151,8 @@ def _resolve_pending_action(
         try:
             result = execute_pending_action(
                 pending, era=era, phone=phone, mail=mail, home_assistant=home_assistant,
-                kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops)
+                kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops,
+                cellular_ctx=cellular_ctx)
             reply = f"Done. {pending['tool_name']} executed — result: {result}"
         except Exception as e:
             reply = f"I confirmed it but the call failed: {e}"
@@ -2103,6 +2181,7 @@ def handle_message(
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
     recipe: "RecipeContext | None" = None,
+    cellular_ctx: "CellularContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
     local_llm=None, viewing_context: str | None = None, source: str | None = None,
 ) -> str:
@@ -2137,7 +2216,8 @@ def handle_message(
         if pending is not None:
             return _resolve_pending_action(
                 db_path, llm, era, phone, mail, home_assistant, pending, user_text,
-                kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops)
+                kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops,
+                cellular_ctx=cellular_ctx)
 
     if local_llm is not None and home_assistant is not None and image_bytes is None:
         from . import local_fast_path
@@ -2156,7 +2236,8 @@ def handle_message(
     tools = select_tools(
         user_text, era, phone, mail, obsidian, home_assistant, route=not agentic, business=business,
         personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-        letterstream=letterstream, git_ops=git_ops, recipe=recipe)
+        letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+        cellular_ctx=cellular_ctx)
 
     # Agentic backends (the Claude CLI) run their own tool-calling loop against Jarvis's
     # tools over MCP, so the hop loop below doesn't apply — they get the conversation and
@@ -2168,6 +2249,7 @@ def handle_message(
             web_search=getattr(llm, "web_search", False), business=business, personal=personal,
             airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
             letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+            cellular_ctx=cellular_ctx,
         )
         try:
             reply = llm.converse(
@@ -2184,7 +2266,8 @@ def handle_message(
         {"role": "system", "content": build_system_prompt(
             tz_name, era, phone, mail, obsidian, home_assistant, now=now, business=business,
             personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-            letterstream=letterstream, git_ops=git_ops, recipe=recipe)}
+            letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+            cellular_ctx=cellular_ctx)}
     ] + history
     if image_bytes is not None and messages[-1]["role"] == "user":
         messages[-1] = {**messages[-1], "images": [image_bytes]}
@@ -2226,7 +2309,8 @@ def handle_message(
                 db_path, tz_name, requesting_user_id, fn["name"], fn.get("arguments", {}), era, calendar, phone,
                 mail=mail, obsidian=obsidian, home_assistant=home_assistant, business=business,
                 personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops, recipe=recipe, llm=llm,
+                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+                cellular_ctx=cellular_ctx, llm=llm,
             )
             messages.append({"role": "tool", "content": result})
 

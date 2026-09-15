@@ -280,6 +280,24 @@ def build_era_context(cfg) -> EraContext | None:
     return EraContext(mcp_client=mcp_client, era_tools=era_tools, sensitive_tools=set(cfg.era_sensitive_tools))
 
 
+def build_cellular_context(cfg):
+    """SMS-sending tools, gated on the cellular channel actually being configured.
+
+    Needs no network check at startup, unlike every other builder here: the "client" is
+    this machine's own database. A queued text waits for the Pi to collect it, so the
+    modem being asleep, out of signal or unplugged is not a reason to withhold the
+    capability -- the message simply goes when the radio is back, which is the behaviour
+    you want from the channel that exists for outages.
+    """
+    from .engine import CellularContext, _SmsClient
+    from .sms_tools import SMS_SENSITIVE_TOOLS
+    if not getattr(cfg, "sms_sending_enabled", False):
+        return None
+    logger.info("Cellular SMS sending: enabled (send_text requires confirmation)")
+    return CellularContext(mcp_client=_SmsClient(cfg.db_path),
+                           sensitive_tools=set(SMS_SENSITIVE_TOOLS))
+
+
 def build_recipe_context(cfg) -> RecipeContext | None:
     """A third-party cloud MCP server, same class of dependency as Era/CalDAV -- but
     unlike those, a failure here must only disable recipe tools, never take down the

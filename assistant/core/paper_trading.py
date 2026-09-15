@@ -42,6 +42,28 @@ MAX_ORDER_PCT_OF_EQUITY = 25.0
 # still win an exception once the window passes; this only stops the immediate whipsaw.
 STOP_LOSS_COOLDOWN_HOURS = 2.0
 
+# --- mechanical exits ---------------------------------------------------------
+#
+# Measured over the 92 closed round-trips of the run archived on 2026-09-13: a 42.4% win
+# rate, average win +$2.39, average loss -$2.85 -- a payoff ratio of 0.84 where 1.36 was
+# needed just to break even. Expectancy -$0.63 a trade, which is a guaranteed bleed no
+# amount of better coin-picking fixes.
+#
+# The cause was not selection. 90 of those 92 exits were the model closing the position
+# itself rather than a stop firing, and it held winners a median of 2.0 hours against
+# 8.7 hours for losers -- it banked gains early and sat on losses hoping they came back.
+# Textbook disposition effect, and it inverts the payoff ratio all on its own.
+#
+# So the exit decision is no longer the model's to make. It commits a stop and a target
+# at entry and the position leaves on one of them, or on the clock. The model still
+# chooses what to buy, when, and how much -- it just cannot snatch a winner back.
+MIN_REWARD_RISK = 2.0
+
+# A thesis that has not worked in two days is not going to be rescued by a third day of
+# the model looking at it. This also bounds how long capital can sit in a position that
+# is drifting sideways, neither stopping out nor reaching its target.
+MAX_HOLD_HOURS = 48.0
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +91,10 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     -- level yet; a position can hold either, both, or neither.
     stop_loss REAL,
     take_profit REAL,
+    -- When this position was FIRST opened (adding to it does not reset this), so a
+    -- maximum hold can be enforced. A thesis that has not worked in two days is not
+    -- going to be rescued by the model staring at it for a third.
+    opened_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (account_id, code)
 );
@@ -91,7 +117,9 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     quote_age_sec INTEGER,
     -- Set on a sell only, by comparing the fill price against the position's own stored
     -- stop_loss/take_profit at the moment of the sell (see _classify_exit) -- never
-    -- parsed from prose. 'stop_loss' | 'take_profit' | 'discretionary' | NULL (buys).
+    -- parsed from prose. 'stop_loss' | 'take_profit' | 'timeout' | 'discretionary' |
+    -- NULL (buys). 'discretionary' is now only reachable through an explicit
+    -- allow_exit call, since the model can no longer close a position itself.
     -- What the re-entry cooldown (see execute_orders' buy path) actually keys off.
     exit_kind TEXT,
     at TEXT NOT NULL
@@ -125,25 +153,39 @@ to trade on every run, and churning costs {fee_pct}% per side.
 
 ```orders
 {{"orders": [
-  {{"side": "buy",  "code": "SOL", "usd": 500, "stop_loss": 130.0, "take_profit": 165.0, "reason": "why, in one line"}},
-  {{"side": "sell", "code": "DASH", "qty": "all", "reason": "why, in one line"}}
+  {{"side": "buy", "code": "SOL", "usd": 500, "stop_loss": 130.0, "take_profit": 220.0, "reason": "why, in one line"}}
 ]}}
 ```
 
-Rules that are enforced in code, not by you:
-  * Buys are sized in `usd`; sells in `qty` (a number, or "all" to close the position).
-  * You cannot spend cash you do not have, or sell a coin you do not hold.
-  * No single order may exceed {max_pct}% of total equity.
+YOU ONLY DECIDE ENTRIES. You cannot close a position -- there is no sell you can place.
+A position leaves on the stop_loss or the take_profit you committed when you opened it,
+or automatically after {max_hold_hours:g}h. This is not a restriction on your judgement,
+it is where your judgement now goes: the only chance you get to decide how a trade ends
+is the moment you open it, so set the two numbers you actually mean.
+
+Why, in the desk's own numbers: over 92 closed round-trips you won 42.4% of the time --
+which is fine -- but your average win was +$2.39 against an average loss of -$2.85,
+because you held winners a median of 2.0 hours and losers 8.7 hours. Taking profits early
+and giving losses room is what lost the money, not the coins you picked.
+
+Rules enforced in code, not by you:
+  * Buys are sized in `usd`. No single order may exceed {max_pct}% of total equity.
+  * You cannot spend cash you do not have.
   * Fills use the cached price, not a price you state. Do not predict your fill.
-  * Every buy must set `stop_loss` and/or `take_profit` as real numeric prices (not a
-    percentage, not "later") -- these are stored on the position and enforced
-    automatically between your runs, not something you have to remember or re-derive.
-    Adding to an existing position keeps its current stop_loss/take_profit unless you
-    explicitly state a new one -- state one only when you actually mean to move it.
-  * A coin stopped out (price hit its stored stop_loss) cannot be re-bought for
-    {cooldown_hours:g}h -- that failed thesis needs to actually cool off, not get
-    re-entered on the next momentum call. The rejection will tell you if this is why.
-Report your reasoning in prose above the block. If you are not trading, say why.
+  * Every buy MUST set both `stop_loss` and `take_profit` as real numeric prices (not a
+    percentage, not "later"). A buy missing either is refused.
+  * `stop_loss` must be below the fill price and `take_profit` above it. A stop above
+    your entry closes the position the instant it opens.
+  * The target must be at least {min_rr:g}x the distance to the stop. At a 42% win rate
+    that ratio is what turns this book positive on arithmetic alone. If a trade is not
+    worth {min_rr:g}:1 to you, it is not worth taking -- that is the trade-off, and
+    passing is a perfectly good answer.
+  * Adding to a position keeps its levels unless you state new ones, and does NOT restart
+    its {max_hold_hours:g}h clock.
+  * A coin stopped out cannot be re-bought for {cooldown_hours:g}h -- that failed thesis
+    needs to cool off, not get re-entered on the next momentum call.
+An empty list is a legitimate and often correct answer. Report your reasoning in prose
+above the block. If you are not trading, say why.
 """
 
 
@@ -159,6 +201,14 @@ def init_paper_db(db_path: str) -> None:
             conn.execute("ALTER TABLE paper_positions ADD COLUMN stop_loss REAL")
         if "take_profit" not in pos_cols:
             conn.execute("ALTER TABLE paper_positions ADD COLUMN take_profit REAL")
+        if "opened_at" not in pos_cols:
+            conn.execute("ALTER TABLE paper_positions ADD COLUMN opened_at TEXT")
+            # Backfill from updated_at rather than leaving NULL: a position already open
+            # when this shipped would otherwise have no age at all, and the choice is
+            # between "never times out" and "times out immediately". updated_at is the
+            # last time it was touched, which for an untouched position IS its open time.
+            conn.execute("UPDATE paper_positions SET opened_at = updated_at "
+                         "WHERE opened_at IS NULL")
         trade_cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)")}
         if "exit_kind" not in trade_cols:
             conn.execute("ALTER TABLE paper_trades ADD COLUMN exit_kind TEXT")
@@ -198,11 +248,26 @@ def _parse_level(value) -> float | None:
     return level if level > 0 else None
 
 
-def _classify_exit(price: float, pos) -> str:
+def _held_hours(opened_at) -> float | None:
+    """How long a position has been open, or None if it predates the opened_at column
+    and was never backfilled -- in which case the maximum hold simply does not apply,
+    rather than a missing timestamp being read as "infinitely old" and force-closing it."""
+    opened = _parse_at(opened_at) if opened_at else None
+    if opened is None:
+        return None
+    return (datetime.now(timezone.utc) - opened).total_seconds() / 3600
+
+
+def _classify_exit(price: float, pos, override: str | None = None) -> str:
     """Whether a sell at `price` was a stop-loss, a take-profit, or a discretionary
     close -- from the position's own persisted levels, never from prose. A position with
     both levels set and a price that (due to a gap) cleared both in one tick is called a
     stop-loss: preserving capital is the one of the two that actually mattered."""
+    # A time exit is the one kind that cannot be read off the price: the position left
+    # because the clock ran out, at whatever price that happened to be. The caller that
+    # forced it says so, rather than this guessing from a price that cleared no level.
+    if override:
+        return override
     stop_loss = pos["stop_loss"] if "stop_loss" in pos.keys() else None
     take_profit = pos["take_profit"] if "take_profit" in pos.keys() else None
     if stop_loss is not None and price <= stop_loss:
@@ -353,12 +418,18 @@ def parse_orders(text: str) -> list[dict]:
 
 
 def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
-                   staff_key: str | None = None) -> dict:
+                   staff_key: str | None = None, allow_exit: bool = False) -> dict:
     """Validate and fill proposed orders. Returns fills and rejections.
 
     Every rejection carries a reason, and both are persisted: the next run's briefing
     tells the employee what actually happened, which is the only way a simulated trader
     can learn that its sizing is wrong.
+
+    `allow_exit` is what separates a proposal from an enforcement. Exits are mechanical
+    (see MIN_REWARD_RISK's note) so a model-proposed sell is refused; only check_stops(),
+    which fills a position's own committed levels, passes True. It is a parameter rather
+    than a check on staff_key because a caller's authority should be something it states
+    at the call site, not something inferred from a string it happens to be labelled with.
     """
     acct = ensure_account(db_path, name)
     fills, rejects = [], []
@@ -474,6 +545,30 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                                   f"above it, or the position is closed the moment it opens")
                     continue
 
+                # Exits are mechanical (see MIN_REWARD_RISK), so BOTH levels are now
+                # mandatory rather than "one or the other": a position the model cannot
+                # close itself, with only half a plan, has no defined way out on one side.
+                if stop_loss is None or take_profit is None:
+                    missing = "stop_loss" if stop_loss is None else "take_profit"
+                    reject(order, f"every buy needs both stop_loss and take_profit as "
+                                  f"numeric prices -- {missing} is missing, and exits are "
+                                  f"mechanical now, so an open position with no committed "
+                                  f"level on one side has no way out on that side")
+                    continue
+
+                # The payoff ratio is set here, at entry, or it is not set at all. At the
+                # desk's measured 42.4% win rate a 2:1 target turns a losing book into a
+                # winning one on arithmetic alone -- and unlike a win rate, this is
+                # something the model can actually be held to.
+                risk, reward = price - stop_loss, take_profit - price
+                if reward < risk * MIN_REWARD_RISK:
+                    reject(order, f"target is only {reward / risk:.2f}x the risk "
+                                  f"(${reward:,.6g} up vs ${risk:,.6g} down); "
+                                  f"{MIN_REWARD_RISK:g}x is the minimum -- either move the "
+                                  f"target out or bring the stop closer, but a trade you "
+                                  f"win 42% of the time has to pay more than it risks")
+                    continue
+
                 # Cash moves only once the order is known to be fillable -- every refusal
                 # above this line must leave the balance untouched.
                 qty = usd / price
@@ -482,15 +577,19 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd + fee) / new_qty
                 cash -= usd + fee
 
+                # Adding to a position must NOT restart its clock, or a position could be
+                # kept alive past the maximum hold indefinitely by topping it up.
+                opened_at = pos["opened_at"] if pos is not None and pos["opened_at"] else now
                 conn.execute(
                     """INSERT INTO paper_positions (account_id, code, qty, avg_cost,
-                                                     stop_loss, take_profit, updated_at)
-                       VALUES (?,?,?,?,?,?,?)
+                                                     stop_loss, take_profit, opened_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?)
                        ON CONFLICT(account_id, code) DO UPDATE SET
                            qty = excluded.qty, avg_cost = excluded.avg_cost,
                            stop_loss = excluded.stop_loss, take_profit = excluded.take_profit,
+                           opened_at = excluded.opened_at,
                            updated_at = excluded.updated_at""",
-                    (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, now))
+                    (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, opened_at, now))
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
@@ -501,6 +600,16 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                               "usd": round(usd, 2), "fee": round(fee, 2), "reason": reason})
 
             else:
+                if not allow_exit:
+                    reject(order, "exits are mechanical: a position closes on the "
+                                  "stop_loss or take_profit you committed at entry, or "
+                                  "after {:g}h, and you cannot close one early. Measured "
+                                  "over 92 closed trades, choosing your own exits meant "
+                                  "holding winners 2.0h and losers 8.7h, which is what "
+                                  "made the book lose money. Set the levels you actually "
+                                  "mean when you open the position."
+                                  .format(MAX_HOLD_HOURS))
+                    continue
                 if pos is None or pos["qty"] <= 0:
                     reject(order, f"no {code} position to sell")
                     continue
@@ -528,7 +637,7 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 # price -- never parsed from prose -- so the re-entry cooldown above has
                 # something real to key off regardless of whether this sell was the
                 # model's own discretionary call or check_stops' automatic one.
-                exit_kind = _classify_exit(price, pos)
+                exit_kind = _classify_exit(price, pos, order.get("exit_kind"))
                 remaining = pos["qty"] - qty
                 if remaining <= 1e-12:
                     conn.execute("DELETE FROM paper_positions WHERE account_id = ? AND code = ?",
@@ -569,9 +678,11 @@ def check_stops(db_path: str, name: str = "crypto") -> dict:
     """
     acct = ensure_account(db_path, name)
     with closing(_connect(db_path)) as conn:
+        # Every open position, not only those carrying a level: since exits became
+        # mechanical the maximum hold applies to all of them, and a position that somehow
+        # has neither level would otherwise be the one thing that could never be closed.
         positions = conn.execute(
-            """SELECT * FROM paper_positions WHERE account_id = ? AND qty > 0
-                   AND (stop_loss IS NOT NULL OR take_profit IS NOT NULL)""",
+            "SELECT * FROM paper_positions WHERE account_id = ? AND qty > 0",
             (acct["id"],)).fetchall()
         if not positions:
             return {"fills": [], "rejections": [], "portfolio": portfolio(db_path, name)}
@@ -589,10 +700,18 @@ def check_stops(db_path: str, name: str = "crypto") -> dict:
         elif p["take_profit"] is not None and price >= p["take_profit"]:
             orders.append({"side": "sell", "code": p["code"], "qty": "all",
                            "reason": f"Automatic take-profit: price ${price:,.6g} >= target ${p['take_profit']:,.6g}"})
+        else:
+            held_h = _held_hours(p["opened_at"] if "opened_at" in p.keys() else None)
+            if held_h is not None and held_h >= MAX_HOLD_HOURS:
+                orders.append({"side": "sell", "code": p["code"], "qty": "all",
+                               "exit_kind": "timeout",
+                               "reason": f"Automatic time exit: held {held_h:.1f}h, "
+                                         f"past the {MAX_HOLD_HOURS:g}h maximum"})
 
     if not orders:
         return {"fills": [], "rejections": [], "portfolio": portfolio(db_path, name)}
-    return execute_orders(db_path, orders, name=name, staff_key="system:check_stops")
+    return execute_orders(db_path, orders, name=name, staff_key="system:check_stops",
+                          allow_exit=True)
 
 
 def recent_trades(db_path: str, name: str = "crypto", limit: int = 20) -> list[dict]:

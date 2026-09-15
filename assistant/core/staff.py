@@ -929,7 +929,9 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             prompt += paper_trading.ORDER_INSTRUCTIONS.format(
                 fee_pct=paper_trading.DEFAULT_FEE_PCT,
                 max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
-                cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS)
+                cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS,
+                min_rr=paper_trading.MIN_REWARD_RISK,
+                max_hold_hours=paper_trading.MAX_HOLD_HOURS)
         if journaling:
             # Last, so the output-order note it ends with (prose, journal, orders, verdict)
             # is the final instruction the model reads about how to lay its reply out.

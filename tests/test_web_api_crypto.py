@@ -142,11 +142,14 @@ def test_trades_and_rejections_carry_their_stated_reason(client, cfg):
     conn.commit(); conn.close()
 
     paper_trading.execute_orders(
-        cfg.db_path, [{"side": "buy", "code": "SOL", "usd": 100, "reason": "breakout confirmed"}],
+        cfg.db_path, [{"side": "buy", "code": "SOL", "usd": 100, "reason": "breakout confirmed",
+                       "stop_loss": 180.0, "take_profit": 260.0}],
         staff_key="trader")
+    # Oversell: reaches the quantity check only with the exit authority, since a
+    # model-proposed sell is now refused before it gets that far.
     paper_trading.execute_orders(
         cfg.db_path, [{"side": "sell", "code": "SOL", "qty": 999, "reason": "take profit"}],
-        staff_key="trader")
+        staff_key="trader", allow_exit=True)
 
     _login(client, "ownerpass")
     body = client.get("/api/crypto/dashboard").json()

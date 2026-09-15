@@ -282,7 +282,8 @@ class TestRecordRun:
                         VALUES ('SOL','SOL',1,200.0,1,?,?,?)""", (now, now, now))
         conn.commit(); conn.close()
         paper_trading.ensure_account(db, starting_cash=1000.0)
-        paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 100}])
+        paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 100,
+                                           "stop_loss": 180.0, "take_profit": 260.0}])
 
         crypto_journal.record_run(
             obsidian, TRADER, None, role="trader", now=NOW, db_path=db,

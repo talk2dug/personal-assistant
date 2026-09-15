@@ -27,3 +27,7 @@ web/dist/
 
 # Claude Code's own local session/tool state — not part of the app
 .claude/
+
+# Isolated TTS environment (CPU torch + snac for Orpheus SNAC decoding) -- same reason
+# .venv-vision is ignored: a multi-hundred-MB ML stack does not belong in the repo.
+.venv-tts/

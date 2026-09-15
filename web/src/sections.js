@@ -17,6 +17,7 @@ import Finance from './pages/Finance'
 import Grocery from './pages/Grocery'
 import Kitchen from './pages/Kitchen'
 import Media from './pages/Media'
+import Pipelines from './pages/Pipelines'
 import Review from './pages/Review'
 import Schedule from './pages/Schedule'
 import Tasks from './pages/Tasks'
@@ -40,6 +41,10 @@ export const SECTIONS = [
     context: 'the Crypto desk, showing the paper-trading book, positions and recent trades' },
   { key: 'credit', label: 'Credit', element: Credit, wide: true,
     context: 'the Credit section, showing score history and open disputes' },
+  { key: 'pipelines', label: 'Pipelines', element: Pipelines, wide: true,
+    context: 'the Pipelines board, showing each product concept from the trend that '
+      + 'started it through art, listing and social posts, with the approvals waiting '
+      + 'at each stage' },
   { key: 'media', label: 'Media', element: Media, wide: true,
     context: 'the Media section, showing the catalogue by kind and volume' },
   { key: 'agents', label: 'Office', element: Agents, wide: true,

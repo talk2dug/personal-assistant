@@ -1,0 +1,310 @@
+/* The business pipeline board: rail of products on the right, one product's whole
+   chain in the centre. Same blueprint language as the Command Center -- this opens as a
+   section modal over it, so it must read as the same object, not a second application. */
+
+.pl-root {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+  min-height: 0;
+  height: 100%;
+}
+
+.pl-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 4px 4px 24px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* The rail is on the right because that is where the owner asked for it, and because the
+   centre is what he reads -- a left rail would put navigation in the reading path. */
+.pl-rail {
+  flex: 0 0 300px;
+  min-width: 0;
+  border-left: 1px solid var(--divider);
+  padding-left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.pl-rail-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+
+.pl-rail-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--steel-mid);
+}
+
+.pl-rail-total { font-size: 11px; color: var(--text-dim); }
+
+.pl-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.pl-filters button,
+.pl-market-toggle button {
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid rgba(148, 188, 227, 0.28);
+  color: var(--text-dim);
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+
+.pl-filters button:hover,
+.pl-market-toggle button:hover { background: rgba(148, 188, 227, 0.12); color: var(--steel-bright); }
+.pl-filters button.is-on,
+.pl-market-toggle button.is-on {
+  background: rgba(148, 188, 227, 0.18);
+  color: var(--steel-bright);
+  border-color: rgba(148, 188, 227, 0.5);
+}
+
+.pl-rail-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding-right: 4px; }
+
+.pl-rail-group { display: flex; flex-direction: column; gap: 5px; }
+
+.pl-rail-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 9.5px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.pl-rail-card {
+  appearance: none;
+  cursor: pointer;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--divider);
+  border-left: 2px solid transparent;
+  padding: 8px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font: inherit;
+  color: inherit;
+}
+
+.pl-rail-card:hover { background: rgba(148, 188, 227, 0.07); }
+.pl-rail-card.is-active {
+  background: rgba(148, 188, 227, 0.12);
+  border-left-color: var(--steel);
+}
+
+.pl-rail-top { display: flex; align-items: baseline; gap: 8px; }
+
+.pl-rail-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.25;
+  /* Two lines then ellipsis: these names are long and descriptive, and truncating to one
+     line loses the part that distinguishes two variants of the same event. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* The only amber in this view: something is waiting on him. */
+.pl-wait {
+  flex: none;
+  font-family: var(--font-display);
+  font-size: 12px;
+  min-width: 18px;
+  text-align: center;
+  color: var(--amber);
+  border: 1px solid rgba(232, 163, 61, 0.45);
+  padding: 0 4px;
+}
+
+.pl-rail-meta,
+.pl-item-meta,
+.pl-sub {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.pl-dot { width: 3px; height: 3px; background: currentColor; opacity: 0.5; }
+.pl-type { text-transform: uppercase; letter-spacing: 0.12em; }
+
+/* Five ticks, one per stage -- how far this product has actually got, readable at a
+   glance without opening it. */
+.pl-rail-track { display: flex; gap: 3px; }
+.pl-tick { flex: 1; height: 2px; background: rgba(148, 188, 227, 0.16); }
+.pl-tick.is-done { background: var(--steel-mid); }
+
+/* --- the centre ---------------------------------------------------------- */
+
+.pl-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--divider);
+  padding-bottom: 12px;
+}
+
+.pl-title {
+  margin: 0 0 4px;
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.04em;
+  color: var(--steel-bright);
+  line-height: 1.15;
+}
+
+.pl-market-toggle { display: flex; gap: 0; }
+.pl-market-toggle button:first-child { border-right: 0; }
+
+.pl-stage { display: flex; flex-direction: column; gap: 10px; }
+
+.pl-stage-head { display: flex; align-items: center; gap: 10px; }
+
+.pl-stage-name {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--steel-mid);
+}
+
+.pl-stage-count { font-family: var(--font-display); font-size: 12px; color: var(--text-faint); }
+
+.pl-empty { margin: 0; font-size: 12px; color: var(--text-faint); font-style: italic; }
+
+.pl-item {
+  border: 1px solid var(--divider);
+  border-left: 2px solid rgba(148, 188, 227, 0.35);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(148, 188, 227, 0.02);
+}
+
+.pl-item-head { display: flex; align-items: baseline; gap: 10px; }
+.pl-item-title { flex: 1; min-width: 0; font-size: 14px; color: var(--steel-bright); }
+.pl-item-line { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text); }
+
+.pl-prompt {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  background: rgba(148, 188, 227, 0.05);
+  padding: 6px 8px;
+  white-space: pre-wrap;
+}
+
+.pl-tags { margin: 0; font-size: 11px; color: var(--steel-mid); }
+
+.pl-status {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  color: var(--text-dim);
+}
+
+.pl-status.is-approved, .pl-status.is-published, .pl-status.is-posted,
+.pl-status.is-live, .pl-status.is-on_sale { color: var(--steel); }
+.pl-status.is-draft, .pl-status.is-proposed { color: var(--amber); }
+.pl-status.is-rejected, .pl-status.is-delisted, .pl-status.is-retired { color: var(--text-faint); }
+
+/* --- an approval, shown where it belongs ---------------------------------- */
+
+.pl-review {
+  border: 1px solid rgba(232, 163, 61, 0.35);
+  background: rgba(232, 163, 61, 0.06);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pl-review-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+
+.pl-review-flag {
+  font-family: var(--font-display);
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--amber);
+  white-space: nowrap;
+}
+
+.pl-review-title { font-size: 12.5px; color: var(--text); }
+.pl-review-summary { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-dim); }
+
+.pl-review-hint { font-size: 10.5px; color: var(--text-faint); }
+
+/* Artwork, shown rather than described -- the whole point of the request. */
+.pl-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.pl-option { margin: 0; display: flex; flex-direction: column; gap: 5px; }
+
+.pl-option img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  /* Not black: a lot of this artwork is dark line work on transparency, and it vanishes
+     against a dark ground. */
+  background: #cfd8e0;
+  border: 1px solid var(--divider);
+  display: block;
+}
+
+.pl-option-noimg {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--divider);
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.pl-option figcaption { display: flex; flex-direction: column; gap: 2px; }
+.pl-option-label { font-size: 11.5px; color: var(--text); }
+.pl-option-desc { font-size: 10.5px; color: var(--text-faint); line-height: 1.35; }
+
+@media (max-width: 900px) {
+  .pl-root { flex-direction: column; }
+  .pl-rail {
+    flex: 0 0 auto;
+    border-left: 0;
+    border-top: 1px solid var(--divider);
+    padding-left: 0;
+    padding-top: 12px;
+    order: -1;          /* pick a pipeline first when there is no room to show both */
+  }
+  .pl-rail-list { max-height: 240px; }
+}

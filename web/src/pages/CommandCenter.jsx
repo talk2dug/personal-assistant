@@ -109,7 +109,7 @@ export default function CommandCenter() {
 
           <Pipelines
             pipelines={snapshot?.pipelines}
-            onOpenBusiness={() => openSection('media')}
+            onOpenBusiness={() => openSection('pipelines')}
             onOpenDev={() => openSection('review')}
           />
         </div>

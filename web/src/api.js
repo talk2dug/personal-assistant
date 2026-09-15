@@ -163,6 +163,13 @@ export const api = {
   // for why the cheap panels travel together instead of one endpoint each.
   commandCenter: () => request('/api/command-center/snapshot'),
 
+  // The business team's work grouped by the product it belongs to, rather than as a
+  // flat queue of unrelated approvals -- see routes/pipelines.py.
+  pipelines: (market) => request(`/api/pipelines${market ? `?market=${market}` : ''}`),
+  pipeline: (id) => request(`/api/pipelines/${id}`),
+  setPipelineMarket: (id, market) =>
+    request(`/api/pipelines/${id}/market`, { method: 'PUT', body: JSON.stringify({ market }) }),
+
   activeWork: () => request('/api/active-work'),
   sshHostsStatus: () => request('/api/infra/ssh-hosts'),
 

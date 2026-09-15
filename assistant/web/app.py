@@ -59,6 +59,7 @@ from .routes.kitchen import router as kitchen_router
 from .routes.media import router as media_router
 from .routes.openai_compat import router as openai_compat_router
 from .routes.personal_tasks import router as personal_tasks_router
+from .routes.pipelines import router as pipelines_router
 from .routes.review import router as review_router
 from .routes.schedule import router as schedule_router
 from .routes.tools import router as tools_router
@@ -124,6 +125,7 @@ def create_app(
     app.include_router(vision_router)
     app.include_router(command_center_router)
     app.include_router(cellular_router)
+    app.include_router(pipelines_router)
 
     if static_dir and Path(static_dir).is_dir():
         app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")

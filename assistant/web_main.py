@@ -5,7 +5,7 @@ import logging
 import uvicorn
 
 from .config import load_config
-from .core import business_db, cellular, db, media_scan, ui_content, vision
+from .core import business_db, cellular, db, media_scan, pipelines, ui_content, vision
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_cellular_context, build_home_assistant_context,
@@ -53,6 +53,7 @@ def main() -> None:
     # not behind a build_*_context flag, so the cameras table must exist unconditionally too.
     vision.init_vision_db(cfg.db_path)
     cellular.init_cellular_db(cfg.db_path)
+    pipelines.init_pipelines(cfg.db_path)
     ui_content.init_ui_content_db(cfg.db_path)
     _seed_cameras(cfg)
     for u in cfg.users:

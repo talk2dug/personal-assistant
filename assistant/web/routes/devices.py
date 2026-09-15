@@ -48,6 +48,23 @@ router = APIRouter(prefix="/api/devices", tags=["devices"])
 # now, which is meaningless after a restart. Devices re-report within seconds.
 DEVICE_STATE: dict[str, dict] = {}
 
+
+def _next_seq() -> int:
+    """A marker for "this is a NEW thing to show", as epoch milliseconds.
+
+    Deliberately not a counter. DEVICE_STATE is in-memory and empties on restart, so a
+    counter restarts at 1 -- while a kiosk page holds its last-seen value for its whole
+    lifetime, which on a wall display is weeks. After a restart the new value collides
+    with the one that page already has, it compares equal, and the overlay silently never
+    appears. The tool reports success, the server has the recipe staged, the screen just
+    never changes: exactly the bug this fixes, found when a recipe would not display in
+    the kitchen after a run of deploys.
+
+    Milliseconds since the epoch can never go backwards across a restart, so a stale
+    client value can never collide with a fresh one.
+    """
+    return int(time.time() * 1000)
+
 # A device that hasn't reported in this long is treated as gone rather than stuck in
 # whatever it was last doing.
 STALE_AFTER_SEC = 90
@@ -93,7 +110,7 @@ def _apply_pending_recipe_view(device_id: str, db_path: str) -> None:
     (the regular ~700ms poll, for a command issued elsewhere in the house)."""
     recipe = kitchen_db.pop_pending_recipe_view(db_path, device_id)
     if recipe is not None:
-        _set_state(device_id, recipe=recipe, recipe_seq=DEVICE_STATE.get(device_id, {}).get("recipe_seq", 0) + 1)
+        _set_state(device_id, recipe=recipe, recipe_seq=_next_seq())
 
 
 @router.post("/{device_id}/state")
@@ -254,8 +271,8 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
     # too, since the terminal that asked shouldn't have to wait for its own next poll.
     camera_view = vision.pop_pending_camera_view(cfg.db_path, user_id)
     if camera_view is not None:
-        next_seq = DEVICE_STATE.get(device_id, {}).get("camera_seq", 0) + 1
-        _set_state(device_id, camera=camera_view, camera_seq=next_seq)
+        # Same restart-collision problem as recipe_seq -- see _next_seq.
+        _set_state(device_id, camera=camera_view, camera_seq=_next_seq())
 
     # display_recipe's target is this same device_id when asked at the kiosk's own mic --
     # apply it now so it's in this same response, not just the target's next poll.

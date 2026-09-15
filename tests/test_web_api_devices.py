@@ -96,7 +96,9 @@ def test_turn_relays_show_camera_through_polled_state(cfg):
 
     polled = client.get("/api/devices/touch1?key=device-secret").json()
     assert polled["camera"] == {"key": "kitchen", "name": "Kitchen", "location": "kitchen"}
-    assert polled["camera_seq"] == 1
+    # A value, not a specific one: the old counter restarted at 1 after every server
+    # restart and silently collided with what a long-lived kiosk page already held.
+    assert polled["camera_seq"] > 0
 
 
 def test_turn_without_show_camera_leaves_no_camera_seq(cfg):
@@ -113,7 +115,7 @@ def test_turn_without_show_camera_leaves_no_camera_seq(cfg):
     assert "camera_seq" not in polled
 
 
-def test_camera_seq_increments_so_the_kiosk_can_detect_a_fresh_request(cfg):
+def test_camera_seq_changes_so_the_kiosk_can_detect_a_fresh_request(cfg):
     vision.add_camera(cfg.db_path, key="kitchen", name="Kitchen", url="http://192.168.0.135:8081/", location="kitchen")
     llm = FakeLLM([
         {"role": "assistant", "tool_calls": [
@@ -127,14 +129,18 @@ def test_camera_seq_increments_so_the_kiosk_can_detect_a_fresh_request(cfg):
     ])
     client = make_client(cfg, llm)
 
+    seqs = []
     for _ in range(2):
         client.post(
             "/api/devices/touch1/turn?key=device-secret",
             files={"audio": ("clip.webm", b"fake-audio-bytes", "audio/webm")},
         )
+        seqs.append(client.get("/api/devices/touch1?key=device-secret").json()["camera_seq"])
 
-    polled = client.get("/api/devices/touch1?key=device-secret").json()
-    assert polled["camera_seq"] == 2
+    # What the kiosk actually keys off: the value must DIFFER from the one it already
+    # holds. The specific numbers are not the contract -- a counter satisfied that too,
+    # right up until a restart reset it into a range clients still remembered.
+    assert seqs[1] != seqs[0]
 
 
 # --- display_recipe / pending_recipe_views relay ----------------------------------
@@ -183,7 +189,7 @@ def test_turn_at_the_kitchens_own_kiosk_shows_the_recipe_the_same_turn(cfg):
     assert resp.status_code == 200
 
     polled = client.get("/api/devices/laptop1?key=device-secret").json()
-    assert polled["recipe_seq"] == 1
+    assert polled["recipe_seq"] > 0
     assert polled["recipe"]["title"] == "Pancakes"
 
 
@@ -211,11 +217,11 @@ def test_display_recipe_from_a_different_device_reaches_the_target_on_its_next_p
     assert "recipe_seq" not in client.get("/api/devices/touch1?key=device-secret").json()
 
     polled = client.get("/api/devices/laptop1?key=device-secret").json()
-    assert polled["recipe_seq"] == 1
+    assert polled["recipe_seq"] > 0
     assert polled["recipe"]["title"] == "Chili"
 
 
-def test_recipe_seq_increments_so_the_kiosk_can_detect_a_fresh_display(cfg):
+def test_recipe_seq_changes_so_the_kiosk_can_detect_a_fresh_display(cfg):
     _confirm_presence(cfg, "laptop1")
     personal = _personal_for(cfg)
     recipe_id = kitchen_db.create_recipe(
@@ -228,11 +234,14 @@ def test_recipe_seq_increments_so_the_kiosk_can_detect_a_fresh_display(cfg):
     ])
     client = make_client(cfg, llm, transcript="show pancakes on the kitchen screen", personal=personal)
 
+    seqs = []
     for _ in range(2):
         client.post(
             "/api/devices/laptop1/turn?key=device-secret",
             files={"audio": ("clip.webm", b"fake-audio-bytes", "audio/webm")},
         )
+        seqs.append(client.get("/api/devices/laptop1?key=device-secret").json()["recipe_seq"])
 
-    polled = client.get("/api/devices/laptop1?key=device-secret").json()
-    assert polled["recipe_seq"] == 2
+    # Must differ from what the kiosk already holds -- the real failure was a second
+    # display producing a value the page had seen before, so the overlay never updated.
+    assert seqs[1] != seqs[0]

@@ -307,6 +307,10 @@ class GPUBridge:
             "loaded_models": loaded,
             "vram_used_gb": round(sum(m["vram_gb"] for m in loaded), 1),
             "vram_free_gb": round(self.free_vram_gb(), 1),
+            # Published rather than left for the caller to know: the Command Center's GPU
+            # panel had its own hardcoded 24 and was drawing "free of 24" against a 16GB
+            # card. One number, one owner.
+            "vram_total_gb": TOTAL_VRAM_GB,
             "queued": counts.get("queued", 0),
             "running": counts.get("running", 0),
             "done": counts.get("done", 0),

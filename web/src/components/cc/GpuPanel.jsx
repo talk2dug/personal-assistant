@@ -2,8 +2,6 @@ import { useAgentStatus } from '../../hooks/useAgentStatus'
 import { TINT } from '../../lib/cc'
 import Panel, { PanelEmpty, PanelError } from './Panel'
 
-const TOTAL_VRAM_GB = 24
-
 /**
  * The inference bridge: how much of the card is free, who is on it, and what is loaded.
  *
@@ -16,7 +14,11 @@ export default function GpuPanel({ onOpen }) {
   const gpu = status?.gpu
 
   const free = gpu?.vram_free_gb
-  const pct = free != null ? Math.max(0, Math.min(100, (free / TOTAL_VRAM_GB) * 100)) : 0
+  // The card's size comes from the bridge (gpu_bridge.TOTAL_VRAM_GB), never from a
+  // constant here -- this panel used to carry its own 24 and drew "free of 24" against
+  // a 16GB card.
+  const total = gpu?.vram_total_gb
+  const pct = free != null && total ? Math.max(0, Math.min(100, (free / total) * 100)) : 0
   const state = gpu ? (gpu.mode === 'reserved' ? 'RESERVED' : gpu.reachable ? 'AVAILABLE' : 'OFFLINE') : '—'
   const stateTint = gpu?.mode === 'reserved' ? TINT.warn : gpu?.reachable ? TINT.ok : TINT.warn
 
@@ -29,7 +31,7 @@ export default function GpuPanel({ onOpen }) {
         <>
           <div className="cc-figure-row">
             <span className="cc-figure">{free != null ? free.toFixed(1) : '—'}</span>
-            <span className="cc-figure-unit">GB VRAM free of {TOTAL_VRAM_GB}</span>
+            <span className="cc-figure-unit">GB VRAM free{total ? ` of ${total}` : ''}</span>
           </div>
 
           <div className="cc-meter">

@@ -479,6 +479,10 @@ def start(
                 # runs every 12 hours and the renders respect the same reservation
                 # everything else does -- but it is why the bridge has to reach it.
                 agents.run_art_director(db_path, llm, owner["id"], profile, bridge=bridge)
+                # The art cards written before the order was flipped are still in the
+                # queue as prose. Self-limiting: once a card has its picture it is never
+                # picked up again, so this costs one query a tick forever after.
+                agents.backfill_art_renders(db_path, owner["id"], bridge)
                 agents.run_store_manager(db_path, llm, owner["id"], profile)
                 agents.run_social_director(db_path, llm, owner["id"], profile)
 

@@ -551,6 +551,46 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
         return {"status": "error", "new": 0}
 
 
+def backfill_art_renders(db_path: str, owner_user_id: int, bridge, limit: int = 10) -> dict:
+    """Gives the art cards written under the old order their pictures.
+
+    run_art_director now renders before it files, but the cards already in the queue were
+    written the other way round and are still sitting there as prose. Rather than raise
+    them again -- which would lose their place and their age -- each one keeps its card
+    and gains the image its own brief describes.
+
+    One picture each, not three: these briefs were written with a single prompt, and
+    inventing two more directions here would be a different decision from the one he was
+    asked to make.
+    """
+    reserved = art_render.reserved_reason(bridge)
+    if reserved:
+        return {"status": "skipped", "rendered": 0,
+                "summary": f"simrig is reserved ({reserved})."}
+
+    pending = [i for i in business_db.list_review_items(db_path, owner_user_id, status="pending")
+               if i["kind"] == "art" and i["ref_table"] == "art_briefs" and not i["options"]]
+    rendered = 0
+    for item in pending[:limit]:
+        brief = next((b for b in business_db.list_art_briefs(db_path, owner_user_id, limit=200)
+                      if b["id"] == item["ref_id"]), None)
+        if brief is None or not brief.get("image_prompt"):
+            continue
+        options, failures = art_render.render_directions(
+            bridge,
+            [{"label": "As briefed", "rationale": brief.get("style_direction"),
+              "image_prompt": brief["image_prompt"]}],
+            aspect=brief.get("aspect"), negative=brief.get("negative_prompt"))
+        if not options or not options[0].get("media_path"):
+            logger.warning("art backfill could not render brief %s: %s", brief["id"], failures)
+            continue
+        business_db.add_review_options(db_path, owner_user_id, item["id"], options)
+        rendered += 1
+
+    return {"status": "ok", "rendered": rendered, "pending": len(pending),
+            "summary": f"Rendered {rendered} of {len(pending)} text-only art cards."}
+
+
 def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int = 3) -> dict:
     """Writes listing copy for approved concepts, and flags listings that aren't selling."""
     run_id = business_db.start_agent_run(db_path, "store_manager")

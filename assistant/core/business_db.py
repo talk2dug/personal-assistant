@@ -905,6 +905,40 @@ def create_review_item(
         return item_id
 
 
+def add_review_options(db_path: str, owner_user_id: int, item_id: int,
+                       options: list[dict]) -> int:
+    """Attaches choices to a card that is still pending, after the fact.
+
+    For work that was filed before it could be shown. The art director now renders its
+    directions before filing them, but the cards written under the old order are still
+    sitting in the queue as text with nothing to look at -- this is how they get their
+    pictures without being rewritten or raised again, which would lose their place and
+    their age.
+
+    Refuses a decided card: adding a choice to something already ruled on would change
+    what the record says he was choosing between.
+    """
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status FROM review_items WHERE id = ? AND owner_user_id = ?",
+            (item_id, owner_user_id)).fetchone()
+        if row is None or row["status"] != "pending":
+            return 0
+        start = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS n FROM review_options WHERE item_id = ?",
+            (item_id,)).fetchone()["n"]
+        for offset, option in enumerate(options):
+            conn.execute(
+                """INSERT INTO review_options (item_id, label, description, media_path, body, position)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (item_id, option.get("label") or f"Option {start + offset + 1}",
+                 option.get("description"), option.get("media_path"), option.get("body"),
+                 start + offset),
+            )
+        conn.commit()
+        return len(options)
+
+
 def refresh_review_item_text(
     db_path: str, owner_user_id: int, item_id: int, summary: str | None = None,
     detail: str | None = None,

@@ -459,6 +459,82 @@ def test_art_director_waits_rather_than_filing_text_while_the_card_is_reserved(d
     assert business_db.concepts_without(db_path, 1, "art_briefs", limit=3),         "the concept is untouched, so the next tick picks it up"
 
 
+def _old_style_art_card(db_path, prompt="a squirrel"):
+    """An art card as the previous order produced them: a brief, and prose to read."""
+    concept_id = _approved_concept(db_path)
+    brief_id = business_db.create_art_brief(
+        db_path, 1, title="Art", concept_id=concept_id, style_direction="bold",
+        image_prompt=prompt, aspect="1:1")
+    return business_db.create_review_item(
+        db_path, 1, "Art direction: thing", kind="art", summary="bold",
+        detail="Image prompt: " + prompt, source_agent="art_director",
+        ref_table="art_briefs", ref_id=brief_id)
+
+
+def test_backfill_gives_the_old_text_only_cards_their_pictures(db_path):
+    """They were filed before anything could be shown, and raising them again would lose
+    their place and their age -- so the card stays and gains the image its brief
+    describes."""
+    item_id = _old_style_art_card(db_path)
+    assert business_db.get_review_item(db_path, 1, item_id)["options"] == []
+
+    result = agents.backfill_art_renders(db_path, 1, FakeImageBridge())
+
+    assert result["rendered"] == 1
+    options = business_db.get_review_item(db_path, 1, item_id)["options"]
+    assert len(options) == 1 and options[0]["media_path"]
+    assert options[0]["body"] == "a squirrel", "the brief's own prompt, not a new one"
+
+
+def test_backfill_is_self_limiting(db_path):
+    """It runs on every pipeline tick forever, so a card that already has its picture must
+    never be rendered a second time."""
+    _old_style_art_card(db_path)
+    bridge = FakeImageBridge()
+    assert agents.backfill_art_renders(db_path, 1, bridge)["rendered"] == 1
+    assert agents.backfill_art_renders(db_path, 1, bridge)["rendered"] == 0
+    assert len(bridge.prompts) == 1
+
+
+def test_backfill_leaves_cards_from_the_new_flow_alone(db_path):
+    _approved_concept(db_path)
+    agents.run_art_director(db_path, FakeResearchLLM(json.dumps(THREE_DIRECTIONS)), 1,
+                            PROFILE, bridge=FakeImageBridge())
+    bridge = FakeImageBridge()
+    assert agents.backfill_art_renders(db_path, 1, bridge)["rendered"] == 0
+    assert bridge.prompts == []
+
+
+def test_backfill_respects_the_reservation(db_path):
+    _old_style_art_card(db_path)
+    bridge = FakeImageBridge(mode="reserved")
+    assert agents.backfill_art_renders(db_path, 1, bridge)["status"] == "skipped"
+    assert bridge.prompts == []
+
+
+def test_options_cannot_be_added_to_a_card_already_decided(db_path):
+    """Adding a choice after the fact would change what the record says he was choosing
+    between."""
+    item_id = _old_style_art_card(db_path)
+    business_db.decide_review_item(db_path, 1, item_id, "approved")
+    added = business_db.add_review_options(
+        db_path, 1, item_id, [{"label": "Late", "media_path": "x.png"}])
+    assert added == 0
+    assert business_db.get_review_item(db_path, 1, item_id)["options"] == []
+
+
+def test_added_options_do_not_collide_with_existing_ones(db_path):
+    concept_id = _approved_concept(db_path)
+    item_id = business_db.create_review_item(
+        db_path, 1, "Pick", kind="art", source_agent="art_director",
+        ref_table="product_concepts", ref_id=concept_id,
+        options=[{"label": "First"}])
+    business_db.add_review_options(db_path, 1, item_id, [{"label": "Second"}])
+    options = business_db.get_review_item(db_path, 1, item_id)["options"]
+    assert [o["label"] for o in options] == ["First", "Second"]
+    assert [o["position"] for o in options] == [0, 1]
+
+
 def test_store_manager_then_social_director_chain(db_path):
     business_db.create_product_concept(db_path, 1, "RVA Decal", "sticker", "4in vinyl")
     concept_id = business_db.list_product_concepts(db_path, 1)[0]["id"]

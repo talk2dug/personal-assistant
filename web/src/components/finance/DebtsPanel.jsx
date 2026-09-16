@@ -307,10 +307,27 @@ export default function DebtsPanel() {
         <div className="card debt-total-card">
           <div className="card-label">Total owed</div>
           <div className="card-amount">{formatMoney(summary.total_balance)}</div>
+          {/* The gap between this and the raw row sum is the double-counting the
+              reconcile queue exists to settle. Showing the total alone would leave the
+              two panels contradicting each other by thousands of dollars. */}
+          {summary.naive_row_sum > summary.total_balance && (
+            <div className="debt-total-caveat">
+              {summary.debt_count} rows = {summary.obligation_count} obligations ·
+              {' '}{formatMoney(summary.naive_row_sum - summary.total_balance)} of
+              {' '}apparent debt is the same account counted twice
+            </div>
+          )}
           {summary.unknown_balance_count > 0 && (
             <div className="debt-total-caveat">
               at least — {summary.unknown_balance_count} debt
               {summary.unknown_balance_count === 1 ? '' : 's'} with no balance yet
+            </div>
+          )}
+          {summary.recent_balance_floor != null
+            && summary.recent_balance_floor < summary.total_balance && (
+            <div className="debt-total-caveat">
+              only {formatMoney(summary.recent_balance_floor)} was seen in the last year —
+              the rest is history until you confirm it
             </div>
           )}
         </div>

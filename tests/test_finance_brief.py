@@ -291,19 +291,37 @@ class TestMergingRowsIntoOneObligation:
         second = personal_db.merge_debts(db_path, owner, keep, rest)
         assert second["merged"] == 0, "already dismissed rows are not touched again"
 
-    def test_a_merged_debt_leaves_the_totals(self, db_path, owner):
-        """The point of the whole exercise: the phantom money goes away."""
+    def test_the_total_is_protected_before_he_ever_merges_anything(self, db_path, owner):
+        """Grouping happens at read time, so the reported total is right the moment the
+        rows arrive -- he does not have to reconcile before the number stops lying. The
+        raw sum stays visible beside it so the gap is explainable."""
         from assistant.core import personal_db
         keep, *rest = self._three_rows(db_path, owner)
         for debt_id in (keep, *rest):
             personal_db.add_debt_observation(db_path, debt_id, observed_on="2026-09-01",
                                              balance_text="$1,087.92", balance=1087.92,
                                              source="email")
-        before = personal_db.debt_summary(db_path, owner)["total_balance"]
+        before = personal_db.debt_summary(db_path, owner)
+        assert before["total_balance"] == pytest.approx(1087.92, abs=0.01)
+        assert before["naive_row_sum"] == pytest.approx(3263.76, abs=0.01)
+        assert before["duplicate_group_count"] == 1
+        assert before["debt_count"] == 3 and before["obligation_count"] == 1
+
+    def test_merging_settles_the_rows_the_total_had_already_survived(self, db_path, owner):
+        """What merging changes is the underlying data, not the headline: the duplicate
+        group disappears, the raw sum stops disagreeing, and nothing is left to confirm."""
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        for debt_id in (keep, *rest):
+            personal_db.add_debt_observation(db_path, debt_id, observed_on="2026-09-01",
+                                             balance_text="$1,087.92", balance=1087.92,
+                                             source="email")
         personal_db.merge_debts(db_path, owner, keep, rest)
-        after = personal_db.debt_summary(db_path, owner)["total_balance"]
-        assert before == pytest.approx(3263.76, abs=0.01)
-        assert after == pytest.approx(1087.92, abs=0.01)
+        after = personal_db.debt_summary(db_path, owner)
+        assert after["total_balance"] == pytest.approx(1087.92, abs=0.01)
+        assert after["naive_row_sum"] == pytest.approx(1087.92, abs=0.01)
+        assert after["duplicate_group_count"] == 0
+        assert after["debt_count"] == 1
 
 
 class TestTheReconcileQueue:
@@ -342,3 +360,43 @@ class TestTheReconcileQueue:
                             lambda *a, **k: rows if k.get("tracking_state") == "tracked" else [])
         group = finance_brief.reconciliation("unused.db", 1, TODAY)["duplicates"][0]
         assert [r["creditor"] for r in group["rows"]] == ["New", "Old"]
+
+
+class TestTheHeadlineTheDashboardLeadsWith:
+    """The planner writes markdown; the dashboard shows one line of it as a sentence."""
+
+    def _one_thing(self, text):
+        from assistant.web.routes.finance import _one_thing
+        return _one_thing(text)
+
+    REPORT = (
+        "# Weekly Financial Review\n\n"
+        "## 1. THE ONE THING\n"
+        "Confirm the real balance on account **...7560** (three conflicting numbers)\n"
+        "before planning anything else.\n\n"
+        "## 2. What changed\n"
+        "Not this part.\n")
+
+    def test_it_takes_the_planners_own_heading_not_a_guess_at_which_line_matters(self):
+        assert self._one_thing(self.REPORT).startswith("Confirm the real balance")
+        assert "Not this part" not in self._one_thing(self.REPORT)
+
+    def test_a_wrapped_headline_is_joined_into_one_sentence(self):
+        assert "numbers) before planning" in self._one_thing(self.REPORT)
+
+    def test_markdown_emphasis_is_stripped(self):
+        """"account **...7560**" with the asterisks showing reads as a rendering bug,
+        not as emphasis."""
+        assert "**" not in self._one_thing(self.REPORT)
+        assert "...7560" in self._one_thing(self.REPORT)
+
+    def test_no_heading_returns_nothing_rather_than_a_wrong_sentence(self):
+        """Showing the wrong action as the headline is worse than showing none."""
+        assert self._one_thing("Some report that never names a top action.") is None
+
+    def test_an_empty_or_missing_report_is_handled(self):
+        assert self._one_thing(None) is None
+        assert self._one_thing("") is None
+
+    def test_a_heading_with_no_body_returns_nothing(self):
+        assert self._one_thing("## THE ONE THING\n\n## 2. Next section\n") is None

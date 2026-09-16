@@ -11,7 +11,7 @@ passed explicitly.
 import re
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS personal_projects (
@@ -668,6 +668,11 @@ DEBT_KINDS = (
 )
 DEBT_STATUSES = ("active", "paid_off", "in_dispute", "closed")
 DEBT_TRACKING_STATES = ("proposed", "tracked", "dismissed")
+
+# Older than this and a balance is history, not a balance. A year is generous for a
+# card and far too generous for a collection account; the point is only that nothing
+# reports a 2023 figure as today's.
+STALE_AFTER_DAYS = 365
 DEBT_SOURCES = ("email", "chat", "manual")
 
 # Corporate boilerplate that is never the distinguishing part of a creditor's name, so
@@ -1097,6 +1102,62 @@ def list_debts(
     return [attach_current_values(d, by_debt.get(d["id"], [])) for d in debts]
 
 
+def _age_days(observed_on: str | None, today: date) -> int | None:
+    if not observed_on:
+        return None
+    try:
+        return (today - date.fromisoformat(str(observed_on)[:10])).days
+    except ValueError:
+        return None
+
+
+def group_debts(debts: list[dict], today: date | None = None) -> dict:
+    """Debts collapsed to the obligations they actually represent.
+
+    Grouped on `account_last4`, never on the creditor name. Names change every time a debt
+    is sold or handed to a new agency -- that is exactly how one card became seven rows --
+    while the account number survives the handoff. Rows with no account number cannot be
+    grouped safely and are returned on their own rather than matched on a guess.
+
+    Nothing is merged or deleted here. A group is a claim that these rows LOOK like one
+    debt, with the evidence attached so the owner can confirm or reject it; deciding is
+    his, and acting on it is done through the debt tools he already has.
+    """
+    today = today or date.today()
+    grouped: dict[str, list[dict]] = {}
+    singles: list[dict] = []
+    for debt in debts:
+        last4 = (debt.get("account_last4") or "").strip()
+        if last4:
+            grouped.setdefault(last4, []).append(debt)
+        else:
+            singles.append(debt)
+
+    groups, ungrouped = [], list(singles)
+    for last4, rows in sorted(grouped.items()):
+        if len(rows) == 1:
+            ungrouped.append(rows[0])
+            continue
+        balances = sorted({r["current_balance"] for r in rows if r["current_balance"] is not None})
+        ages = [a for a in (_age_days(r.get("last_observed_on"), today) for r in rows) if a is not None]
+        groups.append({
+            "account_last4": last4,
+            "rows": rows,
+            "names": [r["creditor"] for r in rows],
+            # The balances the rows disagree about. One value means they agree and the
+            # group is almost certainly one debt; several means somebody's figure is out
+            # of date, and which one is current is the question to put to him.
+            "distinct_balances": balances,
+            "newest_age_days": min(ages) if ages else None,
+            # What summing the rows naively would have added, versus counting the group
+            # once. The difference is the size of the mistake being avoided.
+            "naive_sum": round(sum(r["current_balance"] or 0 for r in rows), 2),
+            "likely_balance": balances[-1] if balances else None,
+        })
+
+    return {"groups": groups, "ungrouped": ungrouped}
+
+
 def suggest_payoff_orders(debts: list[dict]) -> dict:
     """Two legitimate payoff strategies over the same debts, as SUGGESTIONS.
 
@@ -1153,9 +1214,30 @@ def debt_summary(db_path: str, owner_user_id: int) -> dict:
         (d for d in active if d["estimated_monthly_interest"] is not None),
         key=lambda d: d["estimated_monthly_interest"], default=None,
     )
+    # The rows are not the obligations. The mail sweep files one per creditor NAME, so a
+    # card sold to a collector and serviced by an agency is three rows for one debt, and
+    # summing them invents money he does not owe -- $6,514 of it when this was written.
+    # Every caller of this function reports a debt total to him, including the chat tool,
+    # so the corrected figure belongs here rather than in one screen that knows better.
+    grouping = group_debts(active)
+    obligations = (
+        [(g["likely_balance"], g["newest_age_days"]) for g in grouping["groups"]]
+        + [(r["current_balance"], _age_days(r.get("last_observed_on"), date.today()))
+           for r in grouping["ungrouped"]])
+    counted_once = round(sum(b for b, _ in obligations if b is not None), 2)
+    recent = round(sum(b for b, age in obligations
+                       if b is not None and age is not None and age <= STALE_AFTER_DAYS), 2)
+
     return {
         "debt_count": len(active),
-        "total_balance": round(sum(balances), 2) if balances else 0.0,
+        # Counting each obligation once, not each row. `naive_row_sum` keeps the old
+        # number visible so the gap is explainable rather than looking like a bug.
+        "total_balance": counted_once,
+        "naive_row_sum": round(sum(balances), 2) if balances else 0.0,
+        "obligation_count": len(obligations),
+        "duplicate_group_count": len(grouping["groups"]),
+        # The only figure safe to plan a payoff against: seen within the last year.
+        "recent_balance_floor": recent,
         "known_balance_count": len(balances),
         "unknown_balance_count": len(active) - len(balances),
         "total_minimum_payment": round(sum(minimums), 2) if minimums else 0.0,

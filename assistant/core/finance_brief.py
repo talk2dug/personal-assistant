@@ -28,6 +28,10 @@ import logging
 from datetime import date
 
 from . import db, finance, personal_db
+# Grouping lives with the debts it groups, so debt_summary and the chat tool
+# report the same corrected total this brief does -- one source of truth for
+# "how much is actually owed".
+from .personal_db import _age_days, group_debts  # noqa: F401  (re-exported)
 
 logger = logging.getLogger(__name__)
 
@@ -39,62 +43,6 @@ STALE_AFTER_DAYS = 365
 # How far ahead to expand recurring bills. Long enough to cover the next two paycheques
 # and the bills between them, which is the window a plan is actually made in.
 HORIZON_DAYS = 45
-
-
-def _age_days(observed_on: str | None, today: date) -> int | None:
-    if not observed_on:
-        return None
-    try:
-        return (today - date.fromisoformat(str(observed_on)[:10])).days
-    except ValueError:
-        return None
-
-
-def group_debts(debts: list[dict], today: date | None = None) -> dict:
-    """Debts collapsed to the obligations they actually represent.
-
-    Grouped on `account_last4`, never on the creditor name. Names change every time a debt
-    is sold or handed to a new agency -- that is exactly how one card became seven rows --
-    while the account number survives the handoff. Rows with no account number cannot be
-    grouped safely and are returned on their own rather than matched on a guess.
-
-    Nothing is merged or deleted here. A group is a claim that these rows LOOK like one
-    debt, with the evidence attached so the owner can confirm or reject it; deciding is
-    his, and acting on it is done through the debt tools he already has.
-    """
-    today = today or date.today()
-    grouped: dict[str, list[dict]] = {}
-    singles: list[dict] = []
-    for debt in debts:
-        last4 = (debt.get("account_last4") or "").strip()
-        if last4:
-            grouped.setdefault(last4, []).append(debt)
-        else:
-            singles.append(debt)
-
-    groups, ungrouped = [], list(singles)
-    for last4, rows in sorted(grouped.items()):
-        if len(rows) == 1:
-            ungrouped.append(rows[0])
-            continue
-        balances = sorted({r["current_balance"] for r in rows if r["current_balance"] is not None})
-        ages = [a for a in (_age_days(r.get("last_observed_on"), today) for r in rows) if a is not None]
-        groups.append({
-            "account_last4": last4,
-            "rows": rows,
-            "names": [r["creditor"] for r in rows],
-            # The balances the rows disagree about. One value means they agree and the
-            # group is almost certainly one debt; several means somebody's figure is out
-            # of date, and which one is current is the question to put to him.
-            "distinct_balances": balances,
-            "newest_age_days": min(ages) if ages else None,
-            # What summing the rows naively would have added, versus counting the group
-            # once. The difference is the size of the mistake being avoided.
-            "naive_sum": round(sum(r["current_balance"] or 0 for r in rows), 2),
-            "likely_balance": balances[-1] if balances else None,
-        })
-
-    return {"groups": groups, "ungrouped": ungrouped}
 
 
 def debt_picture(db_path: str, owner_user_id: int, today: date | None = None) -> dict:

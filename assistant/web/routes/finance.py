@@ -1,6 +1,7 @@
 """Finance dashboard section: balances/bills/income (read from the Era cache tables,
 refreshed periodically by scheduler.py — not live per-request), savings goals CRUD,
 and the calendar/projection views built from finance.py's pure computation."""
+import re
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, Request
@@ -71,9 +72,20 @@ def _one_thing(output: str | None) -> str | None:
                     break
                 if following.strip():
                     body.append(following.strip())
-            text = " ".join(body).strip()
-            return text or None
+            return _plain(" ".join(body)) or None
     return None
+
+
+# The planner writes markdown -- it is read as a document in the Office too -- but the
+# dashboard shows this one line as a sentence, and "account **...7560**" with the
+# asterisks showing reads as a rendering bug rather than emphasis. Stripped here rather
+# than in the page so there is exactly one place that knows the report is markdown.
+_EMPHASIS = re.compile(r"\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|__(.+?)__")
+
+
+def _plain(text: str) -> str:
+    text = _EMPHASIS.sub(lambda m: next(g for g in m.groups() if g is not None), text)
+    return " ".join(text.split()).strip()
 
 
 @router.get("/summary")

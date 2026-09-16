@@ -17,12 +17,22 @@ class CalDAVClient:
     def _calendar(self, calendar_url: str) -> caldav.Calendar:
         return caldav.Calendar(client=self._client, url=calendar_url)
 
-    def create_event(self, calendar_url: str, summary: str, start: datetime, duration_minutes: int = 30) -> str:
+    def create_event(self, calendar_url: str, summary: str, start: datetime,
+                     duration_minutes: int = 30, description: str | None = None) -> str:
         """Creates an event, returns the CalDAV-assigned UID (the server/library
-        generates its own UID regardless of what's requested, confirmed by testing)."""
+        generates its own UID regardless of what's requested, confirmed by testing).
+
+        `description` becomes the event's notes field, which is the part he actually reads
+        on his phone when he is standing somewhere trying to make a call. An event that is
+        only a title sends him back to a laptop to find the phone number, which defeats
+        the point of putting it in the calendar at all.
+        """
         cal = self._calendar(calendar_url)
         end = start + timedelta(minutes=duration_minutes)
-        event = cal.add_event(dtstart=start, dtend=end, summary=summary)
+        fields = {"dtstart": start, "dtend": end, "summary": summary}
+        if (description or "").strip():
+            fields["description"] = description.strip()
+        event = cal.add_event(**fields)
         return event.id
 
     def delete_event(self, calendar_url: str, uid: str, near: datetime, window_hours: int = 2) -> bool:

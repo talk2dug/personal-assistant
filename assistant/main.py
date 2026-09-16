@@ -158,6 +158,9 @@ def main() -> None:
         # The art director renders each direction before filing it for approval, so it
         # needs the same queue everything else draws the card through.
         bridge=bridge,
+        # His own number, so the daily rhythm can text him rather than push. The first
+        # allowed number is the owner's; without one the nudges fall back to Telegram.
+        rhythm_sms_number=(cfg.sms_allowed_numbers or [None])[0],
         # Location watching needs HA for GPS and the other contexts so a routine's
         # prompt has the same tools a chat turn would.
         home_assistant=home_assistant, phone=phone, mail=mail, obsidian=obsidian,

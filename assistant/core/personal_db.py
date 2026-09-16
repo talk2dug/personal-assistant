@@ -40,6 +40,104 @@ CREATE TABLE IF NOT EXISTS personal_tasks (
     updated_at TEXT NOT NULL
 );
 
+-- What a task needs in order to actually be DONE: the vet's phone number, the address to
+-- drive to, the name of the person who has the records. His words: "I need a place that
+-- is easy for me to see all the info I need for that task."
+--
+-- Typed rather than one free-text notes blob, because the type is what makes it useful on
+-- a phone: a phone number should be tappable and an address should open in maps, and
+-- neither can happen if it is a sentence in a paragraph. `kind` is deliberately short --
+-- adding a sixth kind means teaching the UI to render it, so the list stays small.
+-- The shape of a day, and the things that keep a life in balance.
+--
+-- Two kinds in one table because they need identical machinery -- a schedule, a log, a
+-- streak, a nudge -- and differ only in what "on time" means:
+--
+--   anchor  has a clock. Feed Ghost at 06:45, leave for work at 07:30. Missing it is
+--           measured in minutes and the nudge has to arrive BEFORE it.
+--   habit   has a rate. Ride the bike four times a week, see Nadia twice. Missing it is
+--           measured in days, and the nudge is "this is slipping", not "you are late".
+--
+-- Splitting them into two tables would mean writing the log, the streak and the plan
+-- twice; keeping the distinction as a column keeps one of each.
+CREATE TABLE IF NOT EXISTS day_rhythm (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('anchor', 'habit')),
+    -- Why it matters, so the plan can say "you have not done anything for yourself in
+    -- four days" rather than listing six unrelated misses.
+    category TEXT NOT NULL DEFAULT 'other' CHECK (category IN (
+        'wake', 'work', 'care', 'health', 'relationship', 'project', 'fun', 'wind_down', 'other')),
+    at_time TEXT,               -- 'HH:MM' local, anchors only
+    days TEXT,                  -- '0,1,2,3,4', Monday=0. NULL means every day.
+    target_per_week INTEGER,    -- habits only
+    -- How long before at_time to text him. 0 means "at the time"; NULL means never nudge,
+    -- which is how something gets tracked without being chased.
+    lead_minutes INTEGER,
+    -- A thing that cannot slip without consequence: leaving for work, a dose of medicine.
+    -- These are the ones that still text him when he has asked for a quiet day.
+    hard INTEGER NOT NULL DEFAULT 0,
+    notes TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_day_rhythm_owner ON day_rhythm(owner_user_id, enabled);
+
+-- Did it happen. One row per item per day at most, so a double-confirm cannot inflate a
+-- streak, and a skip is recorded as a real answer rather than as silence -- "I skipped the
+-- bike because I was at Nadia's" is information, an empty row is not.
+CREATE TABLE IF NOT EXISTS rhythm_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rhythm_id INTEGER NOT NULL REFERENCES day_rhythm(id) ON DELETE CASCADE,
+    on_date TEXT NOT NULL,      -- local YYYY-MM-DD
+    state TEXT NOT NULL CHECK (state IN ('done', 'skipped')),
+    at TEXT NOT NULL,
+    note TEXT,
+    -- Where the answer came from: a text reply, the dashboard, or Jarvis inferring it.
+    source TEXT NOT NULL DEFAULT 'chat',
+    UNIQUE (rhythm_id, on_date)
+);
+
+-- What has already been texted, so a nudge fires once rather than on every scheduler tick.
+-- Same nullable-marker discipline as reminders.sent_at, but keyed per day because the
+-- rhythm itself repeats.
+CREATE TABLE IF NOT EXISTS rhythm_nudges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rhythm_id INTEGER NOT NULL REFERENCES day_rhythm(id) ON DELETE CASCADE,
+    on_date TEXT NOT NULL,
+    kind TEXT NOT NULL,         -- 'lead' | 'due' | 'slipping'
+    sent_at TEXT NOT NULL,
+    UNIQUE (rhythm_id, on_date, kind)
+);
+
+CREATE TABLE IF NOT EXISTS task_details (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('phone', 'address', 'person', 'link', 'note')),
+    label TEXT,
+    value TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_details_task ON task_details(task_id, position);
+
+-- "I can't book the trip until Ghost has a vet and a boarding place." A task that is
+-- waiting on another one is not a task he can pick up today, and showing it to him as
+-- though it were is how a list stops being trustworthy.
+--
+-- Many-to-many because the real case is plural: booking the flight is blocked by BOTH the
+-- vet records and the boarding facility, and collapsing that to one blocker would clear
+-- the flight the moment either finished.
+CREATE TABLE IF NOT EXISTS task_blockers (
+    task_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    blocked_by_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, blocked_by_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_blockers_by ON task_blockers(blocked_by_id);
+
 -- Errands with real legwork behind them ("find me a doctor", "look into X") -- delegated
 -- rather than answered inline, and picked up by a background job (personal_agents.py).
 CREATE TABLE IF NOT EXISTS personal_research (
@@ -383,6 +481,185 @@ def update_task(db_path: str, owner_user_id: int, task_id: int, **fields) -> boo
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- what a task needs in order to be done ---------------------------------------
+
+DETAIL_KINDS = ("phone", "address", "person", "link", "note")
+
+
+def add_task_detail(db_path: str, task_id: int, kind: str, value: str,
+                    label: str | None = None) -> int:
+    """A phone number, address, name, link or note attached to a task.
+
+    Typed so the UI can make it usable: a phone number becomes tappable and an address
+    opens in maps. That is the whole reason this is not one free-text notes field --
+    a number buried in a paragraph is one he has to retype into his phone.
+    """
+    if kind not in DETAIL_KINDS:
+        raise ValueError(f"detail kind must be one of {DETAIL_KINDS}")
+    if not (value or "").strip():
+        raise ValueError("a detail needs a value")
+    with closing(_connect(db_path)) as conn:
+        position = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS n FROM task_details WHERE task_id = ?",
+            (task_id,)).fetchone()["n"]
+        cur = conn.execute(
+            """INSERT INTO task_details (task_id, kind, label, value, position, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (task_id, kind, (label or "").strip() or None, value.strip(), position, _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_task_details(db_path: str, task_ids: list[int]) -> dict:
+    if not task_ids:
+        return {}
+    marks = ",".join("?" for _ in task_ids)
+    out: dict[int, list[dict]] = {}
+    with closing(_connect(db_path)) as conn:
+        for row in conn.execute(
+                f"SELECT * FROM task_details WHERE task_id IN ({marks}) ORDER BY task_id, position",
+                task_ids):
+            out.setdefault(row["task_id"], []).append(dict(row))
+    return out
+
+
+def delete_task_detail(db_path: str, detail_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute("DELETE FROM task_details WHERE id = ?", (detail_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def block_task(db_path: str, task_id: int, blocked_by_id: int) -> bool:
+    """Records that one task cannot start until another finishes.
+
+    Refuses to block a task on itself, and refuses a cycle: A waiting on B waiting on A
+    means neither is ever offered again, and the list silently loses two tasks with
+    nothing on screen to explain why.
+    """
+    if task_id == blocked_by_id:
+        raise ValueError("a task cannot block itself")
+    if _would_cycle(db_path, task_id, blocked_by_id):
+        raise ValueError("that would make the two tasks wait on each other")
+    with closing(_connect(db_path)) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO task_blockers (task_id, blocked_by_id, created_at) VALUES (?, ?, ?)",
+                (task_id, blocked_by_id, _now()))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def _would_cycle(db_path: str, task_id: int, blocked_by_id: int) -> bool:
+    """True if blocked_by_id already waits on task_id, directly or down a chain."""
+    with closing(_connect(db_path)) as conn:
+        seen, frontier = set(), [blocked_by_id]
+        while frontier:
+            current = frontier.pop()
+            if current == task_id:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            frontier.extend(r["blocked_by_id"] for r in conn.execute(
+                "SELECT blocked_by_id FROM task_blockers WHERE task_id = ?", (current,)))
+    return False
+
+
+def unblock_task(db_path: str, task_id: int, blocked_by_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "DELETE FROM task_blockers WHERE task_id = ? AND blocked_by_id = ?",
+            (task_id, blocked_by_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# --- the daily rhythm ------------------------------------------------------------
+
+RHYTHM_CATEGORIES = ("wake", "work", "care", "health", "relationship", "project",
+                     "fun", "wind_down", "other")
+
+
+def add_rhythm(db_path: str, owner_user_id: int, name: str, kind: str,
+               category: str = "other", at_time: str | None = None,
+               days: str | None = None, target_per_week: int | None = None,
+               lead_minutes: int | None = None, hard: bool = False,
+               notes: str | None = None) -> int:
+    if kind not in ("anchor", "habit"):
+        raise ValueError("kind must be 'anchor' or 'habit'")
+    if category not in RHYTHM_CATEGORIES:
+        raise ValueError(f"category must be one of {RHYTHM_CATEGORIES}")
+    if kind == "anchor" and not at_time:
+        raise ValueError("an anchor needs a time of day")
+    if kind == "habit" and not target_per_week:
+        raise ValueError("a habit needs a target per week")
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO day_rhythm (owner_user_id, name, kind, category, at_time, days,
+                                       target_per_week, lead_minutes, hard, notes,
+                                       created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, name.strip(), kind, category, at_time, days, target_per_week,
+             lead_minutes, 1 if hard else 0, notes, _now(), _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_rhythm(db_path: str, owner_user_id: int, include_disabled: bool = False):
+    query = "SELECT * FROM day_rhythm WHERE owner_user_id = ?"
+    if not include_disabled:
+        query += " AND enabled = 1"
+    query += " ORDER BY kind, at_time IS NULL, at_time, name"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, (owner_user_id,)))
+
+
+def update_rhythm(db_path: str, owner_user_id: int, rhythm_id: int, **fields) -> bool:
+    allowed = {k: v for k, v in fields.items() if k in (
+        "name", "category", "at_time", "days", "target_per_week", "lead_minutes",
+        "hard", "notes", "enabled") and v is not None}
+    if not allowed:
+        return False
+    if "category" in allowed and allowed["category"] not in RHYTHM_CATEGORIES:
+        raise ValueError(f"category must be one of {RHYTHM_CATEGORIES}")
+    if "hard" in allowed:
+        allowed["hard"] = 1 if allowed["hard"] else 0
+    if "enabled" in allowed:
+        allowed["enabled"] = 1 if allowed["enabled"] else 0
+    sets = ", ".join(f"{k} = ?" for k in allowed)
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            f"UPDATE day_rhythm SET {sets}, updated_at = ? WHERE id = ? AND owner_user_id = ?",
+            [*allowed.values(), _now(), rhythm_id, owner_user_id])
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def log_rhythm(db_path: str, rhythm_id: int, on_date: str, state: str = "done",
+               note: str | None = None, source: str = "chat") -> bool:
+    """Records that something happened, or deliberately did not.
+
+    A skip is stored as an answer rather than left as an absence. "Skipped the bike, was
+    away that night" is a fact about his week; a blank row would make that week look
+    identical to one where he ignored the question entirely.
+    """
+    if state not in ("done", "skipped"):
+        raise ValueError("state must be 'done' or 'skipped'")
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO rhythm_log (rhythm_id, on_date, state, at, note, source)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (rhythm_id, on_date) DO UPDATE SET
+                   state = excluded.state, at = excluded.at,
+                   note = excluded.note, source = excluded.source""",
+            (rhythm_id, on_date, state, _now(), note, source))
+        conn.commit()
+        return True
 
 
 def due_tasks(db_path: str, as_of: str | None = None):

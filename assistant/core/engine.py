@@ -1143,6 +1143,16 @@ TOOLS = [
                         "enum": ["private", "shared"],
                         "description": "'private' if only for the requesting user, 'shared' if for both users.",
                     },
+                    "task_id": {
+                        "type": "integer",
+                        "description": (
+                            "If this reminder is about an existing task, its id. The "
+                            "task's phone numbers, addresses, people and blockers are "
+                            "copied into the calendar event's notes, so he has what he "
+                            "needs on his phone instead of only a title. Always pass "
+                            "this when a task exists for the thing being reminded about."
+                        ),
+                    },
                 },
                 "required": ["text", "due_at", "scope"],
             },
@@ -1640,8 +1650,21 @@ def _dispatch_tool_call(
             # works via Telegram/the scheduler even if the Apple Calendar push fails.
             try:
                 calendar_url = calendar.calendar_for_scope(arguments["scope"])
+                # If this reminder is about a task, the task's phone numbers, addresses
+                # and blockers ride along in the event's notes. His phone is where he
+                # looks when he is out, and a title-only event sends him back to a laptop
+                # to find the number -- which is the whole reason it is in the calendar.
+                note = None
+                if arguments.get("task_id"):
+                    from . import routine
+                    try:
+                        note = routine.task_note_for(db_path, int(arguments["task_id"]),
+                                                     requesting_user_id) or None
+                    except Exception:
+                        note = None
                 uid = calendar.client.create_event(
-                    calendar_url, summary=arguments["text"], start=datetime.fromisoformat(due_at_utc)
+                    calendar_url, summary=arguments["text"],
+                    start=datetime.fromisoformat(due_at_utc), description=note,
                 )
                 db.set_caldav_link(db_path, reminder_id, uid, calendar_url)
             except Exception:

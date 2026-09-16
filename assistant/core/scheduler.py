@@ -77,6 +77,7 @@ def start(
     github_watchdog_interval_seconds: int = 180,
     local_llm=None, local_llm_keepalive_interval_seconds: int = 600,
     staff_assignment_timeout_seconds: int = 10800, bridge=None,
+    rhythm_nudge_interval_seconds: int = 60, rhythm_sms_number: str | None = None,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -500,6 +501,23 @@ def start(
                 _guarded("digest", _digest_tick), "cron", hour=business_intervals["digest_hour"], minute=0,
                 timezone=tz_name, id="business_digest",
             )
+
+        # The daily rhythm: anchors he asked to be reminded about by text. Ticks every
+        # minute because a lead time is a window, not an instant -- "leave in 15 minutes"
+        # sent at minute 3 of that window is still useful, sent after it is a reproach.
+        # The work is one indexed query when nothing is due, which is almost always.
+        def _rhythm_tick():
+            from . import routine
+            sent = routine.send_due_nudges(
+                db_path, owner["id"], sms_number=rhythm_sms_number,
+                notify=lambda text: notify(owner["telegram_chat_id"], text),
+                tz_name=tz_name)
+            for nudge in sent:
+                logger.info("rhythm nudge: %s (delivered=%s)", nudge["name"], nudge["delivered"])
+
+        scheduler.add_job(
+            _guarded_simple("rhythm", _rhythm_tick), "interval",
+            seconds=rhythm_nudge_interval_seconds, id="rhythm_nudges")
 
         # The research queue runs regardless of owner lookup — it's keyed on queued rows.
         # It starts a minute after boot rather than waiting out a full interval: an

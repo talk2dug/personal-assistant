@@ -282,6 +282,126 @@ PERSONAL_TOOLS = [
     # Finance page, never by just telling Jarvis. None of these guess numbers on his
     # behalf; they only ever record what he explicitly says.
     {"type": "function", "function": {
+        "name": "get_credit_picture",
+        "description": (
+            "Where his credit stands right now: score history, the latest report and its "
+            "tradelines, revolving utilisation and what it would cost to get under 30% and "
+            "10%, derogatory marks with the date each ages off on its own, every dispute in "
+            "flight with its deadline and whether the bureau has blown it, and the credit "
+            "lines suggested so far. Call this before answering anything about his credit — "
+            "it is exact, and a score quoted from memory is worse than none."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "add_credit_report",
+        "description": (
+            "Record a credit report he has pulled or uploaded. Create this first, then add "
+            "each account on it with add_tradeline. Score models differ by 50+ points, so "
+            "record which one it is when the report says."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "bureau": {"type": "string", "enum": ["experian", "equifax", "transunion", "other"]},
+            "pulled_on": {"type": "string", "description": "Local ISO date the report is dated."},
+            "score": {"type": "integer"},
+            "score_model": {"type": "string", "description": "e.g. 'FICO 8', 'VantageScore 3.0'."},
+            "source": {"type": "string", "description": "e.g. annualcreditreport.com."},
+            "notes": {"type": "string"},
+        }, "required": ["bureau", "pulled_on"]},
+    }},
+    {"type": "function", "function": {
+        "name": "add_tradeline",
+        "description": (
+            "Add one account from a credit report. A tradeline is what the BUREAU says — a "
+            "claim about him that may be wrong, stale or not his — which is not the same as "
+            "what he owes, so never merge these with his debts. credit_limit matters more "
+            "than it looks: utilisation is about 30% of the score."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "report_id": {"type": "integer"},
+            "creditor": {"type": "string"},
+            "account_last4": {"type": "string"},
+            "kind": {"type": "string", "enum": ["credit_card", "loan", "student_loan",
+                                                "auto", "mortgage", "medical",
+                                                "collections", "other"]},
+            "status": {"type": "string", "description": "As the report words it."},
+            "balance": {"type": "number"},
+            "credit_limit": {"type": "number"},
+            "opened_on": {"type": "string"},
+            "past_due": {"type": "number"},
+            "derogatory": {"type": "string", "description": (
+                "e.g. 'collection', 'charge-off', 'late_30'. Leave empty for a clean account.")},
+            "derogatory_on": {"type": "string", "description": (
+                "Date of first delinquency. This is what decides when it ages off, so "
+                "capture it whenever the report shows it.")},
+            "notes": {"type": "string"},
+        }, "required": ["report_id", "creditor"]},
+    }},
+    {"type": "function", "function": {
+        "name": "suggest_credit_line",
+        "description": (
+            "Record a card or loan worth considering for HIS situation, with why. This is a "
+            "suggestion he reviews, never an application — a hard inquiry and a new account "
+            "move his score in both directions, so he decides. Say plainly in `why` which "
+            "input it improves and what it costs him."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "kind": {"type": "string", "enum": ["card", "loan", "secured_card",
+                                                "credit_builder", "other"]},
+            "issuer": {"type": "string"},
+            "why": {"type": "string", "description": "What it does for his file, specifically."},
+            "reward": {"type": "string", "description": "Cashback, points or miles."},
+            "annual_fee": {"type": "number"},
+            "est_approval": {"type": "string", "enum": ["likely", "borderline", "unlikely"]},
+            "priority": {"type": "integer"},
+        }, "required": ["name", "why"]},
+    }},
+    {"type": "function", "function": {
+        "name": "update_credit_recommendation",
+        "description": (
+            "Move a suggested credit line along — he planned it, applied, was approved or "
+            "declined, or wants it dismissed. Also how you attach the task once he turns one "
+            "into something to do."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "rec_id": {"type": "integer"},
+            "status": {"type": "string", "enum": ["suggested", "planned", "applied",
+                                                  "approved", "declined", "dismissed"]},
+            "task_id": {"type": "integer"},
+            "notes": {"type": "string"},
+            "priority": {"type": "integer"},
+        }, "required": ["rec_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "record_letter_delivered",
+        "description": (
+            "Record that USPS confirmed a dispute letter was delivered. This is what starts "
+            "the statutory clock for real — the bureau's 30 days run from RECEIPT, not from "
+            "posting — so the deadline only becomes defensible once this is set. Call it "
+            "whenever tracking shows delivery."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "letter_id": {"type": "integer"},
+            "delivered_on": {"type": "string", "description": "Local ISO date."},
+        }, "required": ["letter_id", "delivered_on"]},
+    }},
+    {"type": "function", "function": {
+        "name": "record_dispute_response",
+        "description": (
+            "Record that a bureau answered a dispute, and what it said. Until this is set "
+            "the letter reads as unanswered, which is deliberate: a dispute past its window "
+            "with no response is leverage, and one that was answered but never recorded "
+            "looks exactly the same until somebody checks."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "letter_id": {"type": "integer"},
+            "summary": {"type": "string", "description": (
+                "What they said — verified, deleted, updated, or rejected as frivolous.")},
+            "received_on": {"type": "string", "description": "Local ISO date. Omit for today."},
+        }, "required": ["letter_id", "summary"]},
+    }},
+    {"type": "function", "function": {
         "name": "list_budgets",
         "description": "List the owner's monthly spending-category budget limits.",
         "parameters": {"type": "object", "properties": {}, "required": []},
@@ -886,6 +1006,57 @@ class PersonalClient:
 
         if name == "track_dispute_letter":
             return self._track_dispute_letter(arguments)
+
+        if name == "get_credit_picture":
+            from . import credit
+            return credit.picture(db_path, owner)
+        if name == "add_credit_report":
+            try:
+                report_id = personal_db.add_credit_report(
+                    db_path, owner, arguments["bureau"], arguments["pulled_on"],
+                    score=arguments.get("score"), score_model=arguments.get("score_model"),
+                    source=arguments.get("source"), notes=arguments.get("notes"))
+            except ValueError as e:
+                return {"error": str(e)}
+            return {"ok": True, "report_id": report_id}
+        if name == "add_tradeline":
+            fields = {k: v for k, v in arguments.items()
+                      if k not in ("report_id", "creditor")}
+            try:
+                tradeline_id = personal_db.add_tradeline(
+                    db_path, arguments["report_id"], arguments["creditor"], **fields)
+            except ValueError as e:
+                return {"error": str(e)}
+            return {"ok": True, "tradeline_id": tradeline_id}
+        if name == "suggest_credit_line":
+            rec_id = personal_db.add_credit_recommendation(
+                db_path, owner, arguments["name"], arguments["why"],
+                kind=arguments.get("kind") or "card",
+                issuer=arguments.get("issuer"), reward=arguments.get("reward"),
+                annual_fee=arguments.get("annual_fee"),
+                est_approval=arguments.get("est_approval"),
+                priority=arguments.get("priority"))
+            return {"ok": True, "recommendation_id": rec_id}
+        if name == "update_credit_recommendation":
+            fields = {k: v for k, v in arguments.items() if k != "rec_id"}
+            ok = personal_db.update_credit_recommendation(
+                db_path, owner, arguments["rec_id"], **fields)
+            return {"ok": ok} if ok else {"error": "no such recommendation, or nothing to change"}
+        if name == "record_letter_delivered":
+            from . import credit
+            deadline = credit.response_deadline(None, arguments["delivered_on"])
+            ok = personal_db.record_letter_delivered(
+                db_path, owner, arguments["letter_id"], arguments["delivered_on"],
+                response_due_at=deadline["due_on"] if deadline else None)
+            if not ok:
+                return {"error": "no such letter"}
+            return {"ok": True, "response_due_at": deadline["due_on"] if deadline else None,
+                    "note": "The bureau's 30 days now run from this date."}
+        if name == "record_dispute_response":
+            ok = personal_db.record_dispute_response(
+                db_path, owner, arguments["letter_id"], arguments["summary"],
+                received_on=arguments.get("received_on"))
+            return {"ok": ok} if ok else {"error": "no such letter"}
 
         if name == "list_budgets":
             return {"budgets": db.list_budgets(db_path, owner)}

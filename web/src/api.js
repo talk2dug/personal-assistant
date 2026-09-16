@@ -307,6 +307,15 @@ export const api = {
     request(`/api/day/rhythm/${rhythmId}/log${onDate ? `?on_date=${onDate}` : ''}`,
             { method: 'DELETE' }),
 
+  // The whole credit picture in one call: the answers are related -- a dispute deadline
+  // changes what is worth doing this week -- and fetching them apart lets the page show
+  // something that disagrees with itself mid-load.
+  creditPicture: () => request('/api/credit/picture'),
+  updateRecommendation: (id, patch) =>
+    request(`/api/credit/recommendations/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  recommendationToTask: (id) =>
+    request(`/api/credit/recommendations/${id}/task`, { method: 'POST' }),
+
   financeReconcile: () => request('/api/finance/reconcile'),
   financePlanner: () => request('/api/finance/planner'),
   mergeDebts: (keepId, mergeIds, note) =>

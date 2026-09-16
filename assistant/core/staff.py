@@ -352,6 +352,12 @@ FINANCE_SIGNALS = ("financial planner", "personal finance", "personal finances",
                    "budgeting", "cash flow", "cashflow", "savings", "debt", "net worth",
                    "spending", "bills", "financial planning")
 
+# Also read-only. It hands over his score history, report, disputes and their deadlines to
+# READ; drafting a letter or applying for a card remains something he confirms himself.
+CREDIT_SIGNALS = ("credit score", "credit report", "credit repair", "dispute letter",
+                  "disputes", "fcra", "credit bureau", "tradeline", "utilisation",
+                  "utilization", "collections", "credit specialist", "credit")
+
 # "paper" is deliberately absent from inference. It hands out a ledger that can be
 # traded, and this module's whole premise is that a job description must not be able to
 # grant its own powers -- inferring it from wording would let any employee that merely
@@ -373,6 +379,8 @@ def infer_data_feeds(title: str, job_description: str, standing: str = "") -> st
         feeds.append("market")
     if any(w in text for w in FINANCE_SIGNALS):
         feeds.append("finance")
+    if any(w in text for w in CREDIT_SIGNALS):
+        feeds.append("credit")
     return ",".join(feeds)
 
 
@@ -670,7 +678,10 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
     """
     if not feeds:
         return ""
-    market_parts, paper_parts, finance_parts = [], [], []
+    market_parts, paper_parts, finance_parts, credit_parts = [], [], [], []
+    if "credit" in feeds:
+        from . import credit
+        credit_parts.append(credit.briefing(db_path, 1))
     if "finance" in feeds:
         from . import finance_brief
         # owner_user_id 1 is the owner: this feed is his money by definition, and an
@@ -786,7 +797,7 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
 
     # Finance first for the same reason the paper portfolio leads: an employee should
     # read its own situation before it reads anything it might react to.
-    parts = finance_parts + paper_parts + market_parts
+    parts = credit_parts + finance_parts + paper_parts + market_parts
     if not parts:
         return ""
     return ("\n\n--- LIVE DATA, captured just now. These figures are exact and "

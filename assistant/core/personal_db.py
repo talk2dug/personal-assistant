@@ -255,8 +255,95 @@ CREATE TABLE IF NOT EXISTS dispute_letters (
     tracking_number TEXT,   -- USPS cert/tracking number, once known
     status TEXT NOT NULL DEFAULT 'quoted' CHECK (status IN ('quoted', 'mailed')),
     quoted_at TEXT NOT NULL,
-    mailed_at TEXT
+    mailed_at TEXT,
+    -- When USPS says it landed. The FCRA clock runs from RECEIPT, not from posting, which
+    -- is the whole reason these go certified: without a delivery date the deadline is a
+    -- guess, and a deadline you cannot prove is one you cannot enforce.
+    delivered_at TEXT,
+    -- When the bureau's answer is legally due. Stored rather than computed on read so the
+    -- date does not silently move if the rule or the estimate changes after the fact --
+    -- what matters later is the deadline as it stood when the letter landed.
+    response_due_at TEXT,
+    -- Set when something actually came back, so an overdue letter is distinguishable from
+    -- one that was answered and simply not chased.
+    response_received_at TEXT,
+    response_summary TEXT
 );
+
+-- A credit report as pulled on a day, and the accounts on it.
+--
+-- Separate from the debt tracker on purpose, and they answer different questions. `debts`
+-- is what he OWES -- assembled from statement emails, incomplete, and the thing the
+-- financial planner budgets against. A tradeline is what a BUREAU SAYS, which is a claim
+-- about him that may be wrong, stale, or not his at all. Disputing is the act of
+-- challenging the second; paying is the act of settling the first. Conflating them would
+-- mean a paid-off debt looked like a fixed report, and it is not: a collection can sit on
+-- a report for seven years after it is paid.
+CREATE TABLE IF NOT EXISTS credit_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    bureau TEXT NOT NULL CHECK (bureau IN ('experian', 'equifax', 'transunion', 'other')),
+    pulled_on TEXT NOT NULL,
+    score INTEGER,
+    score_model TEXT,              -- 'FICO 8', 'VantageScore 3.0' -- they differ by 50+ points
+    source TEXT,                   -- annualcreditreport.com, a monitoring app, a lender pull
+    notes TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_reports_owner ON credit_reports(owner_user_id, pulled_on DESC);
+
+CREATE TABLE IF NOT EXISTS credit_tradelines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL REFERENCES credit_reports(id) ON DELETE CASCADE,
+    creditor TEXT NOT NULL,
+    account_last4 TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'other' CHECK (kind IN (
+        'credit_card', 'loan', 'student_loan', 'auto', 'mortgage', 'medical',
+        'collections', 'other')),
+    status TEXT,                   -- as the bureau words it: 'open', 'closed', 'charge-off'
+    balance REAL,
+    credit_limit REAL,             -- utilisation is 30% of a FICO score, so this matters
+    opened_on TEXT,                -- age of accounts is another 15%
+    closed_on TEXT,
+    past_due REAL,
+    -- The things that actually hold a score down, each dated: a late payment stops
+    -- counting long before the account falls off, and knowing WHEN is the difference
+    -- between disputing it and waiting it out.
+    derogatory TEXT,               -- 'collection', 'charge-off', 'late_30', 'late_60', ...
+    derogatory_on TEXT,
+    falls_off_on TEXT,             -- seven years from first delinquency, where known
+    disputed_item_id INTEGER REFERENCES dispute_items(id),
+    notes TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_tradelines_report ON credit_tradelines(report_id);
+
+-- Cards and loans worth applying for, and what happened when he did.
+--
+-- Kept as a reviewable suggestion rather than an action: an application is a hard inquiry
+-- and a new account, which move a score in both directions at once, so nothing here is
+-- ever applied for automatically. Turning one into a task is HIS click.
+CREATE TABLE IF NOT EXISTS credit_recommendations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'card' CHECK (kind IN (
+        'card', 'loan', 'secured_card', 'credit_builder', 'other')),
+    issuer TEXT,
+    why TEXT NOT NULL,             -- what it does for HIS situation, not a product blurb
+    reward TEXT,                   -- cashback / points / miles, in his words
+    annual_fee REAL,
+    est_approval TEXT,             -- 'likely' | 'borderline' | 'unlikely', with reasoning in why
+    priority INTEGER,
+    status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN (
+        'suggested', 'planned', 'applied', 'approved', 'declined', 'dismissed')),
+    task_id INTEGER REFERENCES personal_tasks(id),
+    decided_at TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_recs_owner ON credit_recommendations(owner_user_id, status);
 
 -- The debt tracker. A sibling of credit_score_entries/dispute_items above, and it exists
 -- because of exactly one thing the owner said when he was asked to list his debts out so
@@ -414,6 +501,16 @@ def init_personal_db(db_path: str) -> None:
                          "DEFAULT 'personal'")
             conn.execute("UPDATE personal_tasks SET track = 'project' "
                          "WHERE project_id IS NOT NULL")
+
+        # Dispute letters gained a real clock. Existing rows keep NULL deadlines rather
+        # than being back-computed: the FCRA window runs from receipt, and inventing a
+        # delivery date for a letter posted months ago would put a deadline on the screen
+        # that nothing could defend.
+        letter_cols = {row[1] for row in conn.execute("PRAGMA table_info(dispute_letters)")}
+        for column in ("delivered_at", "response_due_at", "response_received_at",
+                       "response_summary"):
+            if column not in letter_cols:
+                conn.execute(f"ALTER TABLE dispute_letters ADD COLUMN {column} TEXT")
         conn.commit()
 
 
@@ -1161,6 +1258,114 @@ def match_debt(candidates: list[dict], creditor_key: str, account_last4: str = "
     return {"debt_id": None, "ambiguous": True,
             "reason": (f"{len(same_creditor)} accounts with this creditor and no account "
                        "number in the message to tell them apart")}
+
+
+def add_credit_report(db_path: str, owner_user_id: int, bureau: str, pulled_on: str,
+                      score: int | None = None, score_model: str | None = None,
+                      source: str | None = None, notes: str | None = None) -> int:
+    if bureau not in ("experian", "equifax", "transunion", "other"):
+        raise ValueError("bureau must be experian, equifax, transunion or other")
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO credit_reports (owner_user_id, bureau, pulled_on, score,
+                                           score_model, source, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, bureau, pulled_on, score, score_model, source, notes, _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def add_tradeline(db_path: str, report_id: int, creditor: str, **fields) -> int:
+    """One account as a bureau reports it. Claims about him, not his ledger."""
+    # Only columns actually given: several carry NOT NULL defaults, and writing an
+    # explicit None over a default is how "kind" and "account_last4" ended up violating
+    # their own constraints.
+    allowed = {k: fields[k] for k in (
+        "account_last4", "kind", "status", "balance", "credit_limit", "opened_on",
+        "closed_on", "past_due", "derogatory", "derogatory_on", "falls_off_on", "notes")
+        if fields.get(k) is not None}
+    if allowed.get("kind") and allowed["kind"] not in DEBT_KINDS:
+        raise ValueError(f"kind must be one of {DEBT_KINDS}")
+    columns = ", ".join(["report_id", "creditor", *allowed, "created_at"])
+    marks = ", ".join(["?"] * (len(allowed) + 3))
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            f"INSERT INTO credit_tradelines ({columns}) VALUES ({marks})",
+            [report_id, creditor, *allowed.values(), _now()])
+        conn.commit()
+        return cur.lastrowid
+
+
+def add_credit_recommendation(db_path: str, owner_user_id: int, name: str, why: str,
+                              kind: str = "card", **fields) -> int:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO credit_recommendations (owner_user_id, name, kind, issuer, why,
+                   reward, annual_fee, est_approval, priority, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, name, kind, fields.get("issuer"), why, fields.get("reward"),
+             fields.get("annual_fee"), fields.get("est_approval"), fields.get("priority"),
+             fields.get("notes"), _now(), _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_credit_recommendation(db_path: str, owner_user_id: int, rec_id: int,
+                                 **fields) -> bool:
+    allowed = {k: v for k, v in fields.items() if k in (
+        "name", "kind", "issuer", "why", "reward", "annual_fee", "est_approval",
+        "priority", "status", "task_id", "notes") and v is not None}
+    if not allowed:
+        return False
+    if "status" in allowed:
+        allowed["decided_at"] = _now()
+    sets = ", ".join(f"{k} = ?" for k in allowed)
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            f"UPDATE credit_recommendations SET {sets}, updated_at = ?"
+            f" WHERE id = ? AND owner_user_id = ?",
+            [*allowed.values(), _now(), rec_id, owner_user_id])
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def list_credit_recommendations(db_path: str, owner_user_id: int, status: str | None = None):
+    query = "SELECT * FROM credit_recommendations WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY priority IS NULL, priority, created_at"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
+def record_dispute_response(db_path: str, owner_user_id: int, letter_id: int,
+                            summary: str, received_on: str | None = None) -> bool:
+    """A bureau answered. Stops the letter reading as overdue, which is the state that
+    matters -- an unanswered dispute past its window is leverage, and one that was
+    answered and simply not recorded looks identical until somebody checks."""
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """UPDATE dispute_letters SET response_received_at = ?, response_summary = ?
+               WHERE id = ? AND dispute_item_id IN (
+                   SELECT id FROM dispute_items WHERE owner_user_id = ?)""",
+            (received_on or _today(), summary, letter_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def record_letter_delivered(db_path: str, owner_user_id: int, letter_id: int,
+                            delivered_on: str, response_due_at: str | None = None) -> bool:
+    """USPS confirmed delivery, which starts the statutory clock for real."""
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """UPDATE dispute_letters SET delivered_at = ?, response_due_at = ?
+               WHERE id = ? AND dispute_item_id IN (
+                   SELECT id FROM dispute_items WHERE owner_user_id = ?)""",
+            (delivered_on, response_due_at, letter_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def create_debt(

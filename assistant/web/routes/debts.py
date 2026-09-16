@@ -88,6 +88,29 @@ async def create_debt(request: Request):
     return {"ok": True, "debt_id": debt_id}
 
 
+@router.post("/merge")
+async def merge(request: Request):
+    """Record that several rows are one obligation: keep one, dismiss the rest.
+
+    Defined ABOVE /{debt_id} routes on purpose -- FastAPI matches in declaration order,
+    and "merge" would otherwise be captured as a debt_id and fail as a bad integer.
+    """
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    body = await request.json()
+    keep_id = body.get("keep_id")
+    merge_ids = body.get("merge_ids") or []
+    if not isinstance(keep_id, int) or not isinstance(merge_ids, list):
+        raise HTTPException(400, "keep_id (int) and merge_ids (list of int) are required")
+    if not all(isinstance(i, int) for i in merge_ids):
+        raise HTTPException(400, "merge_ids must all be integers")
+    try:
+        return personal_db.merge_debts(cfg.db_path, owner["id"], keep_id, merge_ids,
+                                       body.get("note"))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
 @router.put("/{debt_id}")
 async def update_debt(debt_id: int, request: Request):
     user = require_owner(request)

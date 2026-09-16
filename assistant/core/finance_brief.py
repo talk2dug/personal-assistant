@@ -301,6 +301,70 @@ def _debt_lines(debts: dict, today: date) -> list[str]:
     return lines
 
 
+def reconciliation(db_path: str, owner_user_id: int, today: date | None = None) -> dict:
+    """What about his debt picture needs a human before it can be planned against.
+
+    Three kinds of problem, each with a different fix, deliberately kept apart rather than
+    merged into one "needs attention" pile -- "confirm these are one debt" and "phone them
+    and ask the balance" are not the same job, and a list that mixes them is a list he
+    does not start.
+
+    Ordered by money at stake so the first card is the one worth doing.
+    """
+    today = today or date.today()
+    picture = debt_picture(db_path, owner_user_id, today)
+
+    duplicates = [{
+        "kind": "duplicate",
+        "account_last4": g["account_last4"],
+        "rows": [{"id": r["id"], "creditor": r["creditor"],
+                  "balance": r["current_balance"],
+                  "observed_on": r.get("last_observed_on"),
+                  "age_days": _age_days(r.get("last_observed_on"), today),
+                  "kind": r.get("kind")}
+                 for r in sorted(g["rows"],
+                                 key=lambda r: (r.get("last_observed_on") or ""), reverse=True)],
+        "distinct_balances": g["distinct_balances"],
+        "naive_sum": g["naive_sum"],
+        "likely_balance": g["likely_balance"],
+        # The phantom money this row group is currently adding to his total. This is the
+        # number that makes the card worth opening.
+        "at_stake": round(g["naive_sum"] - (g["likely_balance"] or 0), 2),
+    } for g in picture["groups"]]
+
+    stale, unknown = [], []
+    for row in picture["ungrouped"]:
+        age = _age_days(row.get("last_observed_on"), today)
+        entry = {"id": row["id"], "creditor": row["creditor"], "kind": row.get("kind"),
+                 "balance": row.get("current_balance"), "age_days": age,
+                 "observed_on": row.get("last_observed_on"),
+                 "minimum_payment": row.get("current_minimum_payment")}
+        if row.get("current_balance") is None:
+            unknown.append({**entry, "kind_of_problem": "unknown"})
+        elif age is None or age > STALE_AFTER_DAYS:
+            stale.append({**entry, "kind_of_problem": "stale",
+                          "at_stake": row.get("current_balance") or 0})
+
+    duplicates.sort(key=lambda d: d["at_stake"], reverse=True)
+    stale.sort(key=lambda d: d.get("at_stake") or 0, reverse=True)
+
+    return {
+        "as_of": today.isoformat(),
+        "duplicates": duplicates,
+        "stale": stale,
+        "unknown": unknown,
+        "needs_you": len(duplicates) + len(stale) + len(unknown),
+        "phantom_total": round(sum(d["at_stake"] for d in duplicates), 2),
+        "totals": {
+            "naive_row_sum": picture["naive_row_sum"],
+            "counted_once": picture["all_known_balance_floor"],
+            "plannable": picture["recent_balance_floor"],
+            "row_count": picture["row_count"],
+            "obligation_count": picture["obligation_count"],
+        },
+    }
+
+
 def briefing(db_path: str, owner_user_id: int, today: date | None = None) -> str:
     """The finance feed block, or an honest failure. Never raises into a staff run."""
     try:

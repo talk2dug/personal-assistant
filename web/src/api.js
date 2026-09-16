@@ -284,6 +284,17 @@ export const api = {
   setFinanceSafetyBuffer: (safetyBuffer) =>
     request('/api/finance/safety-buffer', { method: 'PUT', body: JSON.stringify({ safety_buffer: safetyBuffer }) }),
   financeInsights: () => request('/api/finance/insights'),
+
+  // What has to be settled by a human before any plan is worth making, and the planner's
+  // own headline action. Separate calls because they answer different questions: one is a
+  // queue of work, the other is the single thing to do first.
+  financeReconcile: () => request('/api/finance/reconcile'),
+  financePlanner: () => request('/api/finance/planner'),
+  mergeDebts: (keepId, mergeIds, note) =>
+    request('/api/debts/merge', {
+      method: 'POST',
+      body: JSON.stringify({ keep_id: keepId, merge_ids: mergeIds, note }),
+    }),
   financeNetWorth: () => request('/api/finance/net-worth'),
 
   // Debts. listDebts defaults to tracked-only: a debt the mail sweep found in his history

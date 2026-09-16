@@ -875,6 +875,46 @@ def update_debt(db_path: str, owner_user_id: int, debt_id: int, **fields) -> boo
         return cur.rowcount > 0
 
 
+def merge_debts(db_path: str, owner_user_id: int, keep_id: int, merge_ids: list[int],
+                note: str | None = None) -> dict:
+    """Records that several rows are one obligation: keep one, dismiss the rest.
+
+    The mail sweep files a row per creditor NAME, so a card sold to a collector and
+    serviced by an agency becomes three rows for one debt -- and totalling them invents
+    money the owner does not owe. This is how he says so.
+
+    Dismissed rather than deleted, and the observations stay attached to their own rows.
+    Those rows are the evidence: a statement email really did arrive from Unifin, and
+    throwing that away would make the merge unreviewable and lose the provenance the whole
+    debt tracker is built on. `list_debts` already excludes anything not 'tracked', so a
+    dismissed row leaves every total immediately without leaving the record.
+
+    Refuses to dismiss the row being kept -- that would silently erase the debt entirely,
+    which is the one outcome worse than double-counting it.
+    """
+    targets = [i for i in merge_ids if i != keep_id]
+    if not targets:
+        return {"kept": keep_id, "merged": [], "note": "nothing to merge"}
+
+    with closing(_connect(db_path)) as conn:
+        kept = conn.execute(
+            "SELECT creditor, account_last4 FROM debts WHERE id = ? AND owner_user_id = ?",
+            (keep_id, owner_user_id)).fetchone()
+        if kept is None:
+            raise ValueError(f"no debt {keep_id} to merge into")
+        label = f"{kept['creditor']}" + (f" (...{kept['account_last4']})" if kept["account_last4"] else "")
+        reason = (note or "").strip() or f"Same obligation as {label}"
+        placeholders = ",".join("?" for _ in targets)
+        cur = conn.execute(
+            f"""UPDATE debts SET tracking_state = 'dismissed', updated_at = ?,
+                   notes = COALESCE(notes || ' | ', '') || ?
+                WHERE id IN ({placeholders}) AND owner_user_id = ? AND tracking_state != 'dismissed'""",
+            [_now(), f"Merged into debt #{keep_id}: {reason}", *targets, owner_user_id])
+        conn.commit()
+        merged = cur.rowcount
+    return {"kept": keep_id, "kept_label": label, "merged": merged, "merged_ids": targets}
+
+
 def set_debt_priority(db_path: str, owner_user_id: int, debt_id: int, priority: int | None) -> bool:
     """The owner's payoff rank for one debt (1 = pay this first). None clears it.
 

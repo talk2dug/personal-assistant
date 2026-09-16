@@ -207,3 +207,138 @@ class TestTheFeedNeverBreaksARun:
         text = finance_brief.briefing("unused.db", 1)
         assert "unavailable" in text
         assert "do not plan from" in text.lower()
+
+
+class TestMergingRowsIntoOneObligation:
+    """The reconciliation write. It is the one action here that can lose a real debt, so
+    what it refuses matters more than what it does."""
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        from assistant.core import db as core_db, personal_db
+        path = str(tmp_path / "money.db")
+        core_db.init_db(path)
+        personal_db.init_personal_db(path)
+        core_db.upsert_user(path, "111", "Dug", "owner")
+        return path
+
+    @pytest.fixture
+    def owner(self, db_path):
+        from assistant.core import db as core_db
+        return core_db.get_user_by_chat_id(db_path, "111")["id"]
+
+    def _three_rows(self, db_path, owner):
+        from assistant.core import personal_db
+        ids = [personal_db.create_debt(db_path, owner, name, account_last4="7560",
+                                       kind="collections")
+               for name in ("Synchrony Bank", "Unifin Inc", "Jefferson Capital")]
+        return ids
+
+    def test_merging_leaves_one_tracked_row(self, db_path, owner):
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        result = personal_db.merge_debts(db_path, owner, keep, rest)
+        assert result["merged"] == 2
+        tracked = personal_db.list_debts(db_path, owner, tracking_state="tracked")
+        assert [d["id"] for d in tracked] == [keep]
+
+    def test_the_dismissed_rows_are_kept_as_evidence(self, db_path, owner):
+        """Not deleted: a statement email really did arrive from that agency, and the
+        provenance is the whole point of the debt tracker."""
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        personal_db.merge_debts(db_path, owner, keep, rest)
+        dismissed = personal_db.list_debts(db_path, owner, tracking_state="dismissed")
+        assert sorted(d["id"] for d in dismissed) == sorted(rest)
+
+    def test_each_dismissed_row_records_what_it_was_merged_into(self, db_path, owner):
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        personal_db.merge_debts(db_path, owner, keep, rest)
+        note = personal_db.get_debt(db_path, owner, rest[0])["notes"]
+        assert f"#{keep}" in note
+        assert "7560" in note
+
+    def test_a_custom_reason_is_recorded_instead_of_the_default(self, db_path, owner):
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        personal_db.merge_debts(db_path, owner, keep, rest, note="Confirmed on the phone")
+        assert "Confirmed on the phone" in personal_db.get_debt(db_path, owner, rest[0])["notes"]
+
+    def test_the_kept_row_is_never_dismissed_even_if_listed(self, db_path, owner):
+        """Passing the keep id in merge_ids would otherwise erase the debt entirely --
+        the one outcome worse than double-counting it."""
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        personal_db.merge_debts(db_path, owner, keep, [keep, *rest])
+        assert personal_db.get_debt(db_path, owner, keep)["tracking_state"] == "tracked"
+
+    def test_merging_into_a_debt_that_is_not_his_is_refused(self, db_path, owner):
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        with pytest.raises(ValueError):
+            personal_db.merge_debts(db_path, owner + 999, keep, rest)
+
+    def test_merging_nothing_is_a_no_op_not_an_error(self, db_path, owner):
+        from assistant.core import personal_db
+        keep, *_ = self._three_rows(db_path, owner)
+        assert personal_db.merge_debts(db_path, owner, keep, [])["merged"] == []
+
+    def test_merging_twice_does_not_double_annotate(self, db_path, owner):
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        personal_db.merge_debts(db_path, owner, keep, rest)
+        second = personal_db.merge_debts(db_path, owner, keep, rest)
+        assert second["merged"] == 0, "already dismissed rows are not touched again"
+
+    def test_a_merged_debt_leaves_the_totals(self, db_path, owner):
+        """The point of the whole exercise: the phantom money goes away."""
+        from assistant.core import personal_db
+        keep, *rest = self._three_rows(db_path, owner)
+        for debt_id in (keep, *rest):
+            personal_db.add_debt_observation(db_path, debt_id, observed_on="2026-09-01",
+                                             balance_text="$1,087.92", balance=1087.92,
+                                             source="email")
+        before = personal_db.debt_summary(db_path, owner)["total_balance"]
+        personal_db.merge_debts(db_path, owner, keep, rest)
+        after = personal_db.debt_summary(db_path, owner)["total_balance"]
+        assert before == pytest.approx(3263.76, abs=0.01)
+        assert after == pytest.approx(1087.92, abs=0.01)
+
+
+class TestTheReconcileQueue:
+    def test_it_ranks_by_the_money_at_stake(self, monkeypatch):
+        """The first card should be the one worth doing, not the first one filed."""
+        rows = [_debt(1, "Small A", "1111", 100.0, "2026-09-01"),
+                _debt(2, "Small B", "1111", 100.0, "2026-09-01"),
+                _debt(3, "Big A", "2222", 3000.0, "2026-09-01"),
+                _debt(4, "Big B", "2222", 3000.0, "2026-09-01")]
+        monkeypatch.setattr(finance_brief.personal_db, "list_debts",
+                            lambda *a, **k: rows if k.get("tracking_state") == "tracked" else [])
+        queue = finance_brief.reconciliation("unused.db", 1, TODAY)
+        assert [d["account_last4"] for d in queue["duplicates"]] == ["2222", "1111"]
+        assert queue["phantom_total"] == 3100.0
+
+    def test_the_three_problems_stay_separate(self, monkeypatch):
+        """"Confirm these are one debt" and "phone them and ask" are different jobs, and a
+        list that mixes them is a list he does not start."""
+        rows = [_debt(1, "Dup A", "1111", 100.0, "2026-09-01"),
+                _debt(2, "Dup B", "1111", 100.0, "2026-09-01"),
+                _debt(3, "Ancient", "3333", 500.0, "2022-01-01"),
+                _debt(4, "Never stated", "4444", None, "2026-09-01")]
+        monkeypatch.setattr(finance_brief.personal_db, "list_debts",
+                            lambda *a, **k: rows if k.get("tracking_state") == "tracked" else [])
+        queue = finance_brief.reconciliation("unused.db", 1, TODAY)
+        assert len(queue["duplicates"]) == 1
+        assert [s["creditor"] for s in queue["stale"]] == ["Ancient"]
+        assert [u["creditor"] for u in queue["unknown"]] == ["Never stated"]
+        assert queue["needs_you"] == 3
+
+    def test_a_duplicate_group_lists_its_rows_freshest_first(self, monkeypatch):
+        """He picks which row to keep, so the one most likely to be right is shown first."""
+        rows = [_debt(1, "Old", "1111", 743.39, "2023-10-27"),
+                _debt(2, "New", "1111", 1087.92, "2026-08-05")]
+        monkeypatch.setattr(finance_brief.personal_db, "list_debts",
+                            lambda *a, **k: rows if k.get("tracking_state") == "tracked" else [])
+        group = finance_brief.reconciliation("unused.db", 1, TODAY)["duplicates"][0]
+        assert [r["creditor"] for r in group["rows"]] == ["New", "Old"]

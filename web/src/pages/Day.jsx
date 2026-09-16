@@ -78,7 +78,9 @@ function Anchor({ item, onLog, busy }) {
       <span className="day-anchor-time">{item.at_time}</span>
       <span className="day-anchor-name">
         {CATEGORY_MARK[item.category] || '•'} {item.name}
-        {item.hard && <span className="day-hard" title="Cannot slip">!</span>}
+        {/* Boolean coercion is load-bearing: `hard` arrives from SQLite as 0 or 1, and
+            `0 && <span/>` renders a literal 0 next to the name. */}
+        {Boolean(item.hard) && <span className="day-hard" title="Cannot slip"> !</span>}
       </span>
       <span className="day-anchor-when">
         {state ? state : untilText(mins)}

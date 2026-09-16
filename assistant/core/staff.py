@@ -344,6 +344,14 @@ def compile_system_prompt(title: str, job_description: str, department: str,
 MARKET_SIGNALS = ("crypto", "bitcoin", "btc", "ethereum", "altcoin", "token",
                   "trading", "trader", "market cap", "coin", "defi", "exchange")
 
+# Read-only, like "market" and unlike "paper": it hands over the owner's real balances,
+# bills, budgets and debts to READ. It grants no power to move a dollar -- every change to
+# a budget, a savings goal or a debt still goes through his own confirmed tool calls -- so
+# inferring it from wording carries none of the risk that made "paper" grant-only.
+FINANCE_SIGNALS = ("financial planner", "personal finance", "personal finances", "budget",
+                   "budgeting", "cash flow", "cashflow", "savings", "debt", "net worth",
+                   "spending", "bills", "financial planning")
+
 # "paper" is deliberately absent from inference. It hands out a ledger that can be
 # traded, and this module's whole premise is that a job description must not be able to
 # grant its own powers -- inferring it from wording would let any employee that merely
@@ -363,6 +371,8 @@ def infer_data_feeds(title: str, job_description: str, standing: str = "") -> st
     feeds = []  # read-only context only; anything that can act is granted by hand
     if any(w in text for w in MARKET_SIGNALS):
         feeds.append("market")
+    if any(w in text for w in FINANCE_SIGNALS):
+        feeds.append("finance")
     return ",".join(feeds)
 
 
@@ -660,7 +670,12 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
     """
     if not feeds:
         return ""
-    market_parts, paper_parts = [], []
+    market_parts, paper_parts, finance_parts = [], [], []
+    if "finance" in feeds:
+        from . import finance_brief
+        # owner_user_id 1 is the owner: this feed is his money by definition, and an
+        # employee is hired by him, not by a user account of its own.
+        finance_parts.append(finance_brief.briefing(db_path, 1))
     if "market" in feeds:
         try:
             from . import market_data
@@ -769,7 +784,9 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
             paper_parts.append(f"PAPER PORTFOLIO: unavailable ({type(e).__name__}). "
                                "Do not trade this run.")
 
-    parts = paper_parts + market_parts
+    # Finance first for the same reason the paper portfolio leads: an employee should
+    # read its own situation before it reads anything it might react to.
+    parts = finance_parts + paper_parts + market_parts
     if not parts:
         return ""
     return ("\n\n--- LIVE DATA, captured just now. These figures are exact and "

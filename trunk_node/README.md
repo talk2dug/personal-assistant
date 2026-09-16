@@ -20,30 +20,47 @@ ssh pi@192.168.0.161 'sudo docker rm -f jarvis-trunk 2>/dev/null; \
 ssh pi@192.168.0.161 'sudo docker logs -f jarvis-trunk'   # watch it lock + record
 ```
 
-## State as of 2026-09-16 (honest)
+## State as of 2026-09-16 evening (honest)
 
 WORKS: both dongles addressed by serial, control channel **857.0875 MHz locks**,
 trunk-recorder decodes the **system identity** (ID 2AA, WACN BEE00, NAC 2A3 — matches
 RadioReference). Hardware, drivers, dual-SDR addressing, control-channel freq and system
 config are all proven correct.
 
-NOT YET: it decodes the periodic system broadcasts but is **not catching per-call grants**
-(0 recordings), so no Fire/EMS audio yet. This is the known-hard part: **P25 Phase II
-simulcast decode** on RTL-SDRs. Tried gain 40 and 28 (no change), encrypted shown/hidden
-(no grants either way), no decode-rate warnings.
+NOT YET: it decodes the periodic system-identity broadcasts but catches **no per-call
+grants** (0 recordings), so no Fire/EMS audio yet. This was chased hard and narrowed:
 
-## Tuning plan (do against DAYTIME traffic — nights are light)
+- Correct channels: the real CRRS Site 003 P25 channels are 856.0875 / 856.5375 /
+  857.0875(control) / 857.5375 / 859.5375 (from Jack's RadioReference dump). Sources
+  re-centered to cover them (the original 853.0 center was on the *legacy Motorola*
+  system by mistake). Control channel confirmed, system identity (ID 2AA / WACN BEE00 /
+  NAC 2A3 / site 002-003) decodes cleanly.
+- **Ruled out:** traffic (tested in evening, not dead of night), encryption hiding
+  (tested with `hideEncrypted:false` -- still zero grants, so it's not just hidden
+  police), gain (40/28/36 no change), image version (`edge` Dec-2024 build behaves
+  identically to `latest`).
+- **Conclusion:** grant (TSBK) decode is failing while the strong repeated identity
+  broadcasts survive -- the signature of **P25 Phase II *simulcast* decode quality** at
+  the edge of what a single RTL-SDR per channel manages. CRRS Site 003 is explicitly
+  "Richmond Simulcast." Frequency/PPM is an unlikely cause given the clean instant ID
+  decode, but is the one config lever not yet directly tried.
 
-1. **Newer image** — the pulled `latest` is ~2 years old; a current trunk-recorder has
-   better P25 Phase II / simulcast handling. Try a recent tagged image or build.
-2. **PPM calibration** — dongles measured large, unconverged ppm; a wrong offset guts
-   grant decode even when the strong ID broadcast survives. Calibrate each (against the
-   live control channel or a known reference) and set `ppm` per source.
-3. **Modulation** — `qpsk` (set) is the simulcast default; test `fsk4` as a fallback.
-4. **Gain sweep** — try the R820T steps ~20–40 once ppm is right.
-5. **Re-center sources** from `no recorder covering freq` logs so voice channels are covered.
+## Next levers (for a calmer session, not proven)
+
+1. **op25** (boatbod fork) instead of trunk-recorder -- often decodes marginal simulcast
+   better; different demod chain.
+2. **PPM sweep** per dongle against the live control channel (low odds given clean ID
+   decode, but cheap to try).
+3. **Better SDR** -- an Airspy Mini/R2 is the known fix for stubborn simulcast where
+   RTL-SDRs top out. Jack has SDRs; worth checking if any are Airspy-class.
+4. Meanwhile, the **conventional** Fire/EMS channels in `richmond_reference.md`
+   (854.0125 Fire T/A, 155.340 / 453.975 Ambulance Authority) and Skywarn 146.88 are
+   plain FM -- decodable on the spare dongle with `rtl_fm` today, no trunking needed, as
+   an always-works fallback while the trunk decode is sorted.
 
 ## After decode works
+
+
 
 - Add **Rdio Scanner** (self-hosted, phone feed + history) as a second container; point
   trunk-recorder's `rdioscanner_uploader` plugin at it.

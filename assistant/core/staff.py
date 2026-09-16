@@ -374,7 +374,13 @@ def infer_data_feeds(title: str, job_description: str, standing: str = "") -> st
     and therefore inspectable; `data_feeds` can be set explicitly to override it.
     """
     text = f"{title} {job_description} {standing}".lower()
-    feeds = []  # read-only context only; anything that can act is granted by hand
+    # Everyone journals. An employee runs in isolation with no memory between runs, so
+    # without the vault it re-derives the same conclusions forever and cannot get better at
+    # anything -- which is the entire point of hiring one rather than asking a question.
+    # It was opt-in and 12 of 18 had no memory at all, including two hired the same day.
+    # Read-only in the same sense as the other feeds: the journal is written by the
+    # orchestrator from what actually happened, never by the employee about itself.
+    feeds = ["journal"]
     if any(w in text for w in MARKET_SIGNALS):
         feeds.append("market")
     if any(w in text for w in FINANCE_SIGNALS):
@@ -553,7 +559,12 @@ def set_data_feeds(db_path: str, key: str, feeds: str) -> bool:
     # inferred for consistency with the other two, not because a wrong grant is dangerous:
     # the worst case is prompt budget spent on a policy that doesn't govern that role. See
     # agent_policy.py.
-    valid = {"market", "paper", "journal", "policy"}
+    # "finance" and "credit" are read-only like "market": they hand over his balances,
+    # bills, debts, scores and disputes to READ. Neither can move a dollar or send a
+    # letter -- those stay behind his own confirmed tool calls. They were added to
+    # infer_data_feeds without being added here, so inference could produce a feed this
+    # function then rejected as unknown.
+    valid = {"market", "paper", "journal", "policy", "finance", "credit"}
     wanted = [f.strip().lower() for f in (feeds or "").split(",") if f.strip()]
     unknown = [f for f in wanted if f not in valid]
     if unknown:
@@ -707,6 +718,12 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 for c in top:
                     lines.append(f"  {c['code']} {_fmt_price(c['price_usd'])} "
                                  f"1h {c['change_1h_pct']}% 24h {c['change_24h_pct']}%")
+                # A corrupt row is not a mover. The feed has really printed
+                # +12,019,772% on a coin, and handing that to a trader as "in motion" is
+                # how a bad row becomes a position.
+                from . import technicals
+                movers = [m for m in movers if technicals.sane_move(m["change_hour_pct"])]
+                day = [m for m in day if technicals.sane_move(m["change_day_pct"])]
                 if movers:
                     lines.append("  1h movers (context on what is in motion, not a "
                                  "shortlist to trade):")
@@ -735,6 +752,20 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 lines.append(f"  TRADEABLE ON THIS FEED ({len(tracked)} codes) -- propose "
                              "trades ONLY from this list, anything else will be rejected:")
                 lines.append("    " + ", ".join(tracked))
+
+                # The chart, which this desk has never had. Positions first -- knowing
+                # when to get OUT is the half it kept getting wrong, and 90 of its first
+                # 92 exits were it closing a winner early on nerve rather than on a
+                # signal. Then the movers it might actually buy.
+                try:
+                    from . import paper_trading
+                    held = [p["code"] for p in paper_trading.portfolio(db_path)["positions"]]
+                except Exception:
+                    held = []
+                candidates = [m["code"] for m in movers if m["code"] not in held]
+                focus = (held + [c for c in candidates if c in set(tracked)])[:8]
+                if focus:
+                    lines.append(technicals.briefing(db_path, focus))
                 market_parts.append("\n".join(lines))
         except Exception as e:
             market_parts.append(f"CRYPTO FEED: unavailable ({type(e).__name__}). "

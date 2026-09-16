@@ -235,9 +235,12 @@ def test_a_failed_assign_still_leaves_a_journal_entry(db_path, vault):
 
 
 def test_an_engineer_without_the_journal_feed_writes_nothing(db_path, vault):
+    """Every employee journals by default now, so the feed has to be taken away on
+    purpose -- and when it is, nothing may be written, or the setting is decorative."""
     emp = staff.hire(db_path, "Senior Code Reviewer",
                      "Reviews pull requests for correctness and regressions.",
                      department="engineering")
+    staff.set_data_feeds(db_path, emp["key"], "")
 
     staff.assign(db_path, CapturingLLM(), emp["key"], "Review PR 14", obsidian=vault)
 

@@ -37,7 +37,16 @@ class TestVerdictInstructions:
 
 class TestFeedGranting:
     def test_market_context_is_inferred_from_the_job(self, db):
-        assert staff.infer_data_feeds("Crypto Analyst", "Watches token prices") == "market"
+        assert "market" in staff.infer_data_feeds("Crypto Analyst", "Watches token prices")
+
+    def test_everyone_gets_a_journal(self, db):
+        """An employee runs in isolation with no memory between runs, so without the vault
+        it re-derives the same conclusions forever and never gets better at anything. It
+        was opt-in and 12 of 18 had no memory at all, including two hired that same day."""
+        for title, description in (("Crypto Analyst", "Watches token prices"),
+                                   ("Art Director", "Writes image prompts"),
+                                   ("Plain Analyst", "Reads things and reports")):
+            assert "journal" in staff.infer_data_feeds(title, description), title
 
     def test_a_tradable_ledger_is_never_inferred_from_wording(self, db):
         """The premise of this module is that a job description cannot grant its own
@@ -548,8 +557,11 @@ class TestJournalLoop:
         assert "write_note" not in llm.prompts[0]
 
     def test_an_employee_without_the_feed_is_never_asked_for_a_block(self, market_db, vault):
+        """Journalling is now the default, so this case has to be built deliberately --
+        but it must still hold, or removing the feed would be a setting that does nothing."""
         key = staff.hire(market_db, "Plain Analyst",
                          "Twenty years of markets research, macro and on-chain analysis.")["key"]
+        staff.set_data_feeds(market_db, key, "")
         llm = self.ScriptedLLM("Nothing today.")
         staff.assign(market_db, llm, key, "do your rounds", obsidian=vault)
         assert "```journal" not in llm.prompts[0]

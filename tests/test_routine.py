@@ -495,3 +495,40 @@ class TestWhatLandsOnHisPhone:
 
     def test_a_missing_task_returns_nothing_rather_than_raising(self, db_path, owner):
         assert routine.task_note_for(db_path, 999999, owner) == ""
+
+
+class TestAnchorsWithNoLeadTime:
+    """"Wake up" and "Bed" have no run-up: the nudge IS the moment. With a window of
+    [time - lead, time) that is zero minutes wide, and they never fired at all."""
+
+    def _at(self, hour, minute):
+        return datetime(2026, 9, 16, hour, minute)
+
+    def test_a_zero_lead_anchor_fires_at_its_time(self, db_path, owner):
+        personal_db.add_rhythm(db_path, owner, "Wake up", "anchor", category="wake",
+                               at_time="06:45", lead_minutes=0)
+        assert [n["name"] for n in routine.due_nudges(db_path, owner, now=self._at(6, 45))] \
+            == ["Wake up"]
+
+    def test_it_survives_a_tick_that_lands_a_few_minutes_late(self, db_path, owner):
+        """A once-a-minute scheduler will not always land on the exact minute."""
+        personal_db.add_rhythm(db_path, owner, "Wake up", "anchor", category="wake",
+                               at_time="06:45", lead_minutes=0)
+        assert routine.due_nudges(db_path, owner, now=self._at(6, 47)) != []
+
+    def test_it_is_still_dropped_once_the_grace_has_passed(self, db_path, owner):
+        personal_db.add_rhythm(db_path, owner, "Wake up", "anchor", category="wake",
+                               at_time="06:45", lead_minutes=0)
+        assert routine.due_nudges(db_path, owner, now=self._at(7, 30)) == []
+
+    def test_it_does_not_fire_early(self, db_path, owner):
+        personal_db.add_rhythm(db_path, owner, "Wake up", "anchor", category="wake",
+                               at_time="06:45", lead_minutes=0)
+        assert routine.due_nudges(db_path, owner, now=self._at(6, 44)) == []
+
+    def test_a_lead_anchor_keeps_its_whole_run_up_as_the_window(self, db_path, owner):
+        """The grace must not shorten a real lead time to five minutes."""
+        personal_db.add_rhythm(db_path, owner, "Leave for work", "anchor", category="work",
+                               at_time="07:40", lead_minutes=15)
+        for minute in (25, 30, 35, 39):
+            assert routine.due_nudges(db_path, owner, now=self._at(7, minute)) != [], minute

@@ -48,6 +48,12 @@ DOING_WEIGHT = 35.0            # already started; finishing beats starting somet
 # threshold nags about one and stays silent about the other.
 SLIPPING_MULTIPLIER = 1.5
 
+# How long a nudge stays sendable once its moment arrives. Only matters for lead_minutes
+# of 0 -- "wake up" and "bed" have no lead, so their send window is a single instant and
+# a scheduler that ticks once a minute would land on it only by luck. Anything with a real
+# lead keeps the whole run-up as its window instead.
+NUDGE_GRACE_MINUTES = 5
+
 
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
@@ -314,8 +320,11 @@ def due_nudges(db_path: str, owner_user_id: int, tz_name: str = "America/New_Yor
             when = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             fire_at = when - timedelta(minutes=lead)
             # A window, not an instant: the scheduler ticks on an interval, so an exact
-            # comparison would miss most nudges entirely.
-            if fire_at <= now < when and (item["id"], "lead") not in sent:
+            # comparison would miss most nudges entirely. For a lead of 0 the run-up is
+            # empty, so a short grace after the time is the window instead -- otherwise
+            # "wake up at 06:45" has a zero-width window and never fires at all.
+            window_end = max(when, fire_at + timedelta(minutes=NUDGE_GRACE_MINUTES))
+            if fire_at <= now < window_end and (item["id"], "lead") not in sent:
                 minutes_left = max(0, int((when - now).total_seconds() // 60))
                 out.append({"rhythm_id": item["id"], "kind": "lead", "name": item["name"],
                             "at_time": item["at_time"], "minutes_left": minutes_left,

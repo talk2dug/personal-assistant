@@ -279,6 +279,39 @@ def test_a_new_concept_actually_reaches_the_review_queue(db_path):
         "approving the card should leave the concept visible to the art director"
 
 
+def test_the_trend_feed_advances_instead_of_rereading_the_same_leads(db_path):
+    """Nothing ever retired a lead. list_trend_leads returns the top `limit` by score, so
+    the creator was handed the same three every run forever while the rest were never
+    read -- hidden by the "already proposed" list, which stopped the repeats from landing
+    but not the model call that produced them."""
+    for i in range(6):
+        business_db.upsert_trend_lead(db_path, 1, f"Topic {i}", "reddit", 100 - i,
+                                      f"idea {i}", "because")
+
+    llm = FakeResearchLLM(json.dumps([
+        {"name": "Thing A", "product_type": "sticker", "description": "d",
+         "trend_topic": "Topic 0"}]))
+    agents.run_product_creator(db_path, llm, 1, PROFILE, limit=3)
+
+    worked = {lead["topic"]: lead["status"]
+              for lead in business_db.list_trend_leads(db_path, 1, limit=10)}
+    assert worked["Topic 0"] == "made", "it produced a concept"
+    assert worked["Topic 1"] == "passed", "considered, nothing came of it"
+    assert worked["Topic 2"] == "passed"
+    assert worked["Topic 3"] == "new", "never shown to the model, still waiting"
+
+    remaining = [lead["topic"] for lead in business_db.list_trend_leads(db_path, 1, status="new")]
+    assert remaining == ["Topic 3", "Topic 4", "Topic 5"], "the next run moves down the list"
+
+
+def test_a_failed_run_does_not_burn_its_leads(db_path):
+    """A model call that came back unparseable has not considered anything."""
+    business_db.upsert_trend_lead(db_path, 1, "Topic 0", "reddit", 100, "idea", "because")
+    result = agents.run_product_creator(db_path, FakeResearchLLM("not json"), 1, PROFILE)
+    assert result["status"] == "error"
+    assert business_db.list_trend_leads(db_path, 1)[0]["status"] == "new"
+
+
 def test_downstream_agents_wait_for_owner_approval(db_path):
     """The gate that makes this safe: an unapproved concept is invisible to the Art
     Director and E-Store Manager."""

@@ -417,6 +417,22 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
                     ref_table="product_concepts", ref_id=concept_id,
                 )
 
+        # Retire the leads this run worked from, or the feed never advances. Nothing ever
+        # wrote this status: list_trend_leads returns the top `limit` by score and the
+        # creator handed back the same three every run forever, with 99 others below them
+        # never once read. It went unnoticed only because the "already proposed" list in
+        # the prompt kept the repeats from landing -- so the real cost was invisible: a
+        # web-searching model call every tick, re-reading ideas it had already mined.
+        #
+        # A lead that produced nothing is 'passed', not left 'new': it was considered, and
+        # leaving it would park it at the top of the list to be reconsidered forever.
+        made = {c["trend_lead_id"] for c in
+                business_db.list_product_concepts(db_path, owner_user_id, limit=limit * 4)
+                if c.get("trend_lead_id")}
+        for lead in leads:
+            business_db.set_trend_lead_status(
+                db_path, owner_user_id, lead["id"], "made" if lead["id"] in made else "passed")
+
         summary = f"Product creator: {new_count} new concepts proposed."
         business_db.finish_agent_run(db_path, run_id, "ok", summary, json.dumps(concepts)[:4000])
         return {"status": "ok", "new": new_count, "summary": summary}

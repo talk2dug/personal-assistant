@@ -1,0 +1,48 @@
+{
+  "ver": 2,
+  "sourcePartsHint": "Two RTL-SDRs, addressed by the unique serials we burned in (1000/1001) so a replug can't swap them. Each covers ~2.4 MHz; together they hold the control channel plus the busiest 800 MHz voice cluster. Re-center after watching the logs for 'no recorder' misses -- CRRS voice spans ~851-860 MHz, wider than two dongles cover, so this is a first cut to be tuned against real call distribution.",
+  "sources": [
+    {
+      "serial": "1000",
+      "center": 853000000,
+      "rate": 2400000,
+      "gain": 36,
+      "ppm": 0,
+      "agc": false,
+      "digitalRecorders": 4,
+      "driver": "osmosdr",
+      "device": "rtl=1000"
+    },
+    {
+      "serial": "1001",
+      "center": 857500000,
+      "rate": 2400000,
+      "gain": 36,
+      "ppm": 0,
+      "agc": false,
+      "digitalRecorders": 4,
+      "driver": "osmosdr",
+      "device": "rtl=1001"
+    }
+  ],
+  "systems": [
+    {
+      "shortName": "crrs",
+      "systemNameHint": "Capital Region Radio System (Richmond/Henrico/Chesterfield), P25 Phase II. Control channel 857.0875 confirmed live by scan (-3.4 dB); 858.0375 kept as a fallback candidate. POLICE ARE ENCRYPTED and trunk-recorder skips them automatically; FIRE and EMS are in the clear -- that is what this box exists to capture.",
+      "type": "p25",
+      "control_channels": [857087500, 858037500],
+      "modulation": "qpsk",
+      "talkgroupsFile": "talkgroups.csv",
+      "recordUnknown": true,
+      "hideEncrypted": true,
+      "audioArchive": true,
+      "callLog": true
+    }
+  ],
+  "captureDir": "/app/media",
+  "callTimeout": 3,
+  "logFile": true,
+  "frequencyFormat": "mhz",
+  "controlWarnRate": 10,
+  "logLevelHint": "info is enough to see 'Control Channel' lock and per-call grants; raise to debug only when chasing a problem."
+}

@@ -65,6 +65,16 @@ def candles(db_path: str, code: str, bucket: str = "15m", limit: int = 60) -> li
         rows = [dict(r) for r in conn.execute(
             "SELECT rate, volume, at FROM market_history"
             " WHERE code = ? AND at >= ? AND rate > 0 ORDER BY at", (code, since))]
+    return _bucket(rows, minutes, limit)
+
+
+def _bucket(rows: list[dict], minutes: int, limit: int) -> list[dict]:
+    """Tick rows for ONE code, folded into OHLCV candles, newest last.
+
+    Split out of candles() so scan() can reuse the identical arithmetic: two bucketing
+    implementations would be two subtly different charts, and the desk would be reading
+    one while its screener ranked on the other.
+    """
     if not rows:
         return []
 
@@ -231,6 +241,128 @@ def read(db_path: str, code: str, bucket: str = "15m", limit: int = 60) -> dict:
     }
 
 
+# --- screening the whole universe ---------------------------------------------
+#
+# The desk was told to "look for entries on the curve, not on the movers list" while the
+# only coins it was ever handed a chart for WERE the movers list. So on every run it read
+# two or three charts, found them all extended (a 1h mover is by definition already up),
+# correctly refused to chase, and proposed nothing. 242 tradeable coins, ~3 looked at,
+# and its own words on six consecutive runs were "only three coins have technicals this
+# run". That is why the book traded six times in four days -- not selectivity, a funnel.
+#
+# These thresholds are the standing assignment's own entry rules, in code, so the screen
+# looks for what the desk is actually asked to buy rather than what happens to be moving.
+PULLBACK_RSI = (40.0, 62.0)     # the "RSI in the 40s-50s after a shallow pullback" band
+CHASE_RANGE = 0.90              # at/above this much of the range, the move is missed
+PULLBACK_RANGE = 0.75           # a pullback has actually pulled back off the highs
+LOW_RANGE = 0.25                # the "turning up from the low end of its range" entry
+
+
+def scan(db_path: str, codes: list[str], bucket: str = "15m",
+         limit: int = 60) -> dict[str, dict]:
+    """Technical readings for many coins, in one pass over the tick cache.
+
+    Calling read() in a loop costs one query per coin -- 5.6s across the tracked universe,
+    on a briefing that is rebuilt every time any market employee wakes. One query filtered
+    by time (which is what the `at` index is for) and bucketed per code in Python does the
+    same work in well under a second, which is what makes screening all 242 affordable
+    enough to do on every run rather than pre-filtering down to a handful first.
+    """
+    minutes = BUCKET_MINUTES.get(bucket)
+    if minutes is None:
+        raise ValueError(f"bucket must be one of {sorted(BUCKET_MINUTES)}")
+    wanted = {c.upper() for c in codes}
+    if not wanted:
+        return {}
+    since = (datetime.now(timezone.utc) - timedelta(minutes=minutes * (limit + 2))).isoformat()
+
+    by_code: dict[str, list[dict]] = {}
+    with closing(_connect(db_path)) as conn:
+        for row in conn.execute(
+                "SELECT code, rate, volume, at FROM market_history"
+                " WHERE at >= ? AND rate > 0 ORDER BY code, at", (since,)):
+            if row["code"] in wanted:
+                by_code.setdefault(row["code"], []).append(dict(row))
+
+    out = {}
+    for code in wanted:
+        candle_list = _bucket(by_code.get(code, []), minutes, limit)
+        if not candle_list:
+            out[code] = {"code": code, "bucket": bucket, "candles": 0,
+                         "note": "no price history cached for this code"}
+            continue
+        closes = [c["close"] for c in candle_list]
+        out[code] = {
+            "code": code, "bucket": bucket, "candles": len(candle_list),
+            "last": closes[-1], "rsi": rsi(closes), "trend": trend(closes),
+            "momentum": momentum(candle_list), "levels": levels(candle_list),
+        }
+    return out
+
+
+def classify_setup(reading: dict) -> tuple[int, str] | None:
+    """Which of the desk's entry patterns this chart is, or None if it is neither.
+
+    Returns (score, label) -- deliberately a label rather than a verdict, because the
+    trade decision stays the model's. This only answers "is this worth a look", which is
+    the question the movers list was answering badly.
+    """
+    if not reading.get("candles"):
+        return None
+    rsi_value = reading.get("rsi")
+    direction = (reading.get("trend") or {}).get("direction")
+    state = (reading.get("momentum") or {}).get("state")
+    position = (reading.get("levels") or {}).get("position_in_range")
+    if rsi_value is None or position is None or direction == "unknown":
+        return None
+
+    # Chasing is the one thing the desk's own record says cost it the most, so an extended
+    # chart is filtered out here rather than handed over for the model to refuse again.
+    if rsi_value >= RSI_OVERBOUGHT or position >= CHASE_RANGE:
+        return None
+
+    lo, hi = PULLBACK_RSI
+    if direction == "up" and lo <= rsi_value <= hi and position <= PULLBACK_RANGE:
+        return (3, "pullback in uptrend")
+    if position <= LOW_RANGE and state == "rising":
+        return (3, "turning up off the lows")
+    if direction == "up" and state in ("rising", "stalling") and position <= 0.85:
+        return (2, "uptrend holding")
+    if position <= LOW_RANGE and rsi_value <= RSI_OVERSOLD + 15 and state == "stalling":
+        return (1, "basing at the lows, no turn yet")
+    return None
+
+
+def rank_setups(readings: dict[str, dict], exclude: set[str] | None = None,
+                order: list[str] | None = None, limit: int = 14) -> list[dict]:
+    """The screen's shortlist: charts matching an entry pattern, best first.
+
+    `order` is the feed's own rank ordering, used only to break ties -- between two
+    identical-looking setups the more liquid coin is the better paper trade, and without
+    it the list would be alphabetical by accident of dict ordering.
+    """
+    exclude = {c.upper() for c in (exclude or set())}
+    rank = {code: i for i, code in enumerate(order or [])}
+    scored = []
+    for code, reading in readings.items():
+        if code in exclude:
+            continue
+        verdict = classify_setup(reading)
+        if verdict is None:
+            continue
+        score, label = verdict
+        scored.append({"code": code, "score": score, "label": label,
+                       "reading": reading, "rank": rank.get(code, 10_000)})
+    # Best pattern first, then most liquid. A "rising but tiring" chart that still scored
+    # sorts below an equally-scored one that is not tiring, since tiring is the desk's own
+    # exit signal and a poor thing to enter on.
+    scored.sort(key=lambda s: (
+        -s["score"],
+        (s["reading"].get("momentum") or {}).get("state") == "rising but tiring",
+        s["rank"]))
+    return scored[:limit]
+
+
 def sane_move(pct: float | None) -> bool:
     """Whether a reported percentage move is believable.
 
@@ -279,15 +411,20 @@ def render(reading: dict) -> str:
             f"(hi {_fmt(level_part.get('recent_high'))} / lo {_fmt(level_part.get('recent_low'))})")
 
 
-def briefing(db_path: str, codes: list[str], bucket: str = "15m") -> str:
-    """The technical block for the crypto feed: the chart the desk never had."""
+def briefing(db_path: str, codes: list[str], bucket: str = "15m",
+             readings: dict[str, dict] | None = None) -> str:
+    """The technical block for the crypto feed: the chart the desk never had.
+
+    `readings` lets a caller that has already scanned pass its results in rather than
+    paying for the same queries a second time.
+    """
     if not codes:
         return ""
     lines = [f"TECHNICALS ({bucket} candles built from the local tick cache — these are "
              f"measurements, not instructions; judge them against your own record):"]
     for code in codes:
         try:
-            lines.append(render(read(db_path, code, bucket)))
+            lines.append(render((readings or {}).get(code) or read(db_path, code, bucket)))
         except Exception as e:
             logger.warning("technicals failed for %s: %s", code, e)
             lines.append(f"    {code}: unavailable ({type(e).__name__})")
@@ -296,3 +433,52 @@ def briefing(db_path: str, codes: list[str], bucket: str = "15m") -> str:
                  "smaller legs and thinner volume — that is the exit signal you did not "
                  "have before, and it is why so many of your wins were closed early.")
     return "\n".join(lines)
+
+
+def desk_briefing(db_path: str, tracked: list[str], held: list[str],
+                  bucket: str = "15m", shortlist: int = 14) -> str:
+    """Charts for everything held, plus a screened shortlist from the whole tracked set.
+
+    Replaces a `held + top-few-1h-movers` focus list that quietly guaranteed no entries.
+    Every coin the desk could see a chart for was on that list BECAUSE it had just moved,
+    a coin that has just moved is extended, and the rules (rightly) forbid chasing an
+    extended chart -- so the screen and the rule cancelled out and nothing was ever
+    buyable. The desk said so itself, run after run: "only three coins have technicals
+    this run". The screen now looks for the patterns it is actually told to buy, across
+    every tracked code, which scan() makes cheap enough to redo on every run.
+    """
+    held = [c.upper() for c in held]
+    codes = list(dict.fromkeys(held + [c.upper() for c in tracked]))
+    if not codes:
+        return ""
+    try:
+        readings = scan(db_path, codes, bucket)
+    except Exception as e:
+        logger.warning("technical scan failed: %s", e)
+        return briefing(db_path, held[:8], bucket)
+
+    parts = []
+    if held:
+        parts.append("YOUR POSITIONS ON THE CHART -- read these before looking at "
+                     "anything new:\n"
+                     + briefing(db_path, held, bucket, readings))
+
+    picks = rank_setups(readings, exclude=set(held), order=tracked, limit=shortlist)
+    if picks:
+        lines = [f"SCREENED FOR ENTRIES: {len(picks)} of {len(codes)} tracked coins match "
+                 f"an entry pattern you are asked to look for. Charts that are already "
+                 f"extended (RSI {RSI_OVERBOUGHT:.0f}+, or {CHASE_RANGE:.0%}+ of range) "
+                 f"are filtered OUT before this list is built, so nothing here is a "
+                 f"chase. The label is what the numbers say, not a recommendation, and "
+                 f"the list is a starting point for your own judgement rather than a "
+                 f"queue to work through:"]
+        for pick in picks:
+            lines.append(f"  [{pick['label']}]")
+            lines.append(render(pick["reading"]))
+        parts.append("\n".join(lines))
+    else:
+        parts.append(f"SCREENED FOR ENTRIES: none of the {len(codes)} tracked coins "
+                     f"currently matches an entry pattern -- every chart is extended, "
+                     f"falling, or short of history. That is a real market condition and "
+                     f"not a missing feed, so standing down this run is the right answer.")
+    return "\n\n".join(parts)

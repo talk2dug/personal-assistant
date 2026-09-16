@@ -753,19 +753,24 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                              "trades ONLY from this list, anything else will be rejected:")
                 lines.append("    " + ", ".join(tracked))
 
-                # The chart, which this desk has never had. Positions first -- knowing
-                # when to get OUT is the half it kept getting wrong, and 90 of its first
-                # 92 exits were it closing a winner early on nerve rather than on a
-                # signal. Then the movers it might actually buy.
+                # The chart. Positions first -- knowing when to get OUT is the half it
+                # kept getting wrong, and 90 of its first 92 exits were it closing a
+                # winner early on nerve rather than on a signal. Then the screen.
                 try:
                     from . import paper_trading
                     held = [p["code"] for p in paper_trading.portfolio(db_path)["positions"]]
                 except Exception:
                     held = []
-                candidates = [m["code"] for m in movers if m["code"] not in held]
-                focus = (held + [c for c in candidates if c in set(tracked)])[:8]
-                if focus:
-                    lines.append(technicals.briefing(db_path, focus))
+                # Screened across the WHOLE tracked set, not the movers list. The old
+                # focus list was `held + top few 1h movers`, which meant every chart the
+                # desk ever saw was on it BECAUSE the coin had just moved -- and a coin
+                # that just moved is extended, and its rules correctly forbid chasing an
+                # extended chart. Screen and rule cancelled out: six trades in four days,
+                # with the desk itself writing "only three coins have technicals this run"
+                # on run after run while 242 coins sat tradeable and unlooked-at.
+                desk = technicals.desk_briefing(db_path, tracked, held)
+                if desk:
+                    lines.append(desk)
                 market_parts.append("\n".join(lines))
         except Exception as e:
             market_parts.append(f"CRYPTO FEED: unavailable ({type(e).__name__}). "
@@ -784,6 +789,21 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                      f"({snap['total_return_pct']:+.2f}% from ${snap['starting_cash']:,.0f})",
                      f"  realised ${snap['realized_pnl']:,.2f} | "
                      f"unrealised ${snap['unrealized_pnl']:,.2f} | {snap['trades']} trades so far"]
+            # Free slots, in names. The dollar lines above have always been here and
+            # they read as a full book when they are not: "1 position, 96% cash" is an
+            # under-filled book, and nothing in this briefing ever said so.
+            slots = paper_trading.book_slots(db_path)
+            if slots["free"] > 0:
+                lines.append(
+                    f"  BOOK: {slots['open']} of ~{slots['target']} slots filled -- "
+                    f"{slots['free']} FREE, about ${slots['slot_size']:,.2f} a slot, "
+                    f"${slots['deployable']:,.2f} deployable right now. Free slots are "
+                    f"capital doing nothing; fill the ones you have a qualifying setup "
+                    f"for this run, on the same bar as always.")
+            else:
+                lines.append(f"  BOOK: {slots['open']} of ~{slots['target']} slots filled "
+                             f"-- full. Manage what you hold; a slot frees up when a "
+                             f"position hits a level or times out.")
             if snap["positions"]:
                 lines.append("  open positions:")
                 for pos in snap["positions"]:
@@ -985,12 +1005,7 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             prompt += crypto_journal.build_prior_context(obsidian, emp["title"], role=role)
         if "paper" in feeds:
             from . import paper_trading
-            prompt += paper_trading.ORDER_INSTRUCTIONS.format(
-                fee_pct=paper_trading.DEFAULT_FEE_PCT,
-                max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
-                cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS,
-                min_rr=paper_trading.MIN_REWARD_RISK,
-                max_hold_hours=paper_trading.MAX_HOLD_HOURS)
+            prompt += paper_trading.render_order_instructions()
         if journaling:
             # Last, so the output-order note it ends with (prose, journal, orders, verdict)
             # is the final instruction the model reads about how to lay its reply out.

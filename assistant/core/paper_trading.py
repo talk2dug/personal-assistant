@@ -33,7 +33,30 @@ DEFAULT_STARTING_CASH = 10_000.0
 
 # A single order may not exceed this share of total equity. The simulation is meant to
 # show whether the strategy reads the market, not whether one all-in bet happened to land.
-MAX_ORDER_PCT_OF_EQUITY = 25.0
+#
+# Lowered from 25% so a full book is several names rather than three or four. At 25% the
+# desk could not have run six positions even if it wanted to, and in practice it ran one:
+# every closed round-trip in the ledger to 2026-09-16 was a single position opened and
+# closed with nothing else on the book beside it.
+MAX_ORDER_PCT_OF_EQUITY = 15.0
+
+# And no single coin may grow past this share, however many orders build it. The per-order
+# cap alone does not bound a position -- three add-ons to one ticker clear it one at a
+# time and still end up as the whole book, which is exactly the concentration the slot
+# count below is meant to break up.
+MAX_POSITION_PCT_OF_EQUITY = 20.0
+
+# How many coins the desk is expected to have working at once. Not enforced as a hard
+# ceiling -- it is what the briefing counts free slots against, and what tells the model
+# that a book of one is an under-filled book rather than a normal state of affairs.
+#
+# The reason it ran one at a time was never a rule saying so. It was that its screen only
+# ever showed it two or three charts (see technicals.desk_briefing), so a single qualifying
+# setup was a good run. With the whole tracked universe screened, several names qualifying
+# at once is the ordinary case, and nothing should imply it must pick just one of them.
+# More concurrent names is also more independent samples per day, which is the only way a
+# desk measured on payoff ratio learns anything at this cadence.
+TARGET_CONCURRENT_POSITIONS = 6
 
 # How long after a stop-loss exit a coin is off-limits for a fresh buy. A real, confirmed
 # incident: the same ticker bought, stopped out, and immediately re-bought minutes later
@@ -148,14 +171,25 @@ ORDER_INSTRUCTIONS = """
 --- PLACING PAPER TRADES ---
 You do not execute trades. End your response with a fenced ```orders block containing
 JSON, and the system will fill it against the live price cache and report back to you
-next run. An empty list is a legitimate and often correct answer -- you are not required
-to trade on every run, and churning costs {fee_pct}% per side.
+next run. You may place SEVERAL orders in one block, and normally should.
 
 ```orders
 {{"orders": [
-  {{"side": "buy", "code": "SOL", "usd": 500, "stop_loss": 130.0, "take_profit": 220.0, "reason": "why, in one line"}}
+  {{"side": "buy", "code": "SOL", "usd": 70, "stop_loss": 130.0, "take_profit": 220.0, "reason": "why, in one line"}},
+  {{"side": "buy", "code": "ARB", "usd": 70, "stop_loss": 0.148, "take_profit": 0.191, "reason": "why, in one line"}}
 ]}}
 ```
+
+YOU RUN A BOOK OF ABOUT {target_positions} NAMES, NOT ONE TRADE AT A TIME. Your briefing
+counts your free slots every run. A free slot is capital doing nothing, and a book of one
+position is an under-filled book, not a cautious one -- the risk that matters here is
+concentration, and {target_positions} independent positions carry less of it than one
+position four times the size. If four setups on your screen each clear the bar, take four.
+Assess every one on its own merits; do not rank them against each other and keep only the
+best, because you are not choosing one trade, you are filling slots.
+
+The bar itself does not move for any of this. It is the same bar, applied more often --
+volume comes from looking at more charts, never from lowering it.
 
 YOU ONLY DECIDE ENTRIES. You cannot close a position -- there is no sell you can place.
 A position leaves on the stop_loss or the take_profit you committed when you opened it,
@@ -169,7 +203,10 @@ because you held winners a median of 2.0 hours and losers 8.7 hours. Taking prof
 and giving losses room is what lost the money, not the coins you picked.
 
 Rules enforced in code, not by you:
-  * Buys are sized in `usd`. No single order may exceed {max_pct}% of total equity.
+  * Buys are sized in `usd`. No single order may exceed {max_pct}% of total equity --
+    that is roughly one slot, and it is the size to work in.
+  * No single coin may exceed {max_position_pct}% of equity in total, add-ons included.
+    Capital that cannot go into one name should go into another, not into a bigger bet.
   * You cannot spend cash you do not have.
   * Fills use the cached price, not a price you state. Do not predict your fill.
   * Every buy MUST set both `stop_loss` and `take_profit` as real numeric prices (not a
@@ -179,14 +216,38 @@ Rules enforced in code, not by you:
   * The target must be at least {min_rr:g}x the distance to the stop. At a 42% win rate
     that ratio is what turns this book positive on arithmetic alone. If a trade is not
     worth {min_rr:g}:1 to you, it is not worth taking -- that is the trade-off, and
-    passing is a perfectly good answer.
+    passing on that one is a perfectly good answer.
   * Adding to a position keeps its levels unless you state new ones, and does NOT restart
     its {max_hold_hours:g}h clock.
   * A coin stopped out cannot be re-bought for {cooldown_hours:g}h -- that failed thesis
     needs to cool off, not get re-entered on the next momentum call.
-An empty list is a legitimate and often correct answer. Report your reasoning in prose
-above the block. If you are not trading, say why.
+  * Churn costs {fee_pct}% per side. That is an argument against trading the same coin
+    repeatedly, not against holding several different ones.
+
+If nothing on the screen clears the bar, an empty list is the right answer and you should
+say so in one line. But check the whole screened list before concluding that -- it is
+built from the entry patterns you are asked to look for, with the extended charts already
+filtered out, so on most runs something on it is worth a position. Report your reasoning
+in prose above the block.
 """
+
+
+def render_order_instructions() -> str:
+    """ORDER_INSTRUCTIONS with this module's own limits filled in.
+
+    The caller used to assemble these seven keyword arguments itself, and so did two
+    tests, so adding one placeholder to the template broke all three at once with a
+    KeyError far from the edit. The values are this module's to know; nobody else should
+    have to keep a list of them in sync.
+    """
+    return ORDER_INSTRUCTIONS.format(
+        fee_pct=DEFAULT_FEE_PCT,
+        max_pct=MAX_ORDER_PCT_OF_EQUITY,
+        max_position_pct=MAX_POSITION_PCT_OF_EQUITY,
+        target_positions=TARGET_CONCURRENT_POSITIONS,
+        cooldown_hours=STOP_LOSS_COOLDOWN_HOURS,
+        min_rr=MIN_REWARD_RISK,
+        max_hold_hours=MAX_HOLD_HOURS)
 
 
 def init_paper_db(db_path: str) -> None:
@@ -373,6 +434,31 @@ def portfolio(db_path: str, name: str = "crypto") -> dict:
     }
 
 
+def book_slots(db_path: str, name: str = "crypto") -> dict:
+    """How full the book is, in names rather than dollars.
+
+    Dollars were always in the briefing; names never were, and "one position, 96% cash"
+    reads as a fully-deployed book if you only look at the P&L line. This is what the
+    desk counts its free slots against.
+    """
+    snap = portfolio(db_path, name)
+    open_names = len(snap["positions"])
+    free = max(0, TARGET_CONCURRENT_POSITIONS - open_names)
+    slot = snap["equity"] * MAX_ORDER_PCT_OF_EQUITY / 100
+    return {
+        "open": open_names,
+        "target": TARGET_CONCURRENT_POSITIONS,
+        "free": free,
+        "cash": snap["cash"],
+        "equity": snap["equity"],
+        "slot_size": round(slot, 2),
+        # What can actually be deployed right now: free slots at a full slot each, bounded
+        # by the cash on hand. A desk told it has four free slots and $6 of cash has been
+        # told something useless.
+        "deployable": round(min(snap["cash"], free * slot), 2),
+    }
+
+
 _FENCE = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.S)
 
 
@@ -506,7 +592,19 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 cap = equity * MAX_ORDER_PCT_OF_EQUITY / 100
                 if usd > cap:
                     reject(order, f"${usd:,.2f} exceeds the {MAX_ORDER_PCT_OF_EQUITY}% "
-                                  f"per-order cap of ${cap:,.2f}")
+                                  f"per-order cap of ${cap:,.2f} -- the book is meant to "
+                                  f"run about {TARGET_CONCURRENT_POSITIONS} names at once, "
+                                  f"so size for a slot rather than for the whole account")
+                    continue
+                # Existing exposure counts toward the per-coin cap, so a position cannot
+                # be walked past it one compliant add-on at a time.
+                existing = (pos["qty"] * price) if pos is not None else 0.0
+                pos_cap = equity * MAX_POSITION_PCT_OF_EQUITY / 100
+                if existing + usd > pos_cap + 1e-9:
+                    reject(order, f"{code} would reach ${existing + usd:,.2f}, past the "
+                                  f"{MAX_POSITION_PCT_OF_EQUITY}% per-coin cap of "
+                                  f"${pos_cap:,.2f} (already holding ${existing:,.2f}) -- "
+                                  f"put the capital into a different name instead")
                     continue
                 fee = usd * fee_pct / 100
                 if usd + fee > cash + 1e-9:

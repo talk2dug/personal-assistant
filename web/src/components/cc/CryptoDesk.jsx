@@ -19,7 +19,13 @@ function fmtPrice(v) {
  */
 export default function CryptoDesk({ crypto, error, onOpen }) {
   const book = crypto?.book
-  const positions = (book?.positions || []).slice(0, 4)
+  // The board must never exceed 100vh, so this panel stays bounded -- but the desk
+  // now runs a book of about six names rather than one, and silently dropping the
+  // rest would make a full book look like a half-empty one. Show four, count the
+  // rest; the Crypto section lists them all.
+  const allPositions = book?.positions || []
+  const positions = allPositions.slice(0, 4)
+  const hidden = allPositions.length - positions.length
   const up = (book?.total_return ?? 0) >= 0
 
   return (
@@ -64,6 +70,9 @@ export default function CryptoDesk({ crypto, error, onOpen }) {
                   </span>
                 </div>
               ))}
+              {hidden > 0 && (
+                <p className="cc-subtle">+{hidden} more open</p>
+              )}
             </div>
           )}
         </>

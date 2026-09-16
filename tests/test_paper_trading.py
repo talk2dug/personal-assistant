@@ -273,11 +273,7 @@ def test_cooldown_expires_after_the_configured_window(db, monkeypatch):
 
 def test_order_instructions_template_survives_formatting():
     """It embeds JSON, which is exactly what broke the verdict template."""
-    out = paper_trading.ORDER_INSTRUCTIONS.format(
-        fee_pct=paper_trading.DEFAULT_FEE_PCT, max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
-        cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS,
-        min_rr=paper_trading.MIN_REWARD_RISK,
-        max_hold_hours=paper_trading.MAX_HOLD_HOURS)
+    out = paper_trading.render_order_instructions()
     assert '"side": "buy"' in out and "0.1" in out
 
 
@@ -535,13 +531,75 @@ class TestMechanicalExits:
         assert len(r["portfolio"]["positions"]) == 1
 
     def test_the_new_rules_reach_the_employees_prompt(self, db):
-        out = paper_trading.ORDER_INSTRUCTIONS.format(
-            fee_pct=paper_trading.DEFAULT_FEE_PCT,
-            max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
-            cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS,
-            min_rr=paper_trading.MIN_REWARD_RISK,
-            max_hold_hours=paper_trading.MAX_HOLD_HOURS)
+        out = paper_trading.render_order_instructions()
         assert "YOU ONLY DECIDE ENTRIES" in out
         assert "cannot close a position" in out
         # The model is told the numbers behind the rule, not just the rule.
         assert "2.0 hours and losers 8.7 hours" in out
+
+
+class TestRunningABook:
+    """The desk held one position at a time and nothing said it should not.
+
+    Nothing in the ledger required that -- the cause was upstream, in a screen that only
+    ever showed it two or three charts (see test_technicals) -- but with the screen widened
+    there had to be something bounding concentration too, or a wider funnel just means a
+    bigger single bet. These are the two caps and the slot count that replace it.
+    """
+
+    def test_a_single_order_is_capped_at_a_slot_not_the_account(self, db):
+        # $10,000 equity, 15% cap: $1,500 is the most one order may be.
+        r = paper_trading.execute_orders(db, [buy("SOL", 2_000)])
+        assert not r["fills"]
+        assert "per-order cap" in r["rejections"][0]["reason"]
+
+        r = paper_trading.execute_orders(db, [buy("SOL", 1_400)])
+        assert r["fills"]
+
+    def test_add_ons_cannot_walk_one_coin_past_the_per_coin_cap(self, db):
+        """The per-order cap alone never bounded a POSITION: three compliant add-ons to
+        one ticker clear it one at a time and still end up as the whole book."""
+        assert paper_trading.execute_orders(db, [buy("SOL", 1_400)])["fills"]
+        # $1,400 held + $1,400 more = $2,800, past the 20% ($2,000) per-coin cap.
+        r = paper_trading.execute_orders(db, [buy("SOL", 1_400)])
+        assert not r["fills"]
+        reason = r["rejections"][0]["reason"]
+        assert "per-coin cap" in reason
+        assert "different name" in reason
+
+    def test_a_second_coin_is_not_blocked_by_the_first(self, db):
+        """The per-coin cap must bound concentration, never total deployment -- the whole
+        point is that refused capital goes into another name."""
+        assert paper_trading.execute_orders(db, [buy("SOL", 1_400)])["fills"]
+        assert paper_trading.execute_orders(db, [buy("BTC", 1_400)])["fills"]
+        assert len(paper_trading.portfolio(db)["positions"]) == 2
+
+    def test_several_buys_in_one_block_all_fill(self, db):
+        """Filling four slots in one run is the ordinary case now, not an edge case."""
+        r = paper_trading.execute_orders(
+            db, [buy("SOL", 900), buy("BTC", 900), buy("PEPE", 900)])
+        assert len(r["fills"]) == 3
+        assert len(r["rejections"]) == 0
+
+    def test_slots_are_counted_in_names_not_dollars(self, db):
+        empty = paper_trading.book_slots(db)
+        assert empty["open"] == 0
+        assert empty["free"] == paper_trading.TARGET_CONCURRENT_POSITIONS
+
+        paper_trading.execute_orders(db, [buy("SOL", 900), buy("BTC", 900)])
+        held = paper_trading.book_slots(db)
+        assert held["open"] == 2
+        assert held["free"] == paper_trading.TARGET_CONCURRENT_POSITIONS - 2
+        # A slot is sized off equity, and deployable is bounded by actual cash -- a desk
+        # told it has four free slots and no cash has been told something useless.
+        assert held["slot_size"] > 0
+        assert held["deployable"] <= held["cash"] + 1e-9
+
+    def test_the_book_framing_reaches_the_prompt(self, db):
+        out = paper_trading.render_order_instructions()
+        assert "YOU RUN A BOOK" in out
+        assert str(paper_trading.TARGET_CONCURRENT_POSITIONS) in out
+        # The bar itself must survive the push for volume -- this is the line that says so.
+        assert "never from lowering it" in out
+        # And the old doubled "an empty list is often correct" thumb on the scale is gone.
+        assert "often correct" not in out

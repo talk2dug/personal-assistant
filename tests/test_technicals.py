@@ -9,6 +9,7 @@ So the tests that matter here are not "does RSI compute". They are: does a rally
 out actually read as running out, does a clean trend read as worth holding, and does the
 module refuse to produce a confident number from four data points.
 """
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -201,3 +202,116 @@ class TestTheBriefing:
         monkeypatch.setattr(technicals, "read", flaky)
         text = technicals.briefing(db_path, ["BAD", "BTC"])
         assert "unavailable" in text and "BTC" in text
+
+
+def _pullback(scale=1.0):
+    """A clean uptrend that has pulled back off its highs.
+
+    This is the setup the desk is asked to look for and the one its old movers-only screen
+    could never show it -- by the time a coin reaches a movers list it is at the top of its
+    range, not backed off it. The sine wobble matters: a perfectly straight rise pins RSI
+    at 100, which is not a chart any real coin prints.
+    """
+    rise = [(100 + i * 0.4 + 1.5 * math.sin(i / 6.0)) * scale for i in range(200)]
+    return rise + [rise[-1] - i * 0.9 * scale for i in range(30)]
+
+
+def _extended(scale=1.0):
+    """Straight up into the close: RSI pinned, sitting on the highs. This is what a coin on
+    the 1h movers list looks like, and it is exactly what the rules forbid buying."""
+    return [(100 + i * 0.6) * scale for i in range(200)]
+
+
+class TestScan:
+    def test_scan_matches_read_coin_for_coin(self, db_path):
+        """One batched pass has to produce the same chart as the per-coin read, or the
+        screen would rank on numbers the model never sees."""
+        _seed(db_path, "AAA", _pullback())
+        _seed(db_path, "BBB", _extended())
+        scanned = technicals.scan(db_path, ["AAA", "BBB"], "5m")
+        for code in ("AAA", "BBB"):
+            assert scanned[code] == technicals.read(db_path, code, "5m")
+
+    def test_a_coin_with_no_history_is_reported_not_dropped(self, db_path):
+        _seed(db_path, "AAA", _pullback())
+        scanned = technicals.scan(db_path, ["AAA", "NOPE"], "5m")
+        assert scanned["NOPE"]["candles"] == 0
+        assert "no price history" in scanned["NOPE"]["note"]
+
+    def test_an_unknown_bucket_is_refused(self, db_path):
+        with pytest.raises(ValueError):
+            technicals.scan(db_path, ["AAA"], "3d")
+
+
+class TestScreening:
+    """The funnel that stopped the desk trading.
+
+    It was told "look for entries on the curve, not on the movers list", and the only
+    charts it was ever handed WERE the movers list. Every one was extended, it correctly
+    refused to chase all of them, and it proposed nothing -- six trades in four days with
+    242 coins tradeable, writing "only three coins have technicals this run" as it went.
+    These pin the two halves: an extended chart never reaches the shortlist, and a
+    pulled-back one does.
+    """
+
+    def test_an_extended_chart_is_filtered_out_before_the_desk_sees_it(self, db_path):
+        _seed(db_path, "HOT", _extended())
+        assert technicals.classify_setup(technicals.read(db_path, "HOT", "5m")) is None
+
+    def test_a_pullback_in_an_uptrend_is_what_gets_through(self, db_path):
+        _seed(db_path, "CALM", _pullback())
+        verdict = technicals.classify_setup(technicals.read(db_path, "CALM", "5m"))
+        assert verdict is not None
+        assert verdict[1] == "pullback in uptrend"
+
+    def test_a_chart_too_short_to_read_is_not_guessed_at(self, db_path):
+        _seed(db_path, "NEW", [100, 101, 102])
+        assert technicals.classify_setup(technicals.read(db_path, "NEW", "5m")) is None
+
+    def test_the_shortlist_ranks_setups_and_drops_the_rest(self, db_path):
+        _seed(db_path, "CALM", _pullback())
+        _seed(db_path, "HOT", _extended())
+        readings = technicals.scan(db_path, ["CALM", "HOT"], "5m")
+        picks = technicals.rank_setups(readings, order=["CALM", "HOT"])
+        assert [p["code"] for p in picks] == ["CALM"]
+
+    def test_what_is_already_held_is_not_offered_as_a_new_entry(self, db_path):
+        _seed(db_path, "CALM", _pullback())
+        readings = technicals.scan(db_path, ["CALM"], "5m")
+        assert technicals.rank_setups(readings, exclude={"CALM"}) == []
+
+    def test_ties_break_towards_the_more_liquid_coin(self, db_path):
+        _seed(db_path, "BIG", _pullback())
+        _seed(db_path, "SMALL", _pullback())
+        readings = technicals.scan(db_path, ["BIG", "SMALL"], "5m")
+        picks = technicals.rank_setups(readings, order=["BIG", "SMALL"])
+        assert [p["code"] for p in picks] == ["BIG", "SMALL"]
+
+
+class TestDeskBriefing:
+    def test_positions_and_candidates_both_appear(self, db_path):
+        _seed(db_path, "HELD", _pullback(scale=0.5))
+        _seed(db_path, "CALM", _pullback())
+        _seed(db_path, "HOT", _extended())
+        out = technicals.desk_briefing(db_path, ["HELD", "CALM", "HOT"], ["HELD"], "5m")
+        assert "YOUR POSITIONS ON THE CHART" in out
+        assert "SCREENED FOR ENTRIES" in out
+        assert "CALM" in out
+        # A held coin belongs in the positions block, never in the entry shortlist.
+        assert out.index("HELD") < out.index("SCREENED FOR ENTRIES")
+        assert "HELD" not in out[out.index("SCREENED FOR ENTRIES"):]
+
+    def test_an_empty_screen_says_so_as_a_market_condition(self, db_path):
+        """The distinction the desk could never draw: nothing qualifying is a real state of
+        the market; two charts out of 242 is a broken funnel. It saw the second and
+        reported the first, on run after run."""
+        _seed(db_path, "HOT", _extended())
+        out = technicals.desk_briefing(db_path, ["HOT"], [], "5m")
+        assert "none of the" in out
+        assert "real market condition" in out
+
+    def test_a_flat_book_still_gets_a_screen(self, db_path):
+        _seed(db_path, "CALM", _pullback())
+        out = technicals.desk_briefing(db_path, ["CALM"], [], "5m")
+        assert "YOUR POSITIONS ON THE CHART" not in out
+        assert "CALM" in out

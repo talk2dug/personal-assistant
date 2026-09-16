@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS personal_projects (
     goal TEXT,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'done', 'dropped')),
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- Same split as personal_tasks.track, and the source of truth for the tasks
+    -- under it: a task in a project inherits the project's track rather than being
+    -- classified on its own, so the two can never disagree.
+    track TEXT NOT NULL DEFAULT 'project' CHECK (track IN ('personal', 'project'))
 );
 
 CREATE TABLE IF NOT EXISTS personal_tasks (
@@ -31,6 +35,18 @@ CREATE TABLE IF NOT EXISTS personal_tasks (
     text TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'doing', 'done', 'dropped')),
     priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high')),
+    -- Whose life this belongs to: HIS, or the system's.
+    --
+    -- "Personal tasks is what the system was designed to help with; project tasks are
+    -- what's needed to make the system." Mixing them put "wake-word arbitration" in the
+    -- same shortlist as "find a vet for Ghost", which makes planning a day impossible --
+    -- one of those is a Saturday errand and the other is an evening at a keyboard, and
+    -- ranking them against each other is meaningless.
+    --
+    -- Defaults to 'personal' because that is what a task created by talking to Jarvis
+    -- about his day almost always is; build work arrives through a project, which carries
+    -- its own track down to its tasks.
+    track TEXT NOT NULL DEFAULT 'personal' CHECK (track IN ('personal', 'project')),
     due_at TEXT,
     -- Set once the due-date watchdog (scheduler.py's run_task_watchdog) has notified the
     -- owner this task is due, so a slow poll interval can't notify the same task twice.
@@ -111,6 +127,22 @@ CREATE TABLE IF NOT EXISTS rhythm_nudges (
     sent_at TEXT NOT NULL,
     UNIQUE (rhythm_id, on_date, kind)
 );
+
+-- What he actually committed to today, as distinct from what is merely open.
+--
+-- Not the same as status='doing': that means started. This means "I am choosing this for
+-- today", which is the decision the day planner exists to help him make, and it has to be
+-- per-day so that not getting to something is visible as a fact rather than quietly
+-- carried forward as though it were still today's plan.
+CREATE TABLE IF NOT EXISTS day_picks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    task_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    on_date TEXT NOT NULL,
+    picked_at TEXT NOT NULL,
+    UNIQUE (task_id, on_date)
+);
+CREATE INDEX IF NOT EXISTS idx_day_picks_date ON day_picks(owner_user_id, on_date);
 
 CREATE TABLE IF NOT EXISTS task_details (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -364,6 +396,24 @@ def init_personal_db(db_path: str) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(personal_tasks)")}
         if "notified_at" not in cols:
             conn.execute("ALTER TABLE personal_tasks ADD COLUMN notified_at TEXT")
+
+        # Splitting his life from the system's. Every project that existed when this was
+        # added was Jarvis build work, and every task under one inherits that; the
+        # unparented ones were his errands -- the vet, the car, the licence.
+        #
+        # Backfilled by PROJECT rather than by reading the task text, because guessing
+        # from wording is exactly how "wake-word arbitration" ends up filed as a Saturday
+        # errand. A handful of unparented build tasks will be misfiled as personal, which
+        # is visible and one click to fix; the alternative silently mixes them again.
+        project_cols = {row[1] for row in conn.execute("PRAGMA table_info(personal_projects)")}
+        if "track" not in project_cols:
+            conn.execute("ALTER TABLE personal_projects ADD COLUMN track TEXT NOT NULL "
+                         "DEFAULT 'project'")
+        if "track" not in cols:
+            conn.execute("ALTER TABLE personal_tasks ADD COLUMN track TEXT NOT NULL "
+                         "DEFAULT 'personal'")
+            conn.execute("UPDATE personal_tasks SET track = 'project' "
+                         "WHERE project_id IS NOT NULL")
         conn.commit()
 
 
@@ -426,22 +476,44 @@ def update_project(db_path: str, owner_user_id: int, project_id: int, **fields) 
 
 # --- tasks -------------------------------------------------------------------
 
+TASK_TRACKS = ("personal", "project")
+
+
 def create_task(
     db_path: str, owner_user_id: int, text: str, project_id: int | None = None,
-    priority: str = "normal", due_at: str | None = None,
+    priority: str = "normal", due_at: str | None = None, track: str | None = None,
 ) -> int:
+    """A task, on one of the two tracks.
+
+    An explicit `track` wins; otherwise a task inside a project takes that project's,
+    which is what keeps the two from ever disagreeing. With neither, it is personal --
+    a task created by talking to Jarvis about the day almost always is.
+    """
+    if track is not None and track not in TASK_TRACKS:
+        raise ValueError(f"track must be one of {TASK_TRACKS}")
     now = _now()
     with closing(_connect(db_path)) as conn:
+        if track is None:
+            track = "personal"
+            if project_id is not None:
+                row = conn.execute(
+                    "SELECT track FROM personal_projects WHERE id = ? AND owner_user_id = ?",
+                    (project_id, owner_user_id)).fetchone()
+                if row is not None:
+                    track = row["track"]
         cur = conn.execute(
-            "INSERT INTO personal_tasks (owner_user_id, project_id, text, priority, due_at, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (owner_user_id, project_id, text, priority, due_at, now, now),
+            "INSERT INTO personal_tasks (owner_user_id, project_id, text, priority, due_at,"
+            " track, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (owner_user_id, project_id, text, priority, due_at, track, now, now),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def list_tasks(db_path: str, owner_user_id: int, status: str | None = None, project_id: int | None = None):
+def list_tasks(db_path: str, owner_user_id: int, status: str | None = None,
+               project_id: int | None = None, track: str | None = None):
+    """His tasks. `track` filters to one side of the split; None returns both, which is
+    right for a project view and wrong for planning a day."""
     query = (
         "SELECT t.*, p.name AS project_name FROM personal_tasks t"
         " LEFT JOIN personal_projects p ON p.id = t.project_id"
@@ -454,6 +526,9 @@ def list_tasks(db_path: str, owner_user_id: int, status: str | None = None, proj
     if project_id is not None:
         query += " AND t.project_id = ?"
         params.append(project_id)
+    if track is not None:
+        query += " AND t.track = ?"
+        params.append(track)
     query += (
         " ORDER BY CASE t.status WHEN 'doing' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,"
         " CASE t.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, t.created_at"
@@ -465,10 +540,15 @@ def list_tasks(db_path: str, owner_user_id: int, status: str | None = None, proj
 def update_task(db_path: str, owner_user_id: int, task_id: int, **fields) -> bool:
     allowed = {
         k: v for k, v in fields.items()
-        if k in ("text", "status", "priority", "due_at", "project_id") and v is not None
+        if k in ("text", "status", "priority", "due_at", "project_id", "track")
+        and v is not None
     }
     if not allowed:
         return False
+    # Moving a misfiled task across the split, which the backfill guarantees there will
+    # be some of: it classified by project, and an unparented build task landed as personal.
+    if "track" in allowed and allowed["track"] not in TASK_TRACKS:
+        raise ValueError(f"track must be one of {TASK_TRACKS}")
     # A due_at edit means any earlier due-date notification is stale -- without this, a
     # task rescheduled after it already fired once would silently never notify again.
     if "due_at" in allowed:
@@ -660,6 +740,36 @@ def log_rhythm(db_path: str, rhythm_id: int, on_date: str, state: str = "done",
             (rhythm_id, on_date, state, _now(), note, source))
         conn.commit()
         return True
+
+
+def pick_for_day(db_path: str, owner_user_id: int, task_id: int, on_date: str) -> bool:
+    """Commits a task to a given day. Idempotent -- picking twice is not two picks."""
+    with closing(_connect(db_path)) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO day_picks (owner_user_id, task_id, on_date, picked_at)"
+                " VALUES (?, ?, ?, ?)",
+                (owner_user_id, task_id, on_date, _now()))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def unpick_for_day(db_path: str, owner_user_id: int, task_id: int, on_date: str) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "DELETE FROM day_picks WHERE owner_user_id = ? AND task_id = ? AND on_date = ?",
+            (owner_user_id, task_id, on_date))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def picks_for_day(db_path: str, owner_user_id: int, on_date: str) -> list[int]:
+    with closing(_connect(db_path)) as conn:
+        return [r["task_id"] for r in conn.execute(
+            "SELECT task_id FROM day_picks WHERE owner_user_id = ? AND on_date = ?"
+            " ORDER BY picked_at", (owner_user_id, on_date))]
 
 
 def due_tasks(db_path: str, as_of: str | None = None):

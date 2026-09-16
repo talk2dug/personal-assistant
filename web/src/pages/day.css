@@ -1,0 +1,220 @@
+/* The day planner. Same blueprint language as the rest of the board -- this opens as a
+   section modal over it, so it has to read as the same object rather than a second app.
+
+   One rule drives most of the sizing: the thing he is being asked to DECIDE is always the
+   largest thing in its section, and everything else is context around it. */
+
+.day-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 2px 4px 20px;
+}
+
+.day-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+
+.day-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.04em;
+  color: var(--steel-bright);
+}
+
+.day-date { font-size: 11.5px; color: var(--text-faint); }
+
+/* The one piece of the header that is genuinely urgent. */
+.day-next {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--amber);
+  white-space: nowrap;
+}
+
+.day-block { display: flex; flex-direction: column; gap: 9px; }
+
+.day-block h3 {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--steel-mid);
+}
+
+.day-count { font-family: var(--font-hud); font-size: 10.5px; letter-spacing: 0.04em; color: var(--text-faint); }
+.day-count.is-warn { color: var(--amber); }
+
+.day-sub {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
+/* --- the shape of the day ------------------------------------------------ */
+
+.day-anchors, .day-habits, .day-blocked { list-style: none; margin: 0; padding: 0; }
+
+.day-anchor {
+  display: grid;
+  grid-template-columns: auto 48px 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--divider);
+  font-size: 13px;
+}
+
+.day-anchor.is-done { opacity: 0.5; }
+.day-anchor.is-done .day-anchor-name { text-decoration: line-through; }
+.day-anchor.is-skipped { opacity: 0.42; }
+
+.day-anchor-time { font-family: var(--font-display); color: var(--steel-bright); font-size: 12.5px; }
+.day-anchor-name { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.day-anchor-when { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
+
+/* A thing that cannot slip without consequence -- leaving for work, a dose of medicine. */
+.day-hard { color: var(--amber); margin-left: 5px; font-weight: bold; }
+
+/* Big enough to hit on a phone without aiming. */
+.day-tick {
+  appearance: none;
+  cursor: pointer;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  background: transparent;
+  border: 1px solid rgba(148, 188, 227, 0.4);
+  color: var(--steel-bright);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+}
+
+.day-tick:hover:not(:disabled) { background: rgba(148, 188, 227, 0.16); }
+.day-tick:disabled { opacity: 0.4; cursor: default; }
+
+.day-skip {
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  color: var(--text-faint);
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 2px 4px;
+}
+
+.day-skip:hover:not(:disabled) { color: var(--text); }
+
+/* --- choosing the day ----------------------------------------------------- */
+
+.day-nothing { margin: 0; font-size: 12.5px; color: var(--text-dim); font-style: italic; }
+
+.day-picked, .day-options { display: flex; flex-direction: column; gap: 7px; }
+
+.day-task {
+  border: 1px solid var(--divider);
+  border-left: 2px solid transparent;
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* Chosen work is the commitment, so it is the one that gets the colour. */
+.day-task.is-picked {
+  border-left-color: var(--amber);
+  background: rgba(232, 163, 61, 0.06);
+}
+
+.day-task-head { display: flex; align-items: baseline; gap: 9px; }
+
+.day-task-btn {
+  appearance: none;
+  cursor: pointer;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: 1px solid rgba(148, 188, 227, 0.4);
+  color: var(--steel-bright);
+  font-size: 15px;
+  line-height: 1;
+  padding: 0;
+}
+
+.day-task-btn:hover:not(:disabled) { background: rgba(148, 188, 227, 0.16); }
+.day-task-btn:disabled { opacity: 0.4; cursor: default; }
+
+.day-task-text { flex: 1; min-width: 0; font-size: 13.5px; color: var(--text); line-height: 1.4; }
+
+/* The weight, shown small: it explains the order without becoming the point. */
+.day-task-score {
+  font-family: var(--font-display);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.day-task-why { font-size: 11px; color: var(--steel-mid); padding-left: 31px; }
+
+/* --- what the task needs to actually get done ----------------------------- */
+
+.day-details { list-style: none; margin: 2px 0 0; padding: 0 0 0 31px; display: flex; flex-direction: column; gap: 3px; }
+
+.day-detail { font-size: 12px; color: var(--text-dim); display: flex; gap: 7px; flex-wrap: wrap; }
+
+.day-detail-label { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; }
+
+/* Tappable: retyping a phone number is exactly the friction that stops a task. */
+.day-detail a { color: var(--steel-bright); text-decoration: none; border-bottom: 1px solid rgba(148, 188, 227, 0.35); }
+.day-detail a:hover { border-bottom-color: var(--steel-bright); }
+
+/* --- blocked -------------------------------------------------------------- */
+
+.day-blocked li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--divider);
+  margin-bottom: 4px;
+  opacity: 0.65;
+}
+
+.day-blocked-text { font-size: 12.5px; color: var(--text-dim); }
+.day-blocked-why { font-size: 10.5px; color: var(--text-faint); }
+
+/* --- balance -------------------------------------------------------------- */
+
+.day-habit {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--divider);
+  font-size: 13px;
+}
+
+.day-habit-name { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.day-habit-rate { font-family: var(--font-display); font-size: 11.5px; color: var(--steel-mid); white-space: nowrap; }
+.day-habit-last { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
+
+.day-habit.is-slipping .day-habit-rate { color: var(--amber); }
+.day-habit.is-slipping .day-habit-last { color: var(--amber); }
+
+@media (max-width: 620px) {
+  .day-anchor { grid-template-columns: auto 44px 1fr; }
+  .day-anchor-when, .day-skip { grid-column: 3; justify-self: end; }
+  .day-habit { grid-template-columns: auto 1fr auto; }
+  .day-habit-last { grid-column: 2 / 4; justify-self: end; }
+  .day-task-why, .day-details { padding-left: 0; }
+}

@@ -11,6 +11,7 @@
 // everything else reads fine in the standard column.
 import Agents from './pages/Agents'
 import Credit from './pages/Credit'
+import Day from './pages/Day'
 import Crypto from './pages/Crypto'
 import Email from './pages/Email'
 import Finance from './pages/Finance'
@@ -23,6 +24,10 @@ import Schedule from './pages/Schedule'
 import Tasks from './pages/Tasks'
 
 export const SECTIONS = [
+  { key: 'day', label: 'My day', element: Day, wide: true,
+    context: 'the Day planner, showing the routine anchors for today, the personal tasks he '
+      + 'has chosen for today and the ones he could pick from, what is blocked and on '
+      + 'what, and which of his regular habits are slipping' },
   { key: 'tasks', label: 'Tasks', element: Tasks, wide: true,
     context: 'the Tasks section, showing open tasks, their due dates and priorities' },
   { key: 'schedule', label: 'Schedule', element: Schedule, wide: true,

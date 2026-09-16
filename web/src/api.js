@@ -288,6 +288,25 @@ export const api = {
   // What has to be settled by a human before any plan is worth making, and the planner's
   // own headline action. Separate calls because they answer different questions: one is a
   // queue of work, the other is the single thing to do first.
+  // The day planner. One GET for the whole plan: the three answers are related, and
+  // fetching them separately lets the page render a plan that contradicts itself.
+  dayPlan: (onDate, track) => request('/api/day'
+    + (onDate || track ? `?${new URLSearchParams({
+        ...(onDate ? { on_date: onDate } : {}),
+        ...(track ? { track } : {}),
+      })}` : '')),
+  pickForDay: (taskId, onDate) =>
+    request(`/api/day/pick/${taskId}`, { method: 'POST', body: JSON.stringify({ on_date: onDate }) }),
+  unpickForDay: (taskId, onDate) =>
+    request(`/api/day/pick/${taskId}${onDate ? `?on_date=${onDate}` : ''}`, { method: 'DELETE' }),
+  logRhythm: (rhythmId, state, onDate) =>
+    request(`/api/day/rhythm/${rhythmId}/log`, {
+      method: 'POST', body: JSON.stringify({ state, on_date: onDate }),
+    }),
+  clearRhythmLog: (rhythmId, onDate) =>
+    request(`/api/day/rhythm/${rhythmId}/log${onDate ? `?on_date=${onDate}` : ''}`,
+            { method: 'DELETE' }),
+
   financeReconcile: () => request('/api/finance/reconcile'),
   financePlanner: () => request('/api/finance/planner'),
   mergeDebts: (keepId, mergeIds, note) =>

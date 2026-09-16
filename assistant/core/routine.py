@@ -160,16 +160,26 @@ def weigh_task(task: dict, today: date, blocks_count: int = 0) -> dict:
     return {"score": round(score, 1), "reasons": reasons}
 
 
-def shortlist(db_path: str, owner_user_id: int, today: date, limit: int = 5) -> dict:
+def shortlist(db_path: str, owner_user_id: int, today: date, limit: int = 5,
+              track: str | None = "personal") -> dict:
     """The few tasks worth choosing between today, and the ones that are blocked.
 
     Deliberately short. The point is to make choosing possible, and a list long enough to
     need scrolling has already failed at that.
+
+    `track` defaults to personal, which is the whole reason the column exists: "wake-word
+    arbitration" and "find a vet for Ghost" are not comparable, and ranking them against
+    each other produces a list that is useless for planning either kind of day. Pass None
+    to weigh both together, or 'project' for the build side.
     """
+    query = ("SELECT * FROM personal_tasks WHERE owner_user_id = ? "
+             "AND status IN ('open', 'doing')")
+    params: list = [owner_user_id]
+    if track is not None:
+        query += " AND track = ?"
+        params.append(track)
     with closing(_connect(db_path)) as conn:
-        tasks = [dict(r) for r in conn.execute(
-            "SELECT * FROM personal_tasks WHERE owner_user_id = ? AND status IN ('open', 'doing')",
-            (owner_user_id,))]
+        tasks = [dict(r) for r in conn.execute(query, params)]
     if not tasks:
         return {"pick_from": [], "blocked": [], "open_count": 0}
 
@@ -261,7 +271,8 @@ def rhythm_status(db_path: str, owner_user_id: int, today: date) -> dict:
 
 
 def plan_day(db_path: str, owner_user_id: int, tz_name: str = "America/New_York",
-             today: date | None = None, limit: int = 5) -> dict:
+             today: date | None = None, limit: int = 5,
+             track: str | None = "personal") -> dict:
     """Everything the 'plan my day' routine needs, as data.
 
     One call rather than three, because the three answers are related: what is already
@@ -271,14 +282,29 @@ def plan_day(db_path: str, owner_user_id: int, tz_name: str = "America/New_York"
     """
     today = today or _now_local(tz_name).date()
     rhythm = rhythm_status(db_path, owner_user_id, today)
-    tasks = shortlist(db_path, owner_user_id, today, limit=limit)
+    tasks = shortlist(db_path, owner_user_id, today, limit=limit, track=track)
     slipping = [h for h in rhythm["habits"] if h["slipping"]]
+
+    # What he already committed to today, lifted out of the shortlist so the plan reads as
+    # "here is your day" rather than re-offering him things he has already chosen.
+    from . import personal_db
+    picked_ids = personal_db.picks_for_day(db_path, owner_user_id, today.isoformat())
+    by_id = {t["id"]: t for t in tasks["pick_from"] + tasks["blocked"]}
+    picked = [by_id[i] for i in picked_ids if i in by_id]
+    tasks["pick_from"] = [t for t in tasks["pick_from"] if t["id"] not in set(picked_ids)]
+
+    details = personal_db.list_task_details(
+        db_path, [t["id"] for t in picked + tasks["pick_from"]])
+    for task in picked + tasks["pick_from"] + tasks["blocked"]:
+        task["details"] = details.get(task["id"], [])
+
     return {
         "date": today.isoformat(),
         "weekday": today.strftime("%A"),
         "anchors": [a for a in rhythm["anchors"] if a["due_today"]],
         "habits": rhythm["habits"],
         "slipping": slipping,
+        "picked": picked,
         **tasks,
     }
 

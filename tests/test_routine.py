@@ -532,3 +532,94 @@ class TestAnchorsWithNoLeadTime:
                                at_time="07:40", lead_minutes=15)
         for minute in (25, 30, 35, 39):
             assert routine.due_nudges(db_path, owner, now=self._at(7, minute)) != [], minute
+
+
+class TestKeepingHisLifeSeparateFromTheSystems:
+    """"Personal tasks is what the system was designed to help with; project tasks are
+    what's needed to make the system." Ranking "wake-word arbitration" against "find a vet
+    for Ghost" produces a list useless for planning either kind of day."""
+
+    def test_planning_a_day_shows_only_personal_work(self, db_path, owner):
+        project = personal_db.create_project(db_path, owner, "Build Jarvis")
+        personal_db.update_project(db_path, owner, project, track="project")
+        _task(db_path, owner, "Find a vet for Ghost")
+        _task(db_path, owner, "Wake-word arbitration", project_id=project)
+
+        plan = routine.plan_day(db_path, owner, today=TODAY)
+        assert [t["text"] for t in plan["pick_from"]] == ["Find a vet for Ghost"]
+        assert plan["open_count"] == 1
+
+    def test_the_build_side_is_still_reachable(self, db_path, owner):
+        project = personal_db.create_project(db_path, owner, "Build Jarvis")
+        personal_db.update_project(db_path, owner, project, track="project")
+        _task(db_path, owner, "Wake-word arbitration", project_id=project)
+        plan = routine.plan_day(db_path, owner, today=TODAY, track="project")
+        assert [t["text"] for t in plan["pick_from"]] == ["Wake-word arbitration"]
+
+    def test_a_task_inherits_its_project_s_track(self, db_path, owner):
+        """So the two can never disagree about which side a task is on."""
+        project = personal_db.create_project(db_path, owner, "Build Jarvis")
+        personal_db.update_project(db_path, owner, project, track="project")
+        task = _task(db_path, owner, "Some build work", project_id=project)
+        assert personal_db.list_tasks(db_path, owner)[0]["track"] == "project"
+        assert task
+
+    def test_a_task_with_no_project_is_personal(self, db_path, owner):
+        """A task created by talking to Jarvis about the day almost always is."""
+        _task(db_path, owner, "Find a vet")
+        assert personal_db.list_tasks(db_path, owner)[0]["track"] == "personal"
+
+    def test_an_explicit_track_beats_the_project_s(self, db_path, owner):
+        project = personal_db.create_project(db_path, owner, "Build Jarvis")
+        personal_db.update_project(db_path, owner, project, track="project")
+        _task(db_path, owner, "Buy a birthday present", project_id=project, track="personal")
+        assert personal_db.list_tasks(db_path, owner)[0]["track"] == "personal"
+
+    def test_a_misfiled_task_can_be_moved_across(self, db_path, owner):
+        """The backfill classified by project, so unparented build work landed as
+        personal -- one really did. Moving it must be possible."""
+        task = _task(db_path, owner, "Kiosk terminals run a browser for weeks")
+        assert personal_db.update_task(db_path, owner, task, track="project") is True
+        assert personal_db.list_tasks(db_path, owner)[0]["track"] == "project"
+
+    def test_an_unknown_track_is_refused(self, db_path, owner):
+        with pytest.raises(ValueError):
+            _task(db_path, owner, "Thing", track="whatever")
+
+
+class TestChoosingTheDay:
+    def test_a_chosen_task_moves_out_of_the_options(self, db_path, owner):
+        """The plan should read as "here is your day", not re-offer what he already chose."""
+        task = _task(db_path, owner, "Find a vet")
+        personal_db.pick_for_day(db_path, owner, task, TODAY.isoformat())
+        plan = routine.plan_day(db_path, owner, today=TODAY)
+        assert [t["id"] for t in plan["picked"]] == [task]
+        assert plan["pick_from"] == []
+
+    def test_picking_twice_is_not_two_picks(self, db_path, owner):
+        task = _task(db_path, owner, "Find a vet")
+        assert personal_db.pick_for_day(db_path, owner, task, TODAY.isoformat()) is True
+        assert personal_db.pick_for_day(db_path, owner, task, TODAY.isoformat()) is False
+        assert len(routine.plan_day(db_path, owner, today=TODAY)["picked"]) == 1
+
+    def test_a_pick_belongs_to_its_day_only(self, db_path, owner):
+        """Not getting to something shows up as a fact rather than quietly carrying
+        forward as though it were still today's plan."""
+        task = _task(db_path, owner, "Find a vet")
+        personal_db.pick_for_day(db_path, owner, task, (TODAY - timedelta(days=1)).isoformat())
+        assert routine.plan_day(db_path, owner, today=TODAY)["picked"] == []
+
+    def test_unpicking_returns_it_to_the_options(self, db_path, owner):
+        task = _task(db_path, owner, "Find a vet")
+        personal_db.pick_for_day(db_path, owner, task, TODAY.isoformat())
+        personal_db.unpick_for_day(db_path, owner, task, TODAY.isoformat())
+        plan = routine.plan_day(db_path, owner, today=TODAY)
+        assert plan["picked"] == []
+        assert [t["id"] for t in plan["pick_from"]] == [task]
+
+    def test_chosen_tasks_carry_what_is_needed_to_do_them(self, db_path, owner):
+        task = _task(db_path, owner, "Find a vet")
+        personal_db.add_task_detail(db_path, task, "phone", "804-555-0142", label="Old vet")
+        personal_db.pick_for_day(db_path, owner, task, TODAY.isoformat())
+        assert routine.plan_day(db_path, owner, today=TODAY)["picked"][0]["details"][0]["value"] \
+            == "804-555-0142"

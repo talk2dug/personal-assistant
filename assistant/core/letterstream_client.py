@@ -41,7 +41,20 @@ JOB_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{8,20}$")
 class LetterStreamError(Exception):
     def __init__(self, code, message):
         self.code = code
+        self.detail = str(message)
         super().__init__(f"LetterStream error {code}: {message}")
+
+    @property
+    def transient(self) -> bool:
+        """Whether this means "ask again later" rather than "this account is broken".
+
+        A rate limit is not a configuration problem. It was treated as one once: a crash
+        loop restarted the service ~190 times in six hours, every boot spent a status
+        request checking the balance, and the daily status quota ran out -- after which the
+        whole integration was disabled every session, so the ability to MAIL anything was
+        lost to a quota on a completely different endpoint. Nothing had ever been mailed.
+        """
+        return self.code == -997 or "rate limit" in self.detail.lower()
 
 
 def _unique_id() -> str:

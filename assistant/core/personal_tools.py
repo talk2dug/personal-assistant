@@ -98,6 +98,11 @@ PERSONAL_TOOLS = [
             "project_id": {"type": "integer", "description": "Optional personal project to file it under."},
             "priority": {"type": "string", "enum": ["low", "normal", "high"]},
             "due_at": {"type": "string", "description": "Optional local ISO 8601 date/time."},
+            "track": {"type": "string", "enum": ["personal", "project"], "description": (
+                "'personal' is his own life — errands, appointments, Ghost, the car — and is "
+                "the default. 'project' is work on building Jarvis itself. Only personal "
+                "tasks appear when planning his day, because ranking 'wake-word arbitration' "
+                "against 'find a vet' makes both lists useless.")},
         }, "required": ["text"]},
     }},
     {"type": "function", "function": {
@@ -341,6 +346,159 @@ PERSONAL_TOOLS = [
         }, "required": ["charge_id"]},
     }},
     {"type": "function", "function": {
+        "name": "plan_my_day",
+        "description": (
+            "The whole shape of his day: the routine anchors due today and whether each is "
+            "done, the personal tasks he has already chosen for today, a short weighted "
+            "shortlist to choose from, what is blocked and on what, and which of his "
+            "regular habits are slipping. Call this whenever he asks to plan his day, what "
+            "he should do, or what is going on today — it is one call and it is exact, so "
+            "never assemble this from list_personal_tasks and guesswork."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "track": {"type": "string", "enum": ["personal", "project"],
+                      "description": (
+                          "Defaults to personal — his own life. Pass 'project' only if he "
+                          "explicitly asks about work on building Jarvis itself."
+                      )},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "list_day_rhythm",
+        "description": (
+            "His daily routine: the time-anchored things (wake, feed Ghost, leave for work, "
+            "bed) and the things he wants to do a certain number of times a week (bike, sim "
+            "racing, seeing Nadia, personal projects). Read this before changing anything, "
+            "so you edit the right row rather than adding a duplicate."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "add_day_rhythm",
+        "description": (
+            "Add something to his routine. Use kind='anchor' for anything with a clock time "
+            "('feed Ghost at 7'), and kind='habit' for anything with a rate ('ride the bike "
+            "four times a week'). Do this whenever he describes part of his routine rather "
+            "than just agreeing with him."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "What it is, e.g. 'Leave for work'."},
+            "kind": {"type": "string", "enum": ["anchor", "habit"]},
+            "category": {"type": "string",
+                         "enum": ["wake", "work", "care", "health", "relationship",
+                                  "project", "fun", "wind_down", "other"]},
+            "at_time": {"type": "string", "description": "Local 24h HH:MM. Required for an anchor."},
+            "days": {"type": "string", "description": (
+                "Comma-separated weekday numbers, Monday=0, e.g. '0,1,2,3,4' for weekdays. "
+                "Omit for every day.")},
+            "target_per_week": {"type": "integer", "description": "Required for a habit."},
+            "lead_minutes": {"type": "integer", "description": (
+                "How many minutes before at_time to text him. 0 texts him at the time "
+                "itself. Omit entirely to track it without ever chasing him.")},
+            "hard": {"type": "boolean", "description": (
+                "True for something that cannot slip without real consequence — leaving for "
+                "work, medication. These still reach him on a quiet day.")},
+            "notes": {"type": "string"},
+        }, "required": ["name", "kind"]},
+    }},
+    {"type": "function", "function": {
+        "name": "update_day_rhythm",
+        "description": (
+            "Change one item of his routine — the time, which days, how much warning, the "
+            "weekly target, or turn it off. Use this when he corrects the schedule; the "
+            "seeded times were inferred, not given by him, so expect corrections."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "rhythm_id": {"type": "integer"},
+            "name": {"type": "string"},
+            "category": {"type": "string",
+                         "enum": ["wake", "work", "care", "health", "relationship",
+                                  "project", "fun", "wind_down", "other"]},
+            "at_time": {"type": "string", "description": "Local 24h HH:MM."},
+            "days": {"type": "string", "description": "Weekday numbers, Monday=0."},
+            "target_per_week": {"type": "integer"},
+            "lead_minutes": {"type": "integer"},
+            "hard": {"type": "boolean"},
+            "notes": {"type": "string"},
+            "enabled": {"type": "boolean", "description": "False stops it without deleting the history."},
+        }, "required": ["rhythm_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "log_day_rhythm",
+        "description": (
+            "Record that something in his routine happened, or that he deliberately skipped "
+            "it. Call this when he mentions doing one of them — 'fed Ghost', 'got my ride "
+            "in', 'skipped the bike tonight'. A skip is a real answer worth recording, not "
+            "the same as silence, and it stops him being nudged again today."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "rhythm_id": {"type": "integer"},
+            "state": {"type": "string", "enum": ["done", "skipped"]},
+            "on_date": {"type": "string", "description": "Local ISO date. Omit for today."},
+            "note": {"type": "string", "description": "Why, if he said — 'was at Nadia's'."},
+        }, "required": ["rhythm_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "pick_task_for_today",
+        "description": (
+            "Commit a personal task to today, which is what 'I'll do X today' means. "
+            "Different from marking it started: this is the choosing step, and it is per "
+            "day, so not getting to it shows up honestly rather than carrying forward."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "integer"},
+            "on_date": {"type": "string", "description": "Local ISO date. Omit for today."},
+        }, "required": ["task_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "unpick_task_for_today",
+        "description": "Take a task back off today's plan — he changed his mind or ran out of day.",
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "integer"},
+            "on_date": {"type": "string"},
+        }, "required": ["task_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "add_task_detail",
+        "description": (
+            "Attach the information needed to actually DO a task — a phone number, an "
+            "address, whose name to ask for, a link, or a note. Add these whenever he "
+            "mentions one in passing, because the alternative is him hunting for the vet's "
+            "number when he is already standing outside. These also ride along into the "
+            "calendar event on his phone when a reminder references the task."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "integer"},
+            "kind": {"type": "string", "enum": ["phone", "address", "person", "link", "note"]},
+            "value": {"type": "string", "description": (
+                "Write a phone number exactly as he says it — iOS makes it tappable itself, "
+                "and reformatting is how that stops working.")},
+            "label": {"type": "string", "description": "Optional, e.g. 'Old vet in Asheville'."},
+        }, "required": ["task_id", "kind", "value"]},
+    }},
+    {"type": "function", "function": {
+        "name": "block_task",
+        "description": (
+            "Record that one task cannot be started until another is finished — 'I can't "
+            "book the trip until Ghost has a vet and a boarding place'. A blocked task is "
+            "held out of his daily shortlist and shown as waiting, and it frees itself "
+            "automatically when the blocker is done. Use it whenever he describes an order "
+            "things have to happen in."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "integer", "description": "The task that has to wait."},
+            "blocked_by_id": {"type": "integer", "description": "The task it is waiting on."},
+        }, "required": ["task_id", "blocked_by_id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "unblock_task",
+        "description": "Remove a dependency between two tasks — it turned out not to matter.",
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "integer"},
+            "blocked_by_id": {"type": "integer"},
+        }, "required": ["task_id", "blocked_by_id"]},
+    }},
+    {"type": "function", "function": {
         "name": "list_savings_goals",
         "description": "List the owner's savings goals, including the projected date each becomes reachable.",
         "parameters": {"type": "object", "properties": {}, "required": []},
@@ -554,6 +712,32 @@ PERSONAL_SYSTEM_NOTE = (
     "say you'll look into it rather than pretending you already know. Never confuse this with "
     "the business tools (create_project/create_task/request_research) — those are for the "
     "print business, these are for him."
+    " You also run his day, and this is the part he leans on most -- he has ADHD, and the "
+    "whole point is that he should not have to hold the shape of a day in his head. When he "
+    "asks what to do, what is on today, or to plan his day, call plan_my_day: it returns his "
+    "routine anchors, what he already chose, a short weighted shortlist, what is blocked and "
+    "on what, and which habits are slipping -- one exact call, so never assemble that from "
+    "list_personal_tasks and guesswork. When he settles on something, pick_task_for_today, "
+    "so the plan is a commitment rather than a conversation. Offer at most two or three; a "
+    "longer list is one he abandons."
+    " His routine is yours to maintain by voice. list_day_rhythm first, then add_day_rhythm "
+    "or update_day_rhythm -- anchors for anything with a clock time, habits for anything with "
+    "a weekly rate. The times currently in there were INFERRED from a wake reminder and the "
+    "distance to his office, not given by him, so treat every correction as expected and just "
+    "make it. When he mentions doing one of these -- fed Ghost, got his ride in, skipped the "
+    "bike -- log_day_rhythm it, including skips: a skip is a real answer and it stops him "
+    "being nudged again that day."
+    " Whenever he mentions a phone number, address or person attached to something he has to "
+    "do, attach it with add_task_detail instead of only repeating it back. Those details reach "
+    "his phone through the calendar event, and the alternative is him hunting for the vet's "
+    "number while standing outside. When he describes an order things must happen in -- he "
+    "cannot book the trip until Ghost has a vet and a boarding place -- record it with "
+    "block_task, which keeps the blocked task out of his shortlist until it is genuinely "
+    "actionable and frees it automatically."
+    " Keep his own life and the work of building Jarvis apart: personal tasks are errands, "
+    "appointments, Ghost, the car; project tasks are what is needed to make the system. Pass "
+    "track='project' only for the latter. Planning a day only ever considers personal ones, "
+    "because ranking wake-word arbitration against finding a vet makes both lists useless."
     " You also track his credit: add_credit_score whenever he tells you a score he just "
     "checked (never estimate one yourself), and the credit-report dispute tracker "
     "(create_dispute_item, update_dispute_item, draft_dispute_letter, list_dispute_letters, "
@@ -606,13 +790,21 @@ class PersonalClient:
     (from_addr, PDF rendering, the HMAC auth, preauth vs. doauth) is duplicated here.
     """
 
-    def __init__(self, db_path: str, owner_user_id: int, letterstream=None, kroger=None):
+    def __init__(self, db_path: str, owner_user_id: int, letterstream=None, kroger=None,
+                 tz_name: str = "America/New_York"):
         self.db_path = db_path
         self.owner_user_id = owner_user_id
+        # A routine is lived in local time. Without this, "log that I fed Ghost" at 8pm
+        # would file against tomorrow's date for most of the evening.
+        self.tz_name = tz_name
         self.letterstream = letterstream
         # Raw kroger.mcp_client, same loose-coupling convention as letterstream above --
         # only kitchen_tools.sync_kroger_purchases actually calls it (see dispatch below).
         self.kroger = kroger
+
+    def _today(self) -> str:
+        from . import routine
+        return routine._now_local(self.tz_name).date().isoformat()
 
     def call_tool(self, name: str, arguments: dict) -> dict:
         db_path, owner = self.db_path, self.owner_user_id
@@ -634,7 +826,8 @@ class PersonalClient:
         if name == "create_personal_task":
             tid = personal_db.create_task(
                 db_path, owner, arguments["text"], arguments.get("project_id"),
-                arguments.get("priority", "normal"), arguments.get("due_at"))
+                arguments.get("priority", "normal"), arguments.get("due_at"),
+                track=arguments.get("track"))
             return {"ok": True, "task_id": tid}
         if name == "update_personal_task":
             ok = personal_db.update_task(
@@ -718,6 +911,68 @@ class PersonalClient:
         if name == "delete_manual_recurring_charge":
             ok = db.delete_manual_recurring_charge(db_path, arguments["charge_id"])
             return {"ok": ok}
+
+        if name == "plan_my_day":
+            from . import routine
+            return routine.plan_day(db_path, owner, tz_name=self.tz_name,
+                                    track=arguments.get("track") or "personal")
+        if name == "list_day_rhythm":
+            return {"rhythm": personal_db.list_rhythm(db_path, owner, include_disabled=True)}
+        if name == "add_day_rhythm":
+            try:
+                rhythm_id = personal_db.add_rhythm(
+                    db_path, owner, arguments["name"], arguments["kind"],
+                    category=arguments.get("category") or "other",
+                    at_time=arguments.get("at_time"), days=arguments.get("days"),
+                    target_per_week=arguments.get("target_per_week"),
+                    lead_minutes=arguments.get("lead_minutes"),
+                    hard=bool(arguments.get("hard")), notes=arguments.get("notes"))
+            except ValueError as e:
+                return {"error": str(e)}
+            return {"ok": True, "rhythm_id": rhythm_id}
+        if name == "update_day_rhythm":
+            fields = {k: v for k, v in arguments.items() if k != "rhythm_id"}
+            try:
+                ok = personal_db.update_rhythm(db_path, owner, arguments["rhythm_id"], **fields)
+            except ValueError as e:
+                return {"error": str(e)}
+            return {"ok": ok} if ok else {"error": "no such routine item, or nothing to change"}
+        if name == "log_day_rhythm":
+            on_date = arguments.get("on_date") or self._today()
+            mine = {r["id"] for r in personal_db.list_rhythm(db_path, owner, include_disabled=True)}
+            if arguments["rhythm_id"] not in mine:
+                return {"error": "no such routine item"}
+            personal_db.log_rhythm(db_path, arguments["rhythm_id"], on_date,
+                                   arguments.get("state") or "done",
+                                   note=arguments.get("note"), source="chat")
+            return {"ok": True, "on_date": on_date}
+
+        if name == "pick_task_for_today":
+            on_date = arguments.get("on_date") or self._today()
+            added = personal_db.pick_for_day(db_path, owner, arguments["task_id"], on_date)
+            return {"ok": True, "added": added, "on_date": on_date}
+        if name == "unpick_task_for_today":
+            on_date = arguments.get("on_date") or self._today()
+            return {"ok": personal_db.unpick_for_day(db_path, owner, arguments["task_id"], on_date)}
+
+        if name == "add_task_detail":
+            try:
+                detail_id = personal_db.add_task_detail(
+                    db_path, arguments["task_id"], arguments["kind"], arguments["value"],
+                    label=arguments.get("label"))
+            except ValueError as e:
+                return {"error": str(e)}
+            return {"ok": True, "detail_id": detail_id}
+        if name == "block_task":
+            try:
+                added = personal_db.block_task(db_path, arguments["task_id"],
+                                               arguments["blocked_by_id"])
+            except ValueError as e:
+                return {"error": str(e)}
+            return {"ok": True, "added": added}
+        if name == "unblock_task":
+            return {"ok": personal_db.unblock_task(db_path, arguments["task_id"],
+                                                   arguments["blocked_by_id"])}
 
         if name == "list_savings_goals":
             return {"goals": db.list_savings_goals(db_path, owner)}

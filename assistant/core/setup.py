@@ -261,7 +261,10 @@ def build_personal_context(
     letterstream_tools = letterstream.mcp_client if letterstream is not None else None
     kroger_tools = kroger.mcp_client if kroger is not None else None
     return PersonalContext(mcp_client=PersonalClient(
-        cfg.db_path, owner_user_id, letterstream=letterstream_tools, kroger=kroger_tools))
+        cfg.db_path, owner_user_id, letterstream=letterstream_tools, kroger=kroger_tools,
+        # A routine is lived in local time: without this, logging "fed Ghost" at 8pm would
+        # file against tomorrow's date for most of the evening.
+        tz_name=cfg.timezone))
 
 
 def build_era_context(cfg) -> EraContext | None:

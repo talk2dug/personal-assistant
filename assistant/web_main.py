@@ -5,7 +5,7 @@ import logging
 import uvicorn
 
 from .config import load_config
-from .core import business_db, cellular, db, media_scan, pipelines, ui_content, vision
+from .core import business_db, cellular, db, media_scan, pipelines, ui_content, vision, radio
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_cellular_context, build_home_assistant_context,
@@ -55,6 +55,9 @@ def main() -> None:
     cellular.init_cellular_db(cfg.db_path)
     pipelines.init_pipelines(cfg.db_path)
     ui_content.init_ui_content_db(cfg.db_path)
+    # The radio-awareness tools (engine.py's RADIO_TOOLS) are always on, so their tables
+    # must exist unconditionally too; the worker that fills them is a separate service.
+    radio.init_radio_db(cfg.db_path)
     _seed_cameras(cfg)
     for u in cfg.users:
         db.upsert_user(cfg.db_path, u.telegram_chat_id, u.display_name, u.role)

@@ -645,6 +645,25 @@ def start(
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
 
+    # Radio watch delivery. The worker (assistant/radio_main.py, the JarvisRadio service)
+    # fills radio_items but never notifies; this is the only path from there to the phone,
+    # through the same notify funnel as everything else. Every minute rather than on the
+    # staff tick: a tornado warning must not queue behind a 5-minute cadence.
+    def _radio_deliver_tick():
+        from . import radio
+        owner_row = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+        if owner_row is None:
+            return
+        sent = radio.deliver_pending(
+            db_path, lambda text: notify(owner_row["telegram_chat_id"], text))
+        if sent:
+            logger.info("radio watch: delivered %d notification(s)", sent)
+
+    scheduler.add_job(
+        _guarded_simple("radio_deliver", _radio_deliver_tick), "interval", seconds=60,
+        id="radio_deliver", next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45),
+    )
+
     if market_api_key:
         # The crypto feed. Deliberately outside the business_agents_enabled gate: the
         # cache is cheap (1 credit a poll, 14% of the daily budget at 60s) and an

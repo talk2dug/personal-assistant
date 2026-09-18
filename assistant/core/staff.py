@@ -358,6 +358,11 @@ CREDIT_SIGNALS = ("credit score", "credit report", "credit repair", "dispute let
                   "disputes", "fcra", "credit bureau", "tradeline", "utilisation",
                   "utilization", "collections", "credit specialist", "credit")
 
+# Read-only as well: what the radios heard (NOAA conditions, EAS warnings, flagged
+# scanner calls) and the RF sensor node's baseline. Nothing in it can transmit.
+RADIO_SIGNALS = ("radio", "scanner", "noaa", "weather radio", "sdr", "rf ", "surroundings",
+                 "neighbourhood watch", "neighborhood watch", "security watch", "severe weather")
+
 # "paper" is deliberately absent from inference. It hands out a ledger that can be
 # traded, and this module's whole premise is that a job description must not be able to
 # grant its own powers -- inferring it from wording would let any employee that merely
@@ -387,6 +392,8 @@ def infer_data_feeds(title: str, job_description: str, standing: str = "") -> st
         feeds.append("finance")
     if any(w in text for w in CREDIT_SIGNALS):
         feeds.append("credit")
+    if any(w in text for w in RADIO_SIGNALS):
+        feeds.append("radio")
     return ",".join(feeds)
 
 
@@ -564,7 +571,7 @@ def set_data_feeds(db_path: str, key: str, feeds: str) -> bool:
     # letter -- those stay behind his own confirmed tool calls. They were added to
     # infer_data_feeds without being added here, so inference could produce a feed this
     # function then rejected as unknown.
-    valid = {"market", "paper", "journal", "policy", "finance", "credit"}
+    valid = {"market", "paper", "journal", "policy", "finance", "credit", "radio"}
     wanted = [f.strip().lower() for f in (feeds or "").split(",") if f.strip()]
     unknown = [f for f in wanted if f not in valid]
     if unknown:
@@ -689,7 +696,14 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
     """
     if not feeds:
         return ""
-    market_parts, paper_parts, finance_parts, credit_parts = [], [], [], []
+    market_parts, paper_parts, finance_parts, credit_parts, radio_parts = [], [], [], [], []
+    if "radio" in feeds:
+        try:
+            from . import radio
+            radio_parts.append(radio.briefing(db_path))
+        except Exception as e:
+            radio_parts.append(f"RADIO FEED: unavailable ({type(e).__name__}). Say the radio "
+                               "feed is down rather than describing conditions.")
     if "credit" in feeds:
         from . import credit
         credit_parts.append(credit.briefing(db_path, 1))
@@ -848,7 +862,7 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
 
     # Finance first for the same reason the paper portfolio leads: an employee should
     # read its own situation before it reads anything it might react to.
-    parts = credit_parts + finance_parts + paper_parts + market_parts
+    parts = credit_parts + finance_parts + paper_parts + market_parts + radio_parts
     if not parts:
         return ""
     return ("\n\n--- LIVE DATA, captured just now. These figures are exact and "

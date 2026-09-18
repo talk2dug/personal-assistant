@@ -156,6 +156,20 @@ class Config:
     # very first request after that pays a real ~10s reload cost instead of the
     # sub-second warm response the fast path exists to provide.
     local_llm_keepalive_interval_seconds: int = 600
+    # Radio awareness (assistant/radio_main.py, the JarvisRadio service). The mounts are
+    # fm_node's Icecast streams on jarvishackrf2; the hosts are ssh_hosts names, polled
+    # with fixed commands only. radio_home_area is free text naming the streets/area the
+    # scanner triage should treat as "near home" (never a full address in a prompt).
+    radio_weather_url: str = "http://192.168.0.161:8000/weather.mp3"
+    radio_scanner_url: str = "http://192.168.0.161:8000/scanner.mp3"
+    radio_eas_host: str | None = "jarvishackrf2"
+    radio_eas_events_path: str = "/home/pi/fm_node/eas_events.jsonl"
+    radio_rf_host: str | None = "jarvishackrf"
+    radio_rf_baseline_cmd: str = "python3 /home/pi/rf-sensor/rf_baseline.py --json --days 30"
+    radio_home_area: str | None = None
+    radio_conditions_interval_seconds: int = 600
+    radio_eas_poll_seconds: int = 60
+    radio_rf_poll_seconds: int = 900
     obsidian_vault_path: str | None = None
     ha_base_url: str | None = None
     ha_token: str | None = None
@@ -397,6 +411,17 @@ def load_config(path: str = "config.json") -> Config:
         local_llm_model=data.get("local_llm_model", "gemma4:12b-it-q4_K_M"),
         local_llm_timeout_seconds=data.get("local_llm_timeout_seconds", 20.0),
         local_llm_keepalive_interval_seconds=data.get("local_llm_keepalive_interval_seconds", 600),
+        radio_weather_url=data.get("radio_weather_url", "http://192.168.0.161:8000/weather.mp3"),
+        radio_scanner_url=data.get("radio_scanner_url", "http://192.168.0.161:8000/scanner.mp3"),
+        radio_eas_host=data.get("radio_eas_host", "jarvishackrf2"),
+        radio_eas_events_path=data.get("radio_eas_events_path", "/home/pi/fm_node/eas_events.jsonl"),
+        radio_rf_host=data.get("radio_rf_host", "jarvishackrf"),
+        radio_rf_baseline_cmd=data.get("radio_rf_baseline_cmd",
+                                       "python3 /home/pi/rf-sensor/rf_baseline.py --json --days 30"),
+        radio_home_area=data.get("radio_home_area"),
+        radio_conditions_interval_seconds=data.get("radio_conditions_interval_seconds", 600),
+        radio_eas_poll_seconds=data.get("radio_eas_poll_seconds", 60),
+        radio_rf_poll_seconds=data.get("radio_rf_poll_seconds", 900),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
         ha_token=data.get("ha_token"),

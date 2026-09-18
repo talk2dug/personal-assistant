@@ -5,7 +5,7 @@ Wants=icecast2.service
 
 [Service]
 User=pi
-ExecStart=/bin/bash -c "rtl_fm -d 1 -f 854.0125M -f 854.2375M -f 155.340M -f 453.975M -f 146.880M -M fm -s 12k -g 45 -l 100 -F 9 - | ffmpeg -hide_banner -loglevel error -f s16le -ar 12000 -ac 1 -i - -c:a libmp3lame -b:a 32k -legacy_icecast 1 -content_type audio/mpeg -ice_name \"Richmond Fire/EMS Scanner\" -f mp3 icecast://source:jarvisradio@localhost:8000/scanner.mp3"
+ExecStart=/bin/bash -c "rtl_fm -d 1 -f 854.0125M -f 854.2375M -f 155.340M -f 453.975M -f 146.880M -M fm -s 12k -g 45 -l 900 -F 9 - | python3 /home/pi/fm_node/pace.py --rate 12000 | ffmpeg -hide_banner -loglevel error -f s16le -ar 12000 -ac 1 -i - -c:a libmp3lame -b:a 32k -legacy_icecast 1 -content_type audio/mpeg -ice_name \"Richmond Fire/EMS Scanner\" -f mp3 icecast://source:jarvisradio@localhost:8000/scanner.mp3"
 Restart=always
 RestartSec=5
 

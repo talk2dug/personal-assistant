@@ -1,11 +1,11 @@
 [Unit]
-Description=Jarvis FM: NOAA weather 162.550 -> Icecast /weather.mp3
+Description=Jarvis FM: NOAA weather 162.475 (KHB37 Richmond) -> Icecast /weather.mp3
 After=icecast2.service network-online.target
 Wants=icecast2.service
 
 [Service]
 User=pi
-ExecStart=/bin/bash -c "rtl_fm -d 0 -f 162.550M -M fm -s 12k -g 45 -l 0 -F 9 - | ffmpeg -hide_banner -loglevel error -f s16le -ar 12000 -ac 1 -i - -c:a libmp3lame -b:a 32k -legacy_icecast 1 -content_type audio/mpeg -ice_name \"NOAA Weather Richmond\" -f mp3 icecast://source:jarvisradio@localhost:8000/weather.mp3"
+ExecStart=/bin/bash -c "rtl_fm -d 0 -f 162.475M -M fm -s 12k -g 45 -l 0 -F 9 - | ffmpeg -hide_banner -loglevel error -f s16le -ar 12000 -ac 1 -i - -c:a libmp3lame -b:a 32k -legacy_icecast 1 -content_type audio/mpeg -ice_name \"NOAA Weather Richmond\" -f mp3 icecast://source:jarvisradio@localhost:8000/weather.mp3"
 Restart=always
 RestartSec=5
 

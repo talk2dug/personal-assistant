@@ -3,7 +3,7 @@ import asyncio
 import logging
 
 from .config import load_config
-from .core import business_db, cellular, db, github_client, pipelines, staff, ui_content, vision, work_queue
+from .core import business_db, cellular, db, github_client, pipelines, staff, ui_content, vision, work_queue, radio
 from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
@@ -52,6 +52,9 @@ def main() -> None:
     cellular.init_cellular_db(cfg.db_path)
     pipelines.init_pipelines(cfg.db_path)
     ui_content.init_ui_content_db(cfg.db_path)
+    # The radio-awareness tools (engine.py's RADIO_TOOLS) are always on, so their tables
+    # must exist unconditionally too; the worker that fills them is a separate service.
+    radio.init_radio_db(cfg.db_path)
     _seed_cameras(cfg)
     # github_pr_state backs the GitHub PR/CI watchdog (scheduler.py's run_github_watchdog)
     # -- unconditional for the same reason business_db/vision are: cheap to create, and

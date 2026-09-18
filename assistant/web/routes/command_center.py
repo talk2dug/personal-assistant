@@ -241,6 +241,15 @@ def _events(conn, owner_id: int | None) -> list[dict]:
     except sqlite3.Error:
         pass
 
+    try:
+        add(conn.execute(
+            "SELECT kind, severity, title, at FROM radio_items ORDER BY at DESC LIMIT ?",
+            (per_source,)),
+            lambda r: f"Radio watch: {r['title'][:110]}",
+            lambda r: "warn" if r["severity"] == "urgent" else ("base" if r["severity"] == "notice" else "dim"))
+    except sqlite3.Error:
+        pass
+
     if owner_id is not None:
         try:
             add(conn.execute(

@@ -21,6 +21,8 @@ from .business_tools import (
 )
 from .personal_tools import PERSONAL_SYSTEM_NOTE, PERSONAL_TOOLS
 from .sms_tools import SMS_SYSTEM_NOTE, SMS_TOOLS
+from .radio_tools import RADIO_SYSTEM_NOTE, RADIO_TOOL_NAMES, RADIO_TOOLS
+from . import radio_tools
 from .kitchen_tools import (
     KITCHEN_ALWAYS_TOOLS, KITCHEN_SYSTEM_NOTE, KITCHEN_TOOLS, _select_kitchen_gated_tools,
 )
@@ -1226,7 +1228,7 @@ SYSTEM_PROMPT = (
     "list_cameras shows what's registered, and add_camera registers a new one from a stream URL."
     "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{kitchen_note}{web_note}"
     "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}{recipe_note}"
-    "{sms_note}"
+    "{sms_note}{radio_note}"
 )
 
 WEB_SEARCH_SYSTEM_NOTE = (
@@ -1440,6 +1442,9 @@ def build_system_prompt(
         git_note=GIT_SYSTEM_NOTE if git_ops is not None else "",
         recipe_note=RECIPE_SYSTEM_NOTE if recipe is not None else "",
         sms_note=SMS_SYSTEM_NOTE if cellular_ctx is not None else "",
+        # Always on: the tables exist unconditionally and the tools report a stale
+        # feed honestly when the radio worker is not running.
+        radio_note=RADIO_SYSTEM_NOTE,
     )
 
 
@@ -1487,6 +1492,7 @@ def select_tools(
             + (git_ops.git_tools if git_ops is not None else [])
             + (recipe.recipe_tools if recipe is not None else [])
             + (SMS_TOOLS if cellular_ctx is not None else [])
+            + RADIO_TOOLS
         )
     return (
         TOOLS
@@ -1533,6 +1539,10 @@ def select_tools(
         # Not keyword-gated: "ask Nadia if she's free Thursday" names no SMS keyword at
         # all, and three schemas is nowhere near the tool-count budget.
         + (SMS_TOOLS if cellular_ctx is not None else [])
+        # Not keyword-gated either: 'what's it like outside' and 'was that sirens for
+        # something' name nothing a keyword list would catch, and it is four read-only
+        # schemas.
+        + RADIO_TOOLS
     )
 
 
@@ -1943,6 +1953,9 @@ def _dispatch_tool_call(
             return json.dumps(obsidian.mcp_client.call_tool(name, arguments))
         except Exception as e:
             return json.dumps({"error": str(e)})
+
+    if name in RADIO_TOOL_NAMES:
+        return radio_tools.handle(db_path, name, arguments, tz_name)
 
     if name in LOCATION_TOOL_NAMES:
         return json.dumps(location_tools.handle(

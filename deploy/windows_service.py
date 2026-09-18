@@ -65,6 +65,10 @@ PYTHON = str(REPO_ROOT / ".venv" / "Scripts" / "python.exe")
 VARIANTS = {
     "core": {"module": "assistant.main", "name": "JarvisCore", "display": "Jarvis Core"},
     "web": {"module": "assistant.web_main", "name": "JarvisWeb", "display": "Jarvis Web UI"},
+    # The radio worker (assistant/radio_main.py): stream transcription + the SDR-node
+    # polls. Its own service for the same reason the vision worker is its own process --
+    # whisper and a long-running ffmpeg belong nowhere near the chat process.
+    "radio": {"module": "assistant.radio_main", "name": "JarvisRadio", "display": "Jarvis Radio Watch"},
 }
 
 # How long to wait after a crashed child before restarting it -- matches the Scheduled

@@ -15,6 +15,24 @@ CONFIRMED USE-CASE: CONVERSATIONAL INBOUND. The owner calls the DID (571-832-274
     It is half-duplex by turn, like the kiosks: Jarvis listens, endpoints on silence,
     thinks, then speaks; capture is muted while Jarvis is speaking (no echo of its own TTS).
 
+THREADING MODEL -- this is the load-bearing design decision, learned the hard way.
+    Native ML (Piper/onnxruntime, faster-whisper) CANNOT run on a thread that PJSUA2 owns
+    or that has called ep.libRegisterThread -- doing so faults the process with a Windows
+    access violation (observed live, one native library deeper each attempt: espeak's
+    phonemizer, then onnxruntime.run). So the work is split across three thread kinds and
+    each one's rule is absolute:
+      1. The MAIN thread runs ep.libHandleEvents in a loop and owns EVERY pjsua2 call --
+         account/register, answering, creating the capture port, and ALL playback
+         (AudioMediaPlayer create/start/stop). SIP/timer/EOF callbacks dispatch here
+         (uaConfig.threadCnt=0).
+      2. The pjmedia clock thread delivers AudioMediaPort.onFrameReceived. That handler
+         does ONE trivial thing -- put the PCM on a queue. No ML, no new pjsua2 objects.
+      3. A PLAIN Python worker thread (NEVER libRegisterThread'd, NEVER touches pjsua2)
+         does endpointing + STT + engine + TTS and pushes reply WAV bytes onto a queue.
+    The main loop drains that reply queue and plays it. This mirrors JarvisWeb/JarvisRadio,
+    where the identical Piper+Whisper run fine on plain daemon threads -- the ONLY thing
+    that ever made them crash here was being on a pjsua2 thread, which this design forbids.
+
 SAFETY / STATUS
     * The whole live path is gated behind cfg.voip_enabled. With it False (the default and
       the current setting) this process is a benign no-op that NEVER creates a SIP endpoint,
@@ -25,16 +43,8 @@ SAFETY / STATUS
     * Inbound authorization is cfg.voip_allowed_callers, enforced HERE and FAIL-CLOSED via
       core.cellular.is_allowed -- the exact same allow-list logic the SMS channel uses.
       An unlisted caller is rejected before any audio or model context is created.
-    * PJSUA2 (PJSIP's Python binding) is the SIP engine. It is imported LAZILY inside the
-      live path only, so this module loads and the service installs even on a box where
-      PJSUA2 isn't built yet. As of writing PJSUA2 has no pip wheel on any platform (it is
-      a SWIG/PJSIP source build); if that install is not completed, main() logs it and idles.
-
-DESIGN NOTE -- the turn engine is deliberately SIP-library-agnostic. CallTurnEngine knows
-    only "here are PCM frames from the caller" (feed) and "play this WAV to the caller"
-    (a speak callback). All the PJSUA2-specific glue lives in the _pj_* section below, so
-    if the SIP endpoint ever moves to baresip-on-a-Pi (the documented fallback), only that
-    thin glue changes, not the STT/endpoint/engine/TTS core.
+    * PJSUA2 is imported LAZILY inside the live path only, so this module loads and the
+      service installs even where PJSUA2 isn't built.
 """
 from __future__ import annotations
 
@@ -72,6 +82,7 @@ SPEECH_RMS = 500.0            # above this = the caller is talking (TUNE on a re
 HANG_SECONDS = 1.0            # trailing silence that ends the caller's turn
 MIN_SPEECH_SECONDS = 0.4      # shorter than this is a cough/click, not a turn
 MAX_TURN_SECONDS = 30.0       # hard cap so a noisy line can't buffer forever
+PLAYBACK_TIMEOUT_SECONDS = 60.0   # safety net if an EOF callback never arrives
 
 IDLE_SLEEP_SECONDS = 300      # nap cadence while the service is a disabled no-op
 
@@ -97,43 +108,59 @@ def _rms(frame: bytes) -> float:
 
 
 # ======================================================================================
-#  SIP-agnostic conversational turn engine
+#  Conversational turn engine -- runs ENTIRELY on a plain worker thread
 # ======================================================================================
 class CallTurnEngine:
-    """Runs the STT -> engine -> TTS loop for one call, decoupled from the SIP library.
+    """The STT -> engine -> TTS loop for one call. Runs on a plain Python thread that must
+    NEVER call pjsua2 (see the module THREADING MODEL note -- native ML on a pjsua2 thread
+    faults the process).
 
-    The SIP glue calls feed() with each inbound PCM frame (16 kHz mono 16-bit). A worker
-    thread endpoints the caller's speech on silence, transcribes it, runs a full Jarvis
-    turn, synthesises the reply, and hands the reply WAV to `speak`. While Jarvis is
-    speaking, capture is muted (set_speaking) so its own voice is never transcribed.
+    Wiring:
+      * feed(pcm)          -- called from the pjmedia capture callback; just enqueues.
+      * emit_reply(wav)    -- a plain callback (a queue.put) the worker uses to hand a
+                              finished reply WAV to the MAIN thread, which does the pjsua2
+                              playback. emit_reply MUST NOT touch pjsua2.
+      * set_speaking(bool) -- called by the MAIN thread around playback so the worker mutes
+                              capture while Jarvis is talking (no echo of its own TTS).
     """
 
     def __init__(self, cfg: Config, llm, user_id: int, contexts: dict, stt, speaker,
-                 speak, register_thread=None):
+                 emit_reply):
         self.cfg = cfg
         self.llm = llm
         self.user_id = user_id
         self.contexts = contexts
         self.stt = stt
         self.speaker = speaker
-        self.speak = speak                      # callback: speak(wav_bytes) -> None
-        self.register_thread = register_thread  # SIP libs need foreign threads registered
-        self._frames: queue.Queue = queue.Queue(maxsize=256)
-        self._speaking = threading.Event()      # set == Jarvis is talking, mute capture
+        self.emit_reply = emit_reply            # plain callback(wav_bytes); NO pjsua2
+        self._in: queue.Queue = queue.Queue(maxsize=256)
+        self._speaking = threading.Event()      # set == Jarvis talking, drop caller audio
         self._stop = threading.Event()
         self._worker = threading.Thread(target=self._loop, name="voip-turn", daemon=True)
 
-    # -- called from the SIP media thread ------------------------------------------------
+    # -- called from the pjmedia capture callback (trivial, no ML/no pjsua2) --------------
     def feed(self, pcm: bytes) -> None:
-        if self._speaking.is_set() or self._stop.is_set():
-            return                              # ignore our own playback / after hangup
+        if self._stop.is_set() or self._speaking.is_set():
+            return
         try:
-            self._frames.put_nowait(pcm)
+            self._in.put_nowait(pcm)
         except queue.Full:
             pass                                # a dropped 20 ms frame is harmless
 
+    # -- called from the MAIN thread's playback pump -------------------------------------
     def set_speaking(self, on: bool) -> None:
-        (self._speaking.set if on else self._speaking.clear)()
+        if on:
+            self._speaking.set()
+        else:
+            self._drain()                       # discard audio captured while we spoke
+            self._speaking.clear()
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                self._in.get_nowait()
+            except queue.Empty:
+                return
 
     def start(self) -> None:
         self._worker.start()
@@ -141,39 +168,37 @@ class CallTurnEngine:
     def stop(self) -> None:
         self._stop.set()
 
-    # -- the worker ----------------------------------------------------------------------
+    # -- the worker (plain thread) -------------------------------------------------------
     def _loop(self) -> None:
-        if self.register_thread:
-            try:
-                self.register_thread("voip-turn")   # ep.libRegisterThread for pjsua2 calls
-            except Exception:
-                logger.exception("voip: could not register turn thread with the SIP lib")
-
-        # Open with a greeting so the caller knows they're through.
-        self._say(GREETING)
+        self._reply(GREETING)                   # greet as soon as media is up
 
         buf = bytearray()
         speech_seen = False
         silence_run = 0.0
-        hang = HANG_SECONDS
         frame_secs = FRAME_MS / 1000.0
 
         while not self._stop.is_set():
+            if self._speaking.is_set():
+                # Jarvis is talking; abandon any half-built segment and wait it out.
+                buf.clear()
+                speech_seen = False
+                silence_run = 0.0
+                time.sleep(0.05)
+                continue
             try:
-                pcm = self._frames.get(timeout=0.2)
+                pcm = self._in.get(timeout=0.2)
             except queue.Empty:
                 continue
-            loud = _rms(pcm) >= SPEECH_RMS
-            if loud:
+            if _rms(pcm) >= SPEECH_RMS:
                 speech_seen = True
                 silence_run = 0.0
                 buf.extend(pcm)
             elif speech_seen:
                 buf.extend(pcm)                 # keep trailing silence inside the turn
                 silence_run += frame_secs
-            spoke_long_enough = len(buf) >= MIN_SPEECH_SECONDS * SAMPLE_RATE * BYTES_PER_SAMPLE
+            long_enough = len(buf) >= MIN_SPEECH_SECONDS * SAMPLE_RATE * BYTES_PER_SAMPLE
             too_long = len(buf) >= MAX_TURN_SECONDS * SAMPLE_RATE * BYTES_PER_SAMPLE
-            if (speech_seen and silence_run >= hang and spoke_long_enough) or too_long:
+            if (speech_seen and silence_run >= HANG_SECONDS and long_enough) or too_long:
                 segment = bytes(buf)
                 buf.clear()
                 speech_seen = False
@@ -191,17 +216,26 @@ class CallTurnEngine:
             return
         logger.info("voip caller said: %s", transcript[:160])
         try:
+            # No source= : a phone call is a real interactive conversation (the owner is
+            # actually there), so its turns belong in Jarvis's memory window for multi-turn
+            # context -- exactly like the voice terminals in devices.py. A non-None source
+            # would tag it as a background caller and keep it OUT of that window.
             reply = handle_message(
                 self.cfg.db_path, self.llm, self.user_id, transcript,
-                tz_name=self.cfg.timezone, source="voip", **self.contexts)
+                tz_name=self.cfg.timezone, **self.contexts)
         except Exception:
             logger.exception("voip: handle_message failed")
             reply = "Sorry, I hit an error handling that."
         if reply and reply.strip():
             logger.info("voip Jarvis reply: %s", reply[:160])
-            self._say(reply)
+            self._reply(reply)
 
-    def _say(self, text: str) -> None:
+    def _reply(self, text: str) -> None:
+        """Synthesise (Piper, on THIS plain thread) and hand the WAV to the main thread.
+
+        Sets speaking BEFORE emitting so capture is muted the instant a reply exists, even
+        before the main loop has picked it up to play. The main loop clears speaking again
+        when playback finishes (on EOF)."""
         if not (self.speaker and self.speaker.available()):
             return
         try:
@@ -209,19 +243,8 @@ class CallTurnEngine:
         except Exception:
             logger.exception("voip: TTS synthesis failed")
             return
-        self.set_speaking(True)
-        try:
-            self.speak(wav)                     # blocks until playback finishes
-        except Exception:
-            logger.exception("voip: playback failed")
-        finally:
-            # Drop anything captured during our own speech, then re-open the mic.
-            while not self._frames.empty():
-                try:
-                    self._frames.get_nowait()
-                except queue.Empty:
-                    break
-            self.set_speaking(False)
+        self._speaking.set()
+        self.emit_reply(wav)
 
 
 # ======================================================================================
@@ -273,24 +296,43 @@ def build_runtime(cfg: Config):
     }
     stt = Transcriber(model_size=cfg.stt_model_size)
     speaker = Speaker(voice_path=cfg.piper_voice_path)
+    # Pre-warm both models with a REAL op on THIS (main) thread, before pjsua2 starts. Piper
+    # lazily imports the NATIVE espeak phonemizer on first synthesize, and onnxruntime builds
+    # its session on first run; forcing both here means the worker only ever REUSES modules
+    # already imported and initialised (the sys.modules cache makes native create_module a
+    # no-op on the worker). Combined with the worker being a plain, non-pjsua2 thread, this
+    # is belt-and-braces against the access-violation crashes seen when ML first touched a
+    # pjsua2 thread.
+    try:
+        speaker.synthesize("Voice interface ready.")
+    except Exception:
+        logger.exception("voip: TTS pre-warm failed")
+    try:
+        stt.transcribe(_wav_bytes(b"\x00\x00" * 1600))   # 0.1 s of silence
+    except Exception:
+        logger.exception("voip: STT pre-warm failed")
     return llm, owner_id, contexts, stt, speaker
 
 
 # ======================================================================================
-#  PJSUA2 glue -- the only SIP-library-specific code
+#  PJSUA2 glue -- ALL of this runs on the main / pjmedia threads, never the ML worker
 # ======================================================================================
 def _run_pjsua2(cfg: Config, llm, owner_id: int, contexts: dict, stt, speaker) -> None:
-    """Bring up a PJSUA2 endpoint, register to VoIP.ms, and answer allowed inbound calls.
-
-    Only ever reached with cfg.voip_enabled True AND pjsua2 importable. Everything the
-    SWIG binding touches from a background thread is done after ep.libRegisterThread.
-    """
+    """Bring up a PJSUA2 endpoint, register to VoIP.ms, answer allowed inbound calls, and
+    pump playback -- all on this (main) thread. Reached only with voip_enabled True and
+    pjsua2 importable."""
     import pjsua2 as pj
 
     ep = pj.Endpoint()
     ep.libCreate()
     ep_cfg = pj.EpConfig()
     ep_cfg.logConfig.level = 3
+    # No PJSUA worker threads: with the default thread count, PJSIP's own threads fire SWIG
+    # director callbacks into Python from threads the interpreter doesn't know about -> an
+    # access violation the instant the first event dispatches. threadCnt=0 makes SIP/timer/
+    # EOF callbacks run on THIS thread (the one pumping libHandleEvents). The ML worker is a
+    # separate plain thread that never calls pjsua2 at all, so it needs no registration.
+    ep_cfg.uaConfig.threadCnt = 0
     ep.libInit(ep_cfg)
 
     transport_map = {
@@ -303,6 +345,15 @@ def _run_pjsua2(cfg: Config, llm, owner_id: int, contexts: dict, stt, speaker) -
     tcfg.port = 0                       # ephemeral local port -- registration handles NAT
     ep.transportCreate(tp_type, tcfg)
     ep.libStart()
+
+    # Headless server: drive the conference-bridge clock from a null device rather than a
+    # physical sound card. This box is also a gaming/racing rig with several virtual audio
+    # devices (Steam/Oculus) that a SIP bridge should never open or contend for; the null
+    # device gives a steady clock and keeps all audio on the RTP<->port path.
+    try:
+        ep.audDevManager().setNullDev()
+    except Exception:
+        logger.exception("voip: setNullDev failed; falling back to the default sound device")
 
     # Prefer the codecs config asks for (PCMU/G722 on VoIP.ms), best-first.
     _prioritise_codecs(ep, cfg.sip_codecs)
@@ -320,8 +371,7 @@ def _run_pjsua2(cfg: Config, llm, owner_id: int, contexts: dict, stt, speaker) -
         pj.AuthCredInfo("digest", "*", cfg.sip_user, 0, cfg.sip_password))
 
     state = {"ep": ep, "cfg": cfg, "llm": llm, "owner_id": owner_id,
-             "contexts": contexts, "stt": stt, "speaker": speaker,
-             "register_thread": ep.libRegisterThread, "calls": []}
+             "contexts": contexts, "stt": stt, "speaker": speaker, "calls": []}
 
     acc = _make_account(pj, state)
     acc.create(acfg)
@@ -330,7 +380,14 @@ def _run_pjsua2(cfg: Config, llm, owner_id: int, contexts: dict, stt, speaker) -
 
     try:
         while True:
-            ep.libHandleEvents(100)
+            ep.libHandleEvents(20)
+            # Drain each call's reply queue and manage its player -- ALL pjsua2 playback
+            # happens here on the main thread, never on the ML worker.
+            for call in list(state["calls"]):
+                try:
+                    _service_playback(pj, call)
+                except Exception:
+                    logger.exception("voip: playback servicing error")
     except KeyboardInterrupt:
         pass
     finally:
@@ -340,8 +397,69 @@ def _run_pjsua2(cfg: Config, llm, owner_id: int, contexts: dict, stt, speaker) -
             pass
 
 
+def _service_playback(pj, call) -> None:
+    """Main-thread playback pump for one call: tear down a finished player, then start the
+    next queued reply. No ML here; only pjsua2 calls, which is exactly what this thread is
+    allowed to do."""
+    if call.turn is None or call.play_q is None:
+        return
+
+    # 1) finished player -> stop, clean up, re-open the mic.
+    if call.player is not None:
+        done = call.player_done.is_set()
+        overtime = (time.time() - call.player_started) > PLAYBACK_TIMEOUT_SECONDS
+        if done or overtime:
+            try:
+                call.player.stopTransmit(call.call_audio)
+            except Exception:
+                pass
+            call.player = None
+            call.player_done = None
+            if call.tmp is not None:
+                try:
+                    call.tmp.unlink()
+                except OSError:
+                    pass
+                call.tmp = None
+            call.turn.set_speaking(False)       # resume listening
+
+    # 2) nothing playing -> start the next reply if one is waiting.
+    if call.player is None:
+        try:
+            wav = call.play_q.get_nowait()
+        except queue.Empty:
+            return
+        call.turn.set_speaking(True)            # mute capture for the duration
+        tmp = Path(tempfile.gettempdir()) / f"jarvis_voip_{id(call)}_{int(time.time()*1000)}.wav"
+        try:
+            tmp.write_bytes(wav)
+            done = threading.Event()
+            player = _make_player(pj, done)
+            player.createPlayer(str(tmp), pj.PJMEDIA_FILE_NO_LOOP)
+            player.startTransmit(call.call_audio)   # player -> caller
+            call.player = player
+            call.player_done = done
+            call.tmp = tmp
+            call.player_started = time.time()
+        except Exception:
+            logger.exception("voip: failed to start playback")
+            call.turn.set_speaking(False)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _make_player(pj, done_event):
+    class _Player(pj.AudioMediaPlayer):
+        def onEof2(self):
+            # Fires on the main/libHandleEvents thread (threadCnt=0). Only signal; the
+            # playback pump does the teardown so player lifecycle stays single-threaded.
+            done_event.set()
+    return _Player()
+
+
 def _prioritise_codecs(ep, codecs: list[str]) -> None:
-    import pjsua2 as pj
     # PJSIP codec ids look like "PCMU/8000/1", "G722/16000/1". Match by the name prefix
     # and assign descending priority; unknown names are skipped rather than fatal.
     try:
@@ -361,30 +479,27 @@ def _prioritise_codecs(ep, codecs: list[str]) -> None:
 
 
 def _make_account(pj, state):
-    engine_holder = state
-
     class JarvisAccount(pj.Account):
         def onRegState(self, prm):
             logger.info("voip: registration state code=%s reason=%s",
                         getattr(prm, "code", "?"), getattr(prm, "reason", ""))
 
         def onIncomingCall(self, prm):
-            call = _make_call(pj, self, prm.callId, engine_holder)
+            call = _make_call(pj, self, prm.callId, state)
             ci = call.getInfo()
             caller = _digits_from_uri(ci.remoteUri)
-            allowed = cellular.is_allowed(caller, engine_holder["cfg"].voip_allowed_callers)
             op = pj.CallOpParam()
-            if not allowed:
+            if not cellular.is_allowed(caller, state["cfg"].voip_allowed_callers):
                 # Fail closed, exactly like the SMS allow-list: an unlisted caller never
                 # reaches Jarvis. 603 Decline.
-                logger.warning("voip: REJECTED inbound call from %s (not allow-listed)", caller)
+                logger.warning("voip: REJECTED inbound call from %r (not allow-listed)", caller)
                 op.statusCode = pj.PJSIP_SC_DECLINE
                 call.hangup(op)
                 return
-            logger.warning("voip: ANSWERING inbound call from %s", caller)
+            logger.warning("voip: ANSWERING inbound call from %r", caller)
             op.statusCode = pj.PJSIP_SC_OK
             call.answer(op)
-            engine_holder["calls"].append(call)
+            state["calls"].append(call)
 
     return JarvisAccount()
 
@@ -394,8 +509,13 @@ def _make_call(pj, account, call_id, state):
         def __init__(self, acc, cid):
             super().__init__(acc, cid)
             self.turn: CallTurnEngine | None = None
-            self.port = None
-            self._players: list = []
+            self.port = None                    # capture AudioMediaPort (kept alive here)
+            self.call_audio = None
+            self.play_q: queue.Queue | None = None
+            self.player = None                  # active AudioMediaPlayer, or None
+            self.player_done = None
+            self.player_started = 0.0
+            self.tmp = None
 
         def onCallState(self, prm):
             ci = self.getInfo()
@@ -403,6 +523,18 @@ def _make_call(pj, account, call_id, state):
             if ci.state == pj.PJSIP_INV_STATE_DISCONNECTED:
                 if self.turn:
                     self.turn.stop()
+                if self.player is not None:
+                    try:
+                        self.player.stopTransmit(self.call_audio)
+                    except Exception:
+                        pass
+                    self.player = None
+                if self.tmp is not None:
+                    try:
+                        self.tmp.unlink()
+                    except OSError:
+                        pass
+                    self.tmp = None
                 try:
                     state["calls"].remove(self)
                 except ValueError:
@@ -413,59 +545,32 @@ def _make_call(pj, account, call_id, state):
             for i, mi in enumerate(ci.media):
                 if mi.type == pj.PJMEDIA_TYPE_AUDIO and \
                         mi.status == pj.PJSUA_CALL_MEDIA_ACTIVE:
-                    call_audio = self.getAudioMedia(i)
-                    self._bridge(call_audio)
+                    self._bridge(self.getAudioMedia(i))
                     break
 
         def _bridge(self, call_audio):
-            # Capture caller audio into a custom port -> CallTurnEngine.feed.
-            self.port = _make_capture_port(pj, lambda pcm: self.turn.feed(pcm) if self.turn else None)
-            fmt = pj.MediaFormatAudio()
-            fmt.type = pj.PJMEDIA_TYPE_AUDIO
-            fmt.clockRate = SAMPLE_RATE
-            fmt.channelCount = 1
-            fmt.bitsPerSample = 16
-            fmt.frameTimeUsec = FRAME_MS * 1000
-            self.port.createPort("jarvis-capture", fmt)
-            call_audio.startTransmit(self.port)      # caller -> our port (onFrameReceived)
+            # Runs on the main/pjmedia thread. Wire capture (caller -> queue) and stand up
+            # the plain-thread turn engine; playback is handled by the main-loop pump, so
+            # NOTHING here or downstream calls pjsua2 from the ML worker.
+            self.call_audio = call_audio
+            self.play_q = queue.Queue()
 
-            def speak(wav_bytes: bytes) -> None:
-                # Playback via a file player -- robust and it lets PJSIP resample Piper's
-                # rate to the call's. One player per utterance, torn down on EOF.
-                self._play_wav(call_audio, wav_bytes)
-
+            # emit_reply is a bare queue.put -- a plain callable with no pjsua2 in it.
             self.turn = CallTurnEngine(
                 state["cfg"], state["llm"], state["owner_id"], state["contexts"],
-                state["stt"], state["speaker"], speak,
-                register_thread=state["register_thread"])
-            self.turn.start()
+                state["stt"], state["speaker"], emit_reply=self.play_q.put)
 
-        def _play_wav(self, call_audio, wav_bytes: bytes) -> None:
-            tmp = Path(tempfile.gettempdir()) / f"jarvis_voip_{int(time.time()*1000)}.wav"
-            tmp.write_bytes(wav_bytes)
-            done = threading.Event()
+            self.port = _make_capture_port(pj, self.turn.feed)
+            fmt = pj.MediaFormatAudio()
+            # L16 = linear 16-bit PCM, 16 kHz mono, 20 ms frames. init() sets format id +
+            # media type correctly (verified against 2.15.1: init(formatId, clockRate,
+            # channelCount, frameTimeUsec, bitsPerSample, ...)). PJSIP resamples between this
+            # and the negotiated codec (PCMU is 8 kHz).
+            fmt.init(pj.PJMEDIA_FORMAT_L16, SAMPLE_RATE, 1, FRAME_MS * 1000, 16)
+            self.port.createPort("jarvis-capture", fmt)
 
-            class _Player(pj.AudioMediaPlayer):
-                def onEof2(self):
-                    done.set()
-
-            player = _Player()
-            try:
-                player.createPlayer(str(tmp), pj.PJMEDIA_FILE_NO_LOOP)
-                player.startTransmit(call_audio)     # player -> caller
-                # Wait out playback (onEof2 fires when the file ends); cap as a safety net.
-                done.wait(timeout=MAX_TURN_SECONDS)
-            except Exception:
-                logger.exception("voip: player error")
-            finally:
-                try:
-                    player.stopTransmit(call_audio)
-                except Exception:
-                    pass
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+            call_audio.startTransmit(self.port)   # caller -> our port (onFrameReceived)
+            self.turn.start()                     # greets, then runs the STT/engine/TTS loop
 
     return JarvisCall(account, call_id)
 
@@ -473,27 +578,35 @@ def _make_call(pj, account, call_id, state):
 def _make_capture_port(pj, on_pcm):
     class _CapturePort(pj.AudioMediaPort):
         def onFrameReceived(self, frame):
+            # pjmedia clock thread. Do the ONE cheap thing: hand the PCM to the worker's
+            # queue. No ML, no pjsua2 object creation -- both would be unsafe here.
             try:
-                on_pcm(_frame_to_bytes(frame))
+                pcm = _frame_to_bytes(frame)
+                if pcm:
+                    on_pcm(pcm)
             except Exception:
                 logger.exception("voip: capture frame error")
 
         def onFrameRequested(self, frame):
-            # We never transmit FROM this port (playback is a separate player), but the
-            # binding may still poll it -- hand back a typed empty frame rather than crash.
+            # This port is receive-only (playback is a separate AudioMediaPlayer), but the
+            # binding may still poll it -- return a typed empty frame rather than crash.
             frame.type = pj.PJMEDIA_FRAME_TYPE_NONE
 
     return _CapturePort()
 
 
 def _frame_to_bytes(frame) -> bytes:
-    """PJSUA2 exposes frame.buf as a SWIG ByteVector. Its exact Python surface varies by
-    build, so convert defensively -- this is the one spot to verify on the first real call."""
-    buf = frame.buf
+    """A received MediaFrame -> PCM bytes. On this 2.15.1 build frame.buf is a SWIG
+    ByteVector that bytes() converts directly; slice to frame.size and skip empty/NONE
+    frames (a silence frame carries size 0)."""
+    size = int(getattr(frame, "size", 0) or 0)
+    if size <= 0:
+        return b""
     try:
-        return bytes(buf)
+        raw = bytes(frame.buf)
     except TypeError:
-        return bytes(bytearray(buf))
+        raw = bytes(bytearray(frame.buf))
+    return raw[:size] if len(raw) >= size else raw
 
 
 def _digits_from_uri(uri: str) -> str:
@@ -555,9 +668,7 @@ def main() -> int:
     if not cfg.voip_enabled:
         return _idle("voip_enabled is false")
 
-    gaps = missing_prereqs(cfg)
-    # voip_enabled being in the list is expected-away here since we passed the gate.
-    gaps = [g for g in gaps if not g.startswith("voip_enabled")]
+    gaps = [g for g in missing_prereqs(cfg) if not g.startswith("voip_enabled")]
     if gaps:
         return _idle("missing config: " + "; ".join(gaps))
 

@@ -195,7 +195,10 @@ YOU ONLY DECIDE ENTRIES. You cannot close a position -- there is no sell you can
 A position leaves on the stop_loss or the take_profit you committed when you opened it,
 or automatically after {max_hold_hours:g}h. This is not a restriction on your judgement,
 it is where your judgement now goes: the only chance you get to decide how a trade ends
-is the moment you open it, so set the two numbers you actually mean.
+is the moment you open it, so set the two numbers you actually mean. You cannot move them
+afterward either -- not by editing them, and not by adding a token amount to a position to
+"restate" a tighter stop and lock a gain early. That was the disposition effect that lost
+the money the first time, and it is closed now: an add-on that changes a level is refused.
 
 Why, in the desk's own numbers: over 92 closed round-trips you won 42.4% of the time --
 which is fine -- but your average win was +$2.39 against an average loss of -$2.85,
@@ -217,8 +220,10 @@ Rules enforced in code, not by you:
     that ratio is what turns this book positive on arithmetic alone. If a trade is not
     worth {min_rr:g}:1 to you, it is not worth taking -- that is the trade-off, and
     passing on that one is a perfectly good answer.
-  * Adding to a position keeps its levels unless you state new ones, and does NOT restart
-    its {max_hold_hours:g}h clock.
+  * Adding to a position INHERITS the stop and target you committed when you opened it and
+    cannot change them -- exits are set once, at entry. An add-on that restates a different
+    stop or target is refused, so do not top a position up purely to move its stop.
+    (Adding also does NOT restart its {max_hold_hours:g}h clock.)
   * A coin stopped out cannot be re-bought for {cooldown_hours:g}h -- that failed thesis
     needs to cool off, not get re-entered on the next momentum call.
   * Churn costs {fee_pct}% per side. That is an argument against trading the same coin
@@ -307,6 +312,23 @@ def _parse_level(value) -> float | None:
     except (TypeError, ValueError):
         return None
     return level if level > 0 else None
+
+
+def _level_moved(stated: float | None, committed: float | None) -> bool:
+    """Whether an add-on's stated exit level would change the one the position committed
+    when it was first opened. An omitted level (None) inherits and is never a move; a
+    stated level equal to the committed one (within float tolerance) is not a move either;
+    anything else is a move, in either direction. Exits are set at entry and are not
+    revised -- see the buy path in execute_orders for why that door had to be closed."""
+    if stated is None:
+        return False
+    if committed is None:
+        return True
+    return abs(stated - committed) > abs(committed) * 1e-6 + 1e-12
+
+
+def _fmt_level(value) -> str:
+    return "none" if value is None else f"${value:,.6g}"
 
 
 def _held_hours(opened_at) -> float | None:
@@ -610,12 +632,45 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 if usd + fee > cash + 1e-9:
                     reject(order, f"insufficient cash: need ${usd + fee:,.2f}, have ${cash:,.2f}")
                     continue
-                stop_loss = _parse_level(order.get("stop_loss"))
-                take_profit = _parse_level(order.get("take_profit"))
-                if stop_loss is None and pos is not None:
+                # Exit levels are committed when a position is FIRST opened and are
+                # immutable afterward. A new entry states both here; an add-on inherits
+                # them and cannot move them.
+                #
+                # The model cannot place a sell -- exits are mechanical (see
+                # MIN_REWARD_RISK) -- but once that shipped it rediscovered the disposition
+                # effect through the one door left open: a token add-on, some as small as
+                # $0.01 with the reason "restate tighter stop only, no new capital added",
+                # placed purely to ratchet the stop up under a winner and bank the gain
+                # early. It became 53% of every buy the desk placed; 59 of 71 exits turned
+                # into stop-losses, 39 of them closing at a small PROFIT off a raised stop,
+                # and the average win collapsed from the +$4.40 an actual target pays
+                # toward +$1.65. That is the very behaviour the mechanical exits removed,
+                # let straight back in, and it is what flattened the equity curve after
+                # the 2026-09-16 rewrite.
+                #
+                # So an add-on that states a level which would MOVE a committed one is
+                # refused -- the lesson, counted back to the model in its briefing --
+                # rather than silently obeyed. An omitted or unchanged level inherits.
+                if pos is not None:
+                    stated_stop = _parse_level(order.get("stop_loss"))
+                    stated_take = _parse_level(order.get("take_profit"))
+                    if (_level_moved(stated_stop, pos["stop_loss"])
+                            or _level_moved(stated_take, pos["take_profit"])):
+                        have = (f"stop {_fmt_level(pos['stop_loss'])}, "
+                                f"target {_fmt_level(pos['take_profit'])}")
+                        reject(order, f"{code} already carries the exit plan it was opened "
+                                      f"with ({have}), and an add-on cannot move it -- the "
+                                      f"moment you open a position is the only place you "
+                                      f"decide how it ends. Restating a tighter stop to lock "
+                                      f"a gain early is the disposition effect that cost the "
+                                      f"desk its edge; if a thesis has changed, let the "
+                                      f"position leave on the levels you committed.")
+                        continue
                     stop_loss = pos["stop_loss"]
-                if take_profit is None and pos is not None:
                     take_profit = pos["take_profit"]
+                else:
+                    stop_loss = _parse_level(order.get("stop_loss"))
+                    take_profit = _parse_level(order.get("take_profit"))
 
                 # Every position here is LONG, so a coherent plan is
                 # stop_loss < fill price < take_profit. _parse_level only ever checked

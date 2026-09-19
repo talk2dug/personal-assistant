@@ -176,14 +176,45 @@ def test_adding_to_a_position_keeps_the_existing_levels_if_none_restated(db):
     assert row["take_profit"] == 240.0
 
 
-def test_adding_to_a_position_moves_the_level_when_explicitly_restated(db):
+def test_an_add_on_cannot_ratchet_the_committed_stop(db):
+    """Exits are set at entry and are immutable. The model cannot place a sell, but it
+    used to reach the same end by adding a token amount to a winner while restating a
+    tighter stop -- ratcheting the stop up under the position to bank the gain early. That
+    reintroduced the disposition effect the mechanical exits removed and flattened the
+    equity curve; a restate that would move a committed level is now refused."""
     paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
-    paper_trading.execute_orders(db, [buy("SOL", 500, stop=190.0, target=260.0)])
+    r = paper_trading.execute_orders(db, [buy("SOL", 500, stop=190.0, target=260.0)])
+    assert not r["fills"]
+    assert "cannot move it" in r["rejections"][0]["reason"]
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT stop_loss FROM paper_positions WHERE code='SOL'").fetchone()
     conn.close()
-    assert row["stop_loss"] == 190.0
+    assert row["stop_loss"] == 180.0, "the committed stop must survive the restate attempt"
+
+
+def test_a_token_restate_that_only_tightens_the_stop_is_refused(db):
+    """The exploit at its most naked: a $0.01 add-on whose sole purpose is to move the
+    stop. It is refused before any cash moves, so the churn stops too."""
+    paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+    cash_before = paper_trading.portfolio(db)["cash"]
+    r = paper_trading.execute_orders(db, [buy("SOL", 0.01, stop=195.0, target=260.0)])
+    assert not r["fills"]
+    assert "cannot move it" in r["rejections"][0]["reason"]
+    assert paper_trading.portfolio(db)["cash"] == pytest.approx(cash_before)
+
+
+def test_a_genuine_add_on_that_does_not_move_the_levels_still_fills(db):
+    """Adding real capital without touching the plan is untouched -- levels may be omitted
+    or restated identically, and the position grows on its committed stop and target."""
+    paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+    r = paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 300}])
+    assert r["fills"] and not r["rejections"]
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT stop_loss, take_profit FROM paper_positions WHERE code='SOL'").fetchone()
+    conn.close()
+    assert row["stop_loss"] == 180.0 and row["take_profit"] == 260.0
 
 
 def test_check_stops_closes_a_position_that_breached_its_stop_loss(db):

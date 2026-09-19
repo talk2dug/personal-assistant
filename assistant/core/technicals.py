@@ -160,11 +160,24 @@ def trend(closes: list[float]) -> dict:
     if previous_fast is not None and previous_slow not in (None, 0):
         widening = abs(spread) > abs((previous_fast - previous_slow) / previous_slow)
 
+    # The slow average's OWN slope, looked back FAST_MA candles. This is the underlying
+    # trend, and unlike the fast-vs-slow crossover in `direction` it does not flip negative
+    # on a shallow pullback: while a pullback drags the fast average down toward or under
+    # the slow one, the slow average itself is still climbing. `direction` answers "is the
+    # short average above the long one right now"; `base_up` answers "is the trend the
+    # pullback is happening *within* still up" -- which is the question the pullback screen
+    # actually needs. (When there is too little history to look back this far, it is left
+    # False and the screen falls back to the crossover, as before.)
+    slow_back = sma(closes[:-FAST_MA], SLOW_MA)
+    base_up = slow_back is not None and slow_back != 0 and slow > slow_back
+
     return {
         "direction": "up" if spread > 0.001 else "down" if spread < -0.001 else "flat",
         "fast": fast, "slow": slow, "spread_pct": round(spread * 100, 2),
         # False on an uptrend means the averages are converging: the move is losing force.
         "strengthening": widening,
+        # Underlying trend (slow average rising), robust to a pullback flipping `direction`.
+        "base_up": base_up,
     }
 
 
@@ -321,12 +334,24 @@ def classify_setup(reading: dict) -> tuple[int, str] | None:
     if rsi_value >= RSI_OVERBOUGHT or position >= CHASE_RANGE:
         return None
 
+    # A pullback in an uptrend has, by definition, ticked down off the highs, which drags
+    # the fast average toward or under the slow one -- so `direction` (the crossover) reads
+    # "flat" or even "down" on the very setup the desk is told to buy, and gating on it
+    # here rejected genuine pullbacks as non-trends (a bucket-phase away from qualifying).
+    # The underlying trend is the slow average's own slope (`base_up`); for entry purposes
+    # an uptrend is the crossover still up OR that underlying trend still up. A real
+    # downtrend fails both (slow average falling), and an extended chart has already been
+    # dropped above on RSI/position -- so widening this gate lets pullbacks through without
+    # reopening the door to chasing.
+    base_up = (reading.get("trend") or {}).get("base_up")
+    uptrend = direction == "up" or bool(base_up)
+
     lo, hi = PULLBACK_RSI
-    if direction == "up" and lo <= rsi_value <= hi and position <= PULLBACK_RANGE:
+    if uptrend and lo <= rsi_value <= hi and position <= PULLBACK_RANGE:
         return (3, "pullback in uptrend")
     if position <= LOW_RANGE and state == "rising":
         return (3, "turning up off the lows")
-    if direction == "up" and state in ("rising", "stalling") and position <= 0.85:
+    if uptrend and state in ("rising", "stalling") and position <= 0.85:
         return (2, "uptrend holding")
     if position <= LOW_RANGE and rsi_value <= RSI_OVERSOLD + 15 and state == "stalling":
         return (1, "basing at the lows, no turn yet")

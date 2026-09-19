@@ -971,8 +971,19 @@ def run_review_watchdog(db_path: str, llm, notify, hours: float = 2.0, tz_name: 
             "Briefly let the owner know it's still waiting on his decision."
         )
         try:
+            # A staleness nudge is a NOTIFICATION: it must only describe what's waiting,
+            # never take action. It previously forwarded the full tool surface (**context,
+            # including home_assistant) on the theory that the pending_actions gate kept it
+            # safe -- but that gate only covers *sensitive* HA domains (lock/cover/alarm),
+            # so non-gated actions like light.turn_on executed with no confirmation. With a
+            # stale phantom "turn the living lights on" sitting in the memory window, the
+            # LLM re-fired it off every nudge and toggled the living-room lights overnight.
+            # Run it text-only: with no contexts, handle_message registers no device/outbound
+            # tools at all. The item title/kind/summary are already in the prompt, so no tool
+            # is needed to phrase the nudge. (context is still accepted for caller-interface
+            # stability but is deliberately not forwarded.)
             reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name,
-                                   source=REVIEW_WATCHDOG_SOURCE, **context)
+                                   source=REVIEW_WATCHDOG_SOURCE)
             if reply:
                 notify(owner["telegram_chat_id"], reply)
             results.append({"item_id": item["id"], "notified": bool(reply)})
@@ -1022,8 +1033,13 @@ def run_github_watchdog(db_path: str, git_ops_client, llm, notify, tz_name: str 
             "Briefly let the owner know what changed and whether it needs his attention."
         )
         try:
+            # Text-only for the same reason as run_review_watchdog: a PR-state nudge is a
+            # notification, not an actuator. Forwarding **context (home_assistant, etc.) let
+            # a synthesized nudge fire non-gated device actions; the PR details are all in
+            # the prompt, so drop the tool surface entirely. (context still accepted for
+            # caller-interface stability, deliberately not forwarded.)
             reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name,
-                                   source=GITHUB_WATCHDOG_SOURCE, **context)
+                                   source=GITHUB_WATCHDOG_SOURCE)
             if reply:
                 notify(owner["telegram_chat_id"], reply)
             results.append({"pr_number": change["pr_number"], "notified": bool(reply)})

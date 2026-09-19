@@ -1,0 +1,251 @@
+/* The finance dashboard's own layer: the three things at the top that answer "how much
+   can I spend / what do I do / what's blocked on me", plus the tab strip that gets the
+   other nine panels out of the way.
+
+   Everything below the tabs still uses the existing .finance-page rules in index.css --
+   this file deliberately does not restyle those components, only reframes them. */
+
+/* --- do this first ------------------------------------------------------- */
+
+/* The planner's single named action. Amber like every other "this is for you" surface in
+   the app (the review queue, the pipeline board's waiting count) so it reads as the same
+   kind of thing rather than a new one. */
+.fin-first {
+  border: 1px solid rgba(232, 163, 61, 0.38);
+  border-left: 3px solid var(--amber);
+  background: rgba(232, 163, 61, 0.07);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 16px;
+}
+
+.fin-first-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+
+.fin-first-tag {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--amber);
+  white-space: nowrap;
+}
+
+.fin-first-when { font-size: 10.5px; color: var(--text-faint); }
+
+/* Larger than body text on purpose: this is the one sentence the page exists to deliver,
+   and it has to win against everything below it without being shouted. */
+.fin-first-body {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.fin-first-empty { border-left-color: var(--divider); background: transparent; }
+.fin-first-empty .fin-first-tag { color: var(--text-dim); }
+.fin-first-empty p { margin: 0; font-size: 12.5px; color: var(--text-dim); }
+
+/* --- the reconcile queue ------------------------------------------------- */
+
+.fin-block { margin-bottom: 18px; }
+
+.fin-rec { display: flex; flex-direction: column; gap: 10px; }
+
+.fin-rec-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* The count is the whole point of showing one card: he can see the queue is finite
+   without being handed the whole thing. */
+.fin-rec-count {
+  font-family: var(--font-display);
+  font-size: 26px;
+  line-height: 1;
+  color: var(--amber);
+  margin-right: 8px;
+}
+
+.fin-rec-label { font-size: 12px; color: var(--text-dim); }
+
+.fin-rec-phantom { font-size: 11.5px; color: var(--text-faint); text-align: right; }
+
+.fin-rec-card {
+  border: 1px solid var(--divider);
+  border-left: 2px solid var(--amber);
+  background: rgba(148, 188, 227, 0.03);
+  padding: 13px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.fin-rec-kind {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--steel-mid);
+}
+
+/* What this card is worth settling, in money. The reason to open it. */
+.fin-rec-stake { color: var(--amber); letter-spacing: 0.04em; font-size: 12px; }
+
+.fin-rec-ask { margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--text); }
+.fin-rec-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+
+.fin-rec-warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--amber);
+  border-left: 2px solid rgba(232, 163, 61, 0.4);
+  padding-left: 9px;
+}
+
+.fin-rec-rows { display: flex; flex-direction: column; gap: 2px; }
+
+/* A whole row is the hit target, not just the radio: picking the right debt should not
+   require aiming at a 13px circle. */
+.fin-rec-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.fin-rec-row:hover { background: rgba(148, 188, 227, 0.07); }
+
+.fin-rec-row.is-picked {
+  border-color: rgba(148, 188, 227, 0.45);
+  background: rgba(148, 188, 227, 0.12);
+}
+
+.fin-rec-row-name { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.fin-rec-row-bal { font-family: var(--font-display); color: var(--steel-bright); white-space: nowrap; }
+.fin-rec-row-age { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
+
+.fin-rec-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+
+.fin-rec-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(148, 188, 227, 0.3);
+  padding: 0 8px;
+  color: var(--text-dim);
+}
+
+.fin-rec-input input {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 0;
+  width: 130px;
+}
+
+.fin-rec-input input:focus { outline: none; }
+
+.fin-rec-foot { font-size: 11px; color: var(--text-faint); }
+
+.fin-rec-clear {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--divider);
+  border-left: 2px solid var(--steel);
+  padding: 13px 15px;
+}
+
+.fin-rec-tick { font-size: 20px; color: var(--steel); line-height: 1; }
+.fin-rec-clear b { font-size: 13.5px; color: var(--text); }
+.fin-rec-clear p { margin: 3px 0 0; font-size: 12px; color: var(--text-dim); }
+
+/* --- buttons ------------------------------------------------------------- */
+
+.fin-btn-primary,
+.fin-btn-quiet {
+  appearance: none;
+  cursor: pointer;
+  font-family: var(--font-hud);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  padding: 7px 13px;
+  white-space: nowrap;
+}
+
+.fin-btn-primary {
+  background: rgba(232, 163, 61, 0.16);
+  border: 1px solid rgba(232, 163, 61, 0.5);
+  color: var(--amber);
+}
+
+.fin-btn-primary:hover:not(:disabled) { background: rgba(232, 163, 61, 0.26); }
+
+.fin-btn-quiet {
+  background: transparent;
+  border: 1px solid var(--divider);
+  color: var(--text-dim);
+}
+
+.fin-btn-quiet:hover:not(:disabled) { background: rgba(148, 188, 227, 0.1); color: var(--text); }
+
+.fin-btn-primary:disabled,
+.fin-btn-quiet:disabled { opacity: 0.45; cursor: default; }
+
+/* --- tabs ---------------------------------------------------------------- */
+
+/* The other nine panels live behind these. They are reference, and reference should be
+   one click away rather than stacked between him and the thing he came for. */
+.fin-tabs {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--divider);
+  margin-bottom: 14px;
+}
+
+.fin-tabs button {
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-family: var(--font-hud);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  padding: 8px 13px;
+  white-space: nowrap;
+}
+
+.fin-tabs button:hover { color: var(--text); }
+
+.fin-tabs button.is-on {
+  color: var(--steel-bright);
+  border-bottom-color: var(--steel);
+}
+
+.fin-tabbody { display: flex; flex-direction: column; gap: 18px; }
+
+@media (max-width: 640px) {
+  .fin-rec-row { grid-template-columns: auto 1fr auto; }
+  .fin-rec-row-age { grid-column: 3; font-size: 10px; }
+  .fin-rec-input input { width: 100px; }
+}

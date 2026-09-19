@@ -335,7 +335,7 @@ def refresh_supplemental(db_path: str, id_map: dict[str, str]) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     now = _now()
-    rows = []
+    rows, history = [], []
     for code, pair in id_map.items():
         info = result.get(pair)
         if not info:
@@ -347,6 +347,13 @@ def refresh_supplemental(db_path: str, id_map: dict[str, str]) -> dict:
             continue
         delta_day = (last_price / open_price) if open_price else None
         rows.append((code, code, last_price, delta_day, now, now, now))
+        # Kraken gives volume as [today, last 24h] -- the 24h figure is the comparable
+        # one. Market cap is not in a ticker response, so it stays null for these rows.
+        try:
+            volume = float(info["v"][1])
+        except (KeyError, IndexError, TypeError, ValueError):
+            volume = None
+        history.append((code, last_price, volume, None, now))
 
     if not rows:
         return {"ok": False, "error": "no supplemental pairs returned usable data"}
@@ -362,9 +369,18 @@ def refresh_supplemental(db_path: str, id_map: dict[str, str]) -> dict:
                    last_seen=excluded.last_seen, updated_at=excluded.updated_at
                WHERE market_coins.source != 'livecoinwatch'""",
             rows)
+        # These rows belong in the series too. Without them the seven codes this feed
+        # exists to cover were priceable but had no HISTORY at all -- change_since()
+        # returned None for every one of them and movers() could never surface them,
+        # so the desk was structurally blind on exactly the instruments it had just
+        # been given permission to trade. TAO and ETHFI were both bought while every
+        # "how has this moved since I last looked" read came back empty.
+        conn.executemany(
+            "INSERT INTO market_history (code, rate, volume, market_cap, at) VALUES (?,?,?,?,?)",
+            history)
         conn.commit()
 
-    return {"ok": True, "codes": [r[0] for r in rows],
+    return {"ok": True, "codes": [r[0] for r in rows], "history_points": len(history),
             "took_ms": int((time.perf_counter() - started) * 1000)}
 
 

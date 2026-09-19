@@ -69,9 +69,14 @@ async def update_task(task_id: int, request: Request):
     user = require_owner(request)
     cfg = request.app.state.cfg
     body = await request.json()
+    # due_at is passed through like every other field: personal_db.update_task has always
+    # accepted it (and clears notified_at when it changes, so a rescheduled task fires
+    # again), but this route never forwarded it -- which meant nothing in the web UI
+    # could ever put a due date on a task, only chat could.
     ok = personal_db.update_task(
         cfg.db_path, user["id"], task_id, text=body.get("text"), status=body.get("status"),
-        priority=body.get("priority"), project_id=body.get("project_id"))
+        priority=body.get("priority"), project_id=body.get("project_id"),
+        due_at=body.get("due_at"))
     if not ok:
         raise HTTPException(404, "task not found or not permitted")
     return {"ok": True}

@@ -1,0 +1,323 @@
+"""The owner's whole money picture, pre-digested for an employee that cannot fetch it.
+
+Staff have no tools by design -- they gather and propose, they never act -- so a financial
+planner with no feed does not plan. It web-searches, invents a budget from national
+averages, and reports numbers that have nothing to do with this person. This is the
+channel that makes the role possible at all, and it is the same pattern the crypto desk
+already uses (see staff.build_feed_briefing).
+
+Everything here is READ-ONLY and assembled from what the system already knows: the Era
+account/spending caches, the recurring charges he entered by hand, the debts the mail
+sweep found, and the budgets and savings goals he has set. Nothing in this module writes.
+
+Two things it does that a plain data dump would not:
+
+**It groups debts that are one obligation.** The mail sweep files a row per creditor name
+it sees, so a single Synchrony PayPal card that went to collections shows up seven times
+-- as Synchrony, as Synchrony PayPal Credit, as Unifin collecting for Jefferson Capital,
+and as Jefferson Capital four ways. Summed naively that is one debt counted seven times.
+`account_last4` is the join that makes this reliable rather than a guess about names: the
+account number does not change when the debt is sold.
+
+**It ages every number.** A balance last seen in March 2023 is not a balance, it is a
+memory, and a payoff plan built on it is fiction. Every figure carries how old it is, and
+the totals are explicitly floors over what is *recent*, separate from what is merely
+*known*.
+"""
+import logging
+from datetime import date
+
+from . import db, finance, personal_db
+# Grouping lives with the debts it groups, so debt_summary and the chat tool
+# report the same corrected total this brief does -- one source of truth for
+# "how much is actually owed".
+from .personal_db import _age_days, group_debts  # noqa: F401  (re-exported)
+
+logger = logging.getLogger(__name__)
+
+# Older than this and a balance is reported as historical rather than current. A year is
+# generous for a credit card and far too generous for a collection account, but the point
+# is not precision -- it is that the planner must never state a 2023 figure as today's.
+STALE_AFTER_DAYS = 365
+
+# How far ahead to expand recurring bills. Long enough to cover the next two paycheques
+# and the bills between them, which is the window a plan is actually made in.
+HORIZON_DAYS = 45
+
+
+def debt_picture(db_path: str, owner_user_id: int, today: date | None = None) -> dict:
+    """Debts, grouped and aged, with totals that say what they are totals OF."""
+    today = today or date.today()
+    debts = personal_db.list_debts(db_path, owner_user_id, tracking_state="tracked")
+    active = [d for d in debts if d.get("status") == "active"]
+    grouping = group_debts(active, today)
+
+    def _obligation(balance, age):
+        return {"balance": balance, "age_days": age}
+
+    obligations = []
+    for group in grouping["groups"]:
+        obligations.append(_obligation(group["likely_balance"], group["newest_age_days"]))
+    for row in grouping["ungrouped"]:
+        obligations.append(_obligation(row["current_balance"],
+                                       _age_days(row.get("last_observed_on"), today)))
+
+    def _total(predicate):
+        return round(sum(o["balance"] for o in obligations
+                         if o["balance"] is not None and predicate(o)), 2)
+
+    recent = _total(lambda o: o["age_days"] is not None and o["age_days"] <= STALE_AFTER_DAYS)
+    everything = _total(lambda o: True)
+
+    return {
+        "obligation_count": len(obligations),
+        "row_count": len(active),
+        "groups": grouping["groups"],
+        "ungrouped": grouping["ungrouped"],
+        # Deliberately three numbers, not one. The gap between them IS the finding.
+        "recent_balance_floor": recent,
+        "all_known_balance_floor": everything,
+        "naive_row_sum": round(sum(d["current_balance"] or 0 for d in active), 2),
+        "unknown_balance_count": sum(1 for o in obligations if o["balance"] is None),
+        "proposed_count": len(personal_db.list_debts(db_path, owner_user_id,
+                                                     tracking_state="proposed")),
+    }
+
+
+def build(db_path: str, owner_user_id: int, today: date | None = None) -> dict:
+    """The whole picture, as data. Rendered separately so it can be tested as values."""
+    today = today or date.today()
+
+    accounts = db.list_era_accounts(db_path)
+    charges = (db.list_manual_recurring_charges(db_path, owner_user_id)
+               + [c for c in db.list_era_recurring_charges(db_path, include_excluded=False)])
+
+    expenses = [c for c in charges if (c.get("direction") or "expense") == "expense"]
+    income = [c for c in charges if c.get("direction") == "income"]
+
+    spendable = finance.spendable_balance(accounts) if accounts else 0.0
+    pay_periods = finance.find_pay_periods(income, today, horizon_days=HORIZON_DAYS)
+    # Same setting the safe-to-spend tool and the meal planner read, so all three
+    # agree on what counts as 'do not go below this'.
+    buffer_amount = float(db.get_setting(db_path, db.FINANCE_SAFETY_BUFFER_SETTING, "0") or 0)
+
+    return {
+        "as_of": today.isoformat(),
+        "accounts": accounts,
+        "spendable": spendable,
+        "net_worth": finance.net_worth(accounts) if accounts else None,
+        "safety_buffer": buffer_amount,
+        "fixed_expenses": expenses,
+        "income_sources": income,
+        "monthly_fixed_total": _monthly_total(expenses),
+        "monthly_income_total": _monthly_total(income),
+        "upcoming": finance.expand_occurrences(charges, today,
+                                               date.fromordinal(today.toordinal() + HORIZON_DAYS)),
+        "pay_periods": pay_periods,
+        "safe_to_spend": finance.safe_to_spend(spendable, charges, pay_periods, buffer_amount, today),
+        "spending_by_category": db.list_era_category_spending(db_path, "last_30_days"),
+        "budgets": db.list_budgets(db_path, owner_user_id),
+        "savings_goals": db.list_savings_goals(db_path, owner_user_id),
+        "debts": debt_picture(db_path, owner_user_id, today),
+    }
+
+
+# Cadences expressed as times per month, so a quarterly subscription and a monthly bill
+# can be added together honestly. Anything unrecognised is treated as monthly, which
+# over- rather than under-states the commitment -- the safer direction for a plan.
+_PER_MONTH = {"daily": 30.0, "weekly": 4.333, "biweekly": 2.167, "semimonthly": 2.0,
+              "monthly": 1.0, "monthly_on_day": 1.0, "monthly_on_last_day": 1.0,
+              "quarterly": 1 / 3, "semiannual": 1 / 6, "yearly": 1 / 12, "annual": 1 / 12}
+
+
+def _monthly_total(charges: list[dict]) -> float:
+    total = 0.0
+    for charge in charges:
+        rate = _PER_MONTH.get((charge.get("cadence") or "").strip().lower(), 1.0)
+        total += (charge.get("amount") or 0.0) * rate
+    return round(total, 2)
+
+
+def _money(value) -> str:
+    return f"${value:,.2f}" if isinstance(value, (int, float)) else "unknown"
+
+
+def _aged(value, age_days) -> str:
+    """A number is only as good as its date, so they are never printed apart."""
+    if value is None:
+        return "balance never stated as a number"
+    if age_days is None:
+        return f"{_money(value)} (date unknown)"
+    if age_days > STALE_AFTER_DAYS:
+        years = age_days / 365.0
+        return f"{_money(value)} but last seen {years:.1f} YEARS ago — historical, not current"
+    return f"{_money(value)} as of {age_days}d ago"
+
+
+def render(picture: dict) -> str:
+    """The feed block. Written to be read by a model that will otherwise guess."""
+    lines = [f"PERSONAL FINANCES (exact, as of {picture['as_of']}):"]
+
+    if picture["accounts"]:
+        lines.append(f"  spendable cash {_money(picture['spendable'])}"
+                     + (f" | net worth {_money(picture['net_worth']['net_worth'])}"
+                        if picture["net_worth"] else ""))
+        for acct in picture["accounts"]:
+            lines.append(f"    {acct.get('name')} ({acct.get('account_type')}): "
+                         f"{_money(acct.get('balance'))}")
+    else:
+        lines.append("  NO ACCOUNTS CONNECTED — balances unknown. Say so rather than "
+                     "assuming a balance.")
+
+    lines.append(f"  committed monthly: income {_money(picture['monthly_income_total'])} "
+                 f"vs fixed bills {_money(picture['monthly_fixed_total'])}")
+    for charge in picture["fixed_expenses"]:
+        lines.append(f"    -{_money(charge.get('amount'))} {charge.get('description')} "
+                     f"({charge.get('cadence')}, next {charge.get('next_expected_date')})")
+    for charge in picture["income_sources"]:
+        lines.append(f"    +{_money(charge.get('amount'))} {charge.get('description')} "
+                     f"({charge.get('cadence')}, next {charge.get('next_expected_date')})")
+
+    sts = picture.get("safe_to_spend")
+    if sts:
+        lines.append(f"  safe to spend before {sts['payday']}: {_money(sts['safe_to_spend'])} "
+                     f"(lowest projected balance {_money(sts['minimum_projected_balance'])}, "
+                     f"buffer {_money(sts['safety_buffer'])})")
+    else:
+        lines.append("  safe-to-spend: not computable — not enough payday history yet.")
+
+    if picture["spending_by_category"]:
+        synced = picture["spending_by_category"][0].get("last_synced_at") or "unknown"
+        lines.append(f"  where it actually went (last 30 days, cached {synced[:10]}):")
+        for row in picture["spending_by_category"][:15]:
+            lines.append(f"    {row.get('label')}: {_money(row.get('amount'))} "
+                         f"over {row.get('transaction_count')} transactions")
+
+    budgets, goals = picture["budgets"], picture["savings_goals"]
+    lines.append(f"  budgets set: {len(budgets) or 'NONE — nothing is budgeted yet'}")
+    for budget in budgets:
+        lines.append(f"    {budget.get('category_label')}: {_money(budget.get('monthly_limit'))}/mo")
+    lines.append(f"  savings goals: {len(goals) or 'NONE — nothing is being saved toward yet'}")
+    for goal in goals:
+        lines.append(f"    {goal.get('name')}: target {_money(goal.get('target_amount'))} "
+                     f"by {goal.get('target_date') or 'no date'}")
+
+    lines += _debt_lines(picture["debts"], date.fromisoformat(picture["as_of"]))
+    return "\n".join(lines)
+
+
+def _debt_lines(debts: dict, today: date) -> list[str]:
+    lines = [f"  DEBTS — {debts['row_count']} tracked rows that look like "
+             f"{debts['obligation_count']} real obligations:"]
+    if debts["naive_row_sum"] != debts["all_known_balance_floor"]:
+        lines.append(f"    Summing the rows gives {_money(debts['naive_row_sum'])}, but that "
+                     f"DOUBLE-COUNTS debts filed more than once. Counting each obligation "
+                     f"once: {_money(debts['all_known_balance_floor'])}.")
+    lines.append(f"    Seen within a year: {_money(debts['recent_balance_floor'])} "
+                 f"— this is the only figure safe to plan against.")
+    lines.append(f"    Including balances older than a year: "
+                 f"{_money(debts['all_known_balance_floor'])} (ages shown below).")
+    if debts["unknown_balance_count"]:
+        lines.append(f"    {debts['unknown_balance_count']} obligation(s) have NO balance "
+                     f"ever stated as a number — they are missing from every total above.")
+    if debts["proposed_count"]:
+        lines.append(f"    {debts['proposed_count']} more are unconfirmed guesses, "
+                     f"deliberately excluded until he says otherwise.")
+
+    if debts["groups"]:
+        lines.append("    Rows that appear to be ONE debt (same account number, different "
+                     "creditor names as it was sold on) — needs his confirmation:")
+        for group in debts["groups"]:
+            lines.append(f"      account ...{group['account_last4']}: "
+                         f"{len(group['rows'])} rows — {', '.join(group['names'])}")
+            if len(group["distinct_balances"]) > 1:
+                lines.append("        rows DISAGREE on the balance: "
+                             + ", ".join(_money(b) for b in group["distinct_balances"])
+                             + " — which is current is unresolved")
+            lines.append(f"        counted once: "
+                         f"{_aged(group['likely_balance'], group['newest_age_days'])}"
+                         f" (summing the rows would say {_money(group['naive_sum'])})")
+
+    if debts["ungrouped"]:
+        lines.append("    Standalone obligations:")
+        for row in debts["ungrouped"]:
+            age = _age_days(row.get("last_observed_on"), today)
+            minimum = row.get("current_minimum_payment")
+            extra = f", min payment {_money(minimum)}" if minimum else ""
+            lines.append(f"      {row['creditor']} ({row.get('kind') or 'unknown kind'}): "
+                         f"{_aged(row.get('current_balance'), age)}{extra}")
+    return lines
+
+
+def reconciliation(db_path: str, owner_user_id: int, today: date | None = None) -> dict:
+    """What about his debt picture needs a human before it can be planned against.
+
+    Three kinds of problem, each with a different fix, deliberately kept apart rather than
+    merged into one "needs attention" pile -- "confirm these are one debt" and "phone them
+    and ask the balance" are not the same job, and a list that mixes them is a list he
+    does not start.
+
+    Ordered by money at stake so the first card is the one worth doing.
+    """
+    today = today or date.today()
+    picture = debt_picture(db_path, owner_user_id, today)
+
+    duplicates = [{
+        "kind": "duplicate",
+        "account_last4": g["account_last4"],
+        "rows": [{"id": r["id"], "creditor": r["creditor"],
+                  "balance": r["current_balance"],
+                  "observed_on": r.get("last_observed_on"),
+                  "age_days": _age_days(r.get("last_observed_on"), today),
+                  "kind": r.get("kind")}
+                 for r in sorted(g["rows"],
+                                 key=lambda r: (r.get("last_observed_on") or ""), reverse=True)],
+        "distinct_balances": g["distinct_balances"],
+        "naive_sum": g["naive_sum"],
+        "likely_balance": g["likely_balance"],
+        # The phantom money this row group is currently adding to his total. This is the
+        # number that makes the card worth opening.
+        "at_stake": round(g["naive_sum"] - (g["likely_balance"] or 0), 2),
+    } for g in picture["groups"]]
+
+    stale, unknown = [], []
+    for row in picture["ungrouped"]:
+        age = _age_days(row.get("last_observed_on"), today)
+        entry = {"id": row["id"], "creditor": row["creditor"], "kind": row.get("kind"),
+                 "balance": row.get("current_balance"), "age_days": age,
+                 "observed_on": row.get("last_observed_on"),
+                 "minimum_payment": row.get("current_minimum_payment")}
+        if row.get("current_balance") is None:
+            unknown.append({**entry, "kind_of_problem": "unknown"})
+        elif age is None or age > STALE_AFTER_DAYS:
+            stale.append({**entry, "kind_of_problem": "stale",
+                          "at_stake": row.get("current_balance") or 0})
+
+    duplicates.sort(key=lambda d: d["at_stake"], reverse=True)
+    stale.sort(key=lambda d: d.get("at_stake") or 0, reverse=True)
+
+    return {
+        "as_of": today.isoformat(),
+        "duplicates": duplicates,
+        "stale": stale,
+        "unknown": unknown,
+        "needs_you": len(duplicates) + len(stale) + len(unknown),
+        "phantom_total": round(sum(d["at_stake"] for d in duplicates), 2),
+        "totals": {
+            "naive_row_sum": picture["naive_row_sum"],
+            "counted_once": picture["all_known_balance_floor"],
+            "plannable": picture["recent_balance_floor"],
+            "row_count": picture["row_count"],
+            "obligation_count": picture["obligation_count"],
+        },
+    }
+
+
+def briefing(db_path: str, owner_user_id: int, today: date | None = None) -> str:
+    """The finance feed block, or an honest failure. Never raises into a staff run."""
+    try:
+        return render(build(db_path, owner_user_id, today))
+    except Exception as e:
+        logger.exception("finance brief failed")
+        return (f"PERSONAL FINANCES: unavailable ({type(e).__name__}). Do not plan from "
+                f"remembered or assumed figures this run — say the feed is down.")

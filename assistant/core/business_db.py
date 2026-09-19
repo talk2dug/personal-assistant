@@ -751,6 +751,23 @@ def set_art_brief_status(db_path: str, owner_user_id: int, brief_id: int, status
         return cur.rowcount > 0
 
 
+def set_art_brief_prompt(db_path: str, owner_user_id: int, brief_id: int, image_prompt: str) -> bool:
+    """Adopts the direction the owner actually picked as the brief's working prompt.
+
+    The art director proposes several directions and renders each one, so the card he
+    decides is a pick-one between real images. Without this the pick is decorative: the
+    brief would keep whichever prompt happened to be first, and the store and social
+    copy written from it downstream would describe a picture he did not choose.
+    """
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "UPDATE art_briefs SET image_prompt = ? WHERE id = ? AND owner_user_id = ?",
+            (image_prompt, brief_id, owner_user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def create_store_listing(
     db_path: str, owner_user_id: int, title: str, concept_id: int | None = None,
     description: str | None = None, seo_tags: str | None = None, price: float | None = None,
@@ -886,6 +903,40 @@ def create_review_item(
             )
         conn.commit()
         return item_id
+
+
+def add_review_options(db_path: str, owner_user_id: int, item_id: int,
+                       options: list[dict]) -> int:
+    """Attaches choices to a card that is still pending, after the fact.
+
+    For work that was filed before it could be shown. The art director now renders its
+    directions before filing them, but the cards written under the old order are still
+    sitting in the queue as text with nothing to look at -- this is how they get their
+    pictures without being rewritten or raised again, which would lose their place and
+    their age.
+
+    Refuses a decided card: adding a choice to something already ruled on would change
+    what the record says he was choosing between.
+    """
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status FROM review_items WHERE id = ? AND owner_user_id = ?",
+            (item_id, owner_user_id)).fetchone()
+        if row is None or row["status"] != "pending":
+            return 0
+        start = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS n FROM review_options WHERE item_id = ?",
+            (item_id,)).fetchone()["n"]
+        for offset, option in enumerate(options):
+            conn.execute(
+                """INSERT INTO review_options (item_id, label, description, media_path, body, position)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (item_id, option.get("label") or f"Option {start + offset + 1}",
+                 option.get("description"), option.get("media_path"), option.get("body"),
+                 start + offset),
+            )
+        conn.commit()
+        return len(options)
 
 
 def refresh_review_item_text(

@@ -37,7 +37,16 @@ class TestVerdictInstructions:
 
 class TestFeedGranting:
     def test_market_context_is_inferred_from_the_job(self, db):
-        assert staff.infer_data_feeds("Crypto Analyst", "Watches token prices") == "market"
+        assert "market" in staff.infer_data_feeds("Crypto Analyst", "Watches token prices")
+
+    def test_everyone_gets_a_journal(self, db):
+        """An employee runs in isolation with no memory between runs, so without the vault
+        it re-derives the same conclusions forever and never gets better at anything. It
+        was opt-in and 12 of 18 had no memory at all, including two hired that same day."""
+        for title, description in (("Crypto Analyst", "Watches token prices"),
+                                   ("Art Director", "Writes image prompts"),
+                                   ("Plain Analyst", "Reads things and reports")):
+            assert "journal" in staff.infer_data_feeds(title, description), title
 
     def test_a_tradable_ledger_is_never_inferred_from_wording(self, db):
         """The premise of this module is that a job description cannot grant its own
@@ -124,15 +133,23 @@ class TestFeedBriefingContent:
         assert "target $240" in out or "target $240.00" in out
 
     def test_paper_briefing_flags_a_position_with_no_exit_plan(self, market_db):
+        """Entry now requires both levels, so this state is only reachable as a legacy
+        row -- but the briefing still has to render it rather than crash on the NULLs."""
+        import sqlite3
         from assistant.core import paper_trading
-        paper_trading.execute_orders(market_db, [{"side": "buy", "code": "SOL", "usd": 100}])
+        paper_trading.execute_orders(market_db, [
+            {"side": "buy", "code": "SOL", "usd": 100, "stop_loss": 180.0, "take_profit": 260.0}])
+        conn = sqlite3.connect(market_db)
+        conn.execute("UPDATE paper_positions SET stop_loss = NULL, take_profit = NULL")
+        conn.commit(); conn.close()
         out = staff.build_feed_briefing(market_db, "paper")
         assert "none set" in out
 
     def test_paper_briefing_shows_the_reason_and_exit_kind_on_a_fill(self, market_db):
         from assistant.core import paper_trading
         paper_trading.execute_orders(
-            market_db, [{"side": "buy", "code": "SOL", "usd": 100, "reason": "momentum breakout"}])
+            market_db, [{"side": "buy", "code": "SOL", "usd": 100, "reason": "momentum breakout",
+                         "stop_loss": 180.0, "take_profit": 260.0}])
         out = staff.build_feed_briefing(market_db, "paper")
         assert "momentum breakout" in out
 
@@ -379,6 +396,12 @@ class TestHandleCadenceOutcome:
         assert notified == ["BTC -10%"]
 
 
+def conn_rate(db, code):
+    import sqlite3
+    with sqlite3.connect(db) as c:
+        return c.execute("SELECT rate FROM market_coins WHERE code=?", (code,)).fetchone()[0]
+
+
 class TestPaperRecordInTheBriefing:
     """The win rate was computed by paper_trading.performance() since the day that module
     was written, and never once shown to the employee trading against it. The per-coin
@@ -407,12 +430,20 @@ class TestPaperRecordInTheBriefing:
     def _lose_on(self, db, code, crashed_to, back_to=None):
         import sqlite3
         from assistant.core import paper_trading
-        paper_trading.execute_orders(db, [{"side": "buy", "code": code, "usd": 100}])
+        entry = conn_rate(db, code)
+        paper_trading.execute_orders(db, [{"side": "buy", "code": code, "usd": 100,
+                                           "stop_loss": entry * 0.9,
+                                           "take_profit": entry * 1.3}])
         conn = sqlite3.connect(db)
         conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (crashed_to, code))
+        # Cleared so the close is discretionary: repeated losing round-trips on one
+        # ticker would otherwise collide with the stop-loss re-entry cooldown, which is
+        # a different rule than the one under test here.
+        conn.execute("UPDATE paper_positions SET stop_loss = NULL, take_profit = NULL")
         conn.commit()
         conn.close()
-        paper_trading.execute_orders(db, [{"side": "sell", "code": code, "qty": "all"}])
+        paper_trading.execute_orders(db, [{"side": "sell", "code": code, "qty": "all"}],
+                                     allow_exit=True)
         if back_to is not None:
             conn = sqlite3.connect(db)
             conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (back_to, code))
@@ -526,8 +557,11 @@ class TestJournalLoop:
         assert "write_note" not in llm.prompts[0]
 
     def test_an_employee_without_the_feed_is_never_asked_for_a_block(self, market_db, vault):
+        """Journalling is now the default, so this case has to be built deliberately --
+        but it must still hold, or removing the feed would be a setting that does nothing."""
         key = staff.hire(market_db, "Plain Analyst",
                          "Twenty years of markets research, macro and on-chain analysis.")["key"]
+        staff.set_data_feeds(market_db, key, "")
         llm = self.ScriptedLLM("Nothing today.")
         staff.assign(market_db, llm, key, "do your rounds", obsidian=vault)
         assert "```journal" not in llm.prompts[0]
@@ -540,7 +574,7 @@ class TestJournalLoop:
             'I bought 10 BTC today, a huge position.\n'
             '```journal\n{"summary": "loading up", "detail": "conviction buy"}\n```\n'
             '```orders\n{"orders": [{"side": "buy", "code": "SOL", "usd": 100,'
-            ' "stop_loss": 180.0}]}\n```')
+            ' "stop_loss": 180.0, "take_profit": 260.0}]}\n```')
         staff.assign(market_db, llm, trader, "do your rounds", obsidian=vault)
 
         notes = vault.list_notes(crypto_journal.JOURNAL_FOLDER)["notes"]

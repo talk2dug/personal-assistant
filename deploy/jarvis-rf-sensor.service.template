@@ -1,0 +1,30 @@
+# Jarvis RF sensor collector -- runs rtl_433 on the RTL-SDR and folds every decoded 433
+# MHz transmission into the local SQLite registry (sensor_node/rf_store.py). Operator
+# names devices with sensor_node/rf_sensorctl.py.
+#
+# A .template like jarvis-device.service.template: %USER% and %INSTALL_DIR% are filled in
+# at install time. This runs on the RF sensor node (jarvishackrf), NOT the main box, and
+# uses the system python3 -- rf_store/rf_collector are pure stdlib, so there is no venv.
+#
+# The RTL-SDR must not be held by the DVB-TV kernel driver: install blacklists
+# dvb_usb_rtl28xxu (see the node's /etc/modprobe.d/rtl-sdr-blacklist.conf). The HackRF is
+# a separate radio for the Tier-2 sweep and is intentionally not touched by this unit.
+
+[Unit]
+Description=Jarvis RF sensor collector (rtl_433 -> registry)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%INSTALL_DIR%
+ExecStart=/usr/bin/python3 %INSTALL_DIR%/rf_collector.py --db %INSTALL_DIR%/rf.db
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -3,12 +3,12 @@ import asyncio
 import logging
 
 from .config import load_config
-from .core import business_db, db, github_client, staff, ui_content, vision, work_queue
+from .core import business_db, cellular, db, github_client, pipelines, staff, ui_content, vision, work_queue, radio
 from .core import scheduler
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_notifier,
-    build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
+    build_cellular_context, build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
     build_local_llm_context, build_mail_context, build_obsidian_context, build_personal_context,
     build_phone_context, build_recipe_context, build_ticketmaster_context,
 )
@@ -49,7 +49,12 @@ def main() -> None:
     # show_camera/list_cameras/add_camera are always-on tools (see engine.py's CAMERA_TOOLS),
     # not behind a build_*_context flag, so the cameras table must exist unconditionally too.
     vision.init_vision_db(cfg.db_path)
+    cellular.init_cellular_db(cfg.db_path)
+    pipelines.init_pipelines(cfg.db_path)
     ui_content.init_ui_content_db(cfg.db_path)
+    # The radio-awareness tools (engine.py's RADIO_TOOLS) are always on, so their tables
+    # must exist unconditionally too; the worker that fills them is a separate service.
+    radio.init_radio_db(cfg.db_path)
     _seed_cameras(cfg)
     # github_pr_state backs the GitHub PR/CI watchdog (scheduler.py's run_github_watchdog)
     # -- unconditional for the same reason business_db/vision are: cheap to create, and
@@ -83,6 +88,8 @@ def main() -> None:
         cfg, owner_row["id"] if owner_row else None, letterstream=letterstream, kroger=kroger)
     git_ops = build_git_ops_context(cfg)
     recipe = build_recipe_context(cfg)
+
+    cellular_ctx = build_cellular_context(cfg)
     local_llm = build_local_llm_context(cfg)
     # The bridge worker lives in this process alongside the scheduler — one place owns
     # all background work, so there's exactly one queue draining the GPU.
@@ -102,7 +109,7 @@ def main() -> None:
         cfg.telegram_bot_token, cfg.db_path, llm, cfg.timezone, era=era, calendar=calendar, phone=phone, mail=mail,
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops, recipe=recipe, local_llm=local_llm,
+        git_ops=git_ops, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
     )
     # Routed through the user's notification policy: reminders follow the same
     # 'phone when I'm out' preference as anything else Jarvis sends unprompted.
@@ -151,6 +158,12 @@ def main() -> None:
         # background work, same as reminders and the Era cache.
         business=business, llm=llm, tz_name=cfg.timezone,
         business_agents_enabled=cfg.business_agents_enabled,
+        # The art director renders each direction before filing it for approval, so it
+        # needs the same queue everything else draws the card through.
+        bridge=bridge,
+        # His own number, so the daily rhythm can text him rather than push. The first
+        # allowed number is the owner's; without one the nudges fall back to Telegram.
+        rhythm_sms_number=(cfg.sms_allowed_numbers or [None])[0],
         # Location watching needs HA for GPS and the other contexts so a routine's
         # prompt has the same tools a chat turn would.
         home_assistant=home_assistant, phone=phone, mail=mail, obsidian=obsidian,
@@ -191,6 +204,12 @@ def main() -> None:
         # always behind by design.
         mail_debts_interval_minutes=cfg.mail_debts_interval_minutes,
         mail_debts_per_run_limit=cfg.mail_debts_per_run_limit,
+
+        wan_failover_enabled=cfg.wan_failover_enabled,
+
+        wan_failover_proxy=cfg.wan_failover_proxy,
+
+        wan_failover_interval_seconds=cfg.wan_failover_interval_seconds,
         mail_debts_shortlist_limit=cfg.mail_debts_shortlist_limit,
         kroger_sync_interval_seconds=cfg.kroger_sync_interval_seconds,
         # Watchdog: notices a due personal task or a Review item nobody came back to,

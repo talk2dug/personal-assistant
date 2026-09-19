@@ -48,7 +48,7 @@
 .review-pipeline-tabs .review-count {
   margin-left: 0;
   padding: 0 5px;
-  background: rgba(34, 232, 255, 0.18);
+  background: rgba(148, 188, 227, 0.18);
   color: var(--cyan-bright);
   font-size: 9px;
 }

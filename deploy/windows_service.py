@@ -65,6 +65,16 @@ PYTHON = str(REPO_ROOT / ".venv" / "Scripts" / "python.exe")
 VARIANTS = {
     "core": {"module": "assistant.main", "name": "JarvisCore", "display": "Jarvis Core"},
     "web": {"module": "assistant.web_main", "name": "JarvisWeb", "display": "Jarvis Web UI"},
+    # The radio worker (assistant/radio_main.py): stream transcription + the SDR-node
+    # polls. Its own service for the same reason the vision worker is its own process --
+    # whisper and a long-running ffmpeg belong nowhere near the chat process.
+    "radio": {"module": "assistant.radio_main", "name": "JarvisRadio", "display": "Jarvis Radio Watch"},
+    # The VoIP/SIP worker (assistant/voip_main.py): Jarvis's real phone line. Its own
+    # service for the same reason radio is -- a stuck SIP stack or a long call must not
+    # stall the chat process or the scheduler. SCAFFOLD: currently a no-op that never
+    # registers or dials until credentials + the media bridge land (see voip_main.py).
+    # Not installed by default; install deliberately once VoIP.ms creds are in config.
+    "voip": {"module": "assistant.voip_main", "name": "JarvisVoip", "display": "Jarvis VoIP"},
 }
 
 # How long to wait after a crashed child before restarting it -- matches the Scheduled

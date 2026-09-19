@@ -4,14 +4,14 @@ import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, X
 // scores are never blended or averaged across bureaus (they're genuinely different
 // numbers from different sources -- see personal_db.py's schema comment).
 const BUREAU_COLORS = {
-  experian: '#22e8ff',
-  equifax: '#ffb020',
+  experian: '#94bce3',
+  equifax: '#e8a33d',
   transunion: '#ff5da2',
   other: '#9aa0a6',
 }
 const BUREAU_LABEL = { experian: 'Experian', equifax: 'Equifax', transunion: 'TransUnion', other: 'Other' }
-const GRID = 'rgba(34, 232, 255, 0.12)'
-const DIM_TEXT = '#5f8a94'
+const GRID = 'rgba(148, 188, 227, 0.12)'
+const DIM_TEXT = '#7ea3c4'
 
 /** One row per distinct recorded_on date, one column per bureau -- a bureau with no
  * entry on a given date is simply absent from that row (not zero, not interpolated by

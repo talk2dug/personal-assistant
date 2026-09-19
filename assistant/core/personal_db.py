@@ -11,7 +11,7 @@ passed explicitly.
 import re
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS personal_projects (
@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS personal_projects (
     goal TEXT,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'done', 'dropped')),
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- Same split as personal_tasks.track, and the source of truth for the tasks
+    -- under it: a task in a project inherits the project's track rather than being
+    -- classified on its own, so the two can never disagree.
+    track TEXT NOT NULL DEFAULT 'project' CHECK (track IN ('personal', 'project'))
 );
 
 CREATE TABLE IF NOT EXISTS personal_tasks (
@@ -31,6 +35,18 @@ CREATE TABLE IF NOT EXISTS personal_tasks (
     text TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'doing', 'done', 'dropped')),
     priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high')),
+    -- Whose life this belongs to: HIS, or the system's.
+    --
+    -- "Personal tasks is what the system was designed to help with; project tasks are
+    -- what's needed to make the system." Mixing them put "wake-word arbitration" in the
+    -- same shortlist as "find a vet for Ghost", which makes planning a day impossible --
+    -- one of those is a Saturday errand and the other is an evening at a keyboard, and
+    -- ranking them against each other is meaningless.
+    --
+    -- Defaults to 'personal' because that is what a task created by talking to Jarvis
+    -- about his day almost always is; build work arrives through a project, which carries
+    -- its own track down to its tasks.
+    track TEXT NOT NULL DEFAULT 'personal' CHECK (track IN ('personal', 'project')),
     due_at TEXT,
     -- Set once the due-date watchdog (scheduler.py's run_task_watchdog) has notified the
     -- owner this task is due, so a slow poll interval can't notify the same task twice.
@@ -39,6 +55,120 @@ CREATE TABLE IF NOT EXISTS personal_tasks (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- What a task needs in order to actually be DONE: the vet's phone number, the address to
+-- drive to, the name of the person who has the records. His words: "I need a place that
+-- is easy for me to see all the info I need for that task."
+--
+-- Typed rather than one free-text notes blob, because the type is what makes it useful on
+-- a phone: a phone number should be tappable and an address should open in maps, and
+-- neither can happen if it is a sentence in a paragraph. `kind` is deliberately short --
+-- adding a sixth kind means teaching the UI to render it, so the list stays small.
+-- The shape of a day, and the things that keep a life in balance.
+--
+-- Two kinds in one table because they need identical machinery -- a schedule, a log, a
+-- streak, a nudge -- and differ only in what "on time" means:
+--
+--   anchor  has a clock. Feed Ghost at 06:45, leave for work at 07:30. Missing it is
+--           measured in minutes and the nudge has to arrive BEFORE it.
+--   habit   has a rate. Ride the bike four times a week, see Nadia twice. Missing it is
+--           measured in days, and the nudge is "this is slipping", not "you are late".
+--
+-- Splitting them into two tables would mean writing the log, the streak and the plan
+-- twice; keeping the distinction as a column keeps one of each.
+CREATE TABLE IF NOT EXISTS day_rhythm (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('anchor', 'habit')),
+    -- Why it matters, so the plan can say "you have not done anything for yourself in
+    -- four days" rather than listing six unrelated misses.
+    category TEXT NOT NULL DEFAULT 'other' CHECK (category IN (
+        'wake', 'work', 'care', 'health', 'relationship', 'project', 'fun', 'wind_down', 'other')),
+    at_time TEXT,               -- 'HH:MM' local, anchors only
+    days TEXT,                  -- '0,1,2,3,4', Monday=0. NULL means every day.
+    target_per_week INTEGER,    -- habits only
+    -- How long before at_time to text him. 0 means "at the time"; NULL means never nudge,
+    -- which is how something gets tracked without being chased.
+    lead_minutes INTEGER,
+    -- A thing that cannot slip without consequence: leaving for work, a dose of medicine.
+    -- These are the ones that still text him when he has asked for a quiet day.
+    hard INTEGER NOT NULL DEFAULT 0,
+    notes TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_day_rhythm_owner ON day_rhythm(owner_user_id, enabled);
+
+-- Did it happen. One row per item per day at most, so a double-confirm cannot inflate a
+-- streak, and a skip is recorded as a real answer rather than as silence -- "I skipped the
+-- bike because I was at Nadia's" is information, an empty row is not.
+CREATE TABLE IF NOT EXISTS rhythm_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rhythm_id INTEGER NOT NULL REFERENCES day_rhythm(id) ON DELETE CASCADE,
+    on_date TEXT NOT NULL,      -- local YYYY-MM-DD
+    state TEXT NOT NULL CHECK (state IN ('done', 'skipped')),
+    at TEXT NOT NULL,
+    note TEXT,
+    -- Where the answer came from: a text reply, the dashboard, or Jarvis inferring it.
+    source TEXT NOT NULL DEFAULT 'chat',
+    UNIQUE (rhythm_id, on_date)
+);
+
+-- What has already been texted, so a nudge fires once rather than on every scheduler tick.
+-- Same nullable-marker discipline as reminders.sent_at, but keyed per day because the
+-- rhythm itself repeats.
+CREATE TABLE IF NOT EXISTS rhythm_nudges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rhythm_id INTEGER NOT NULL REFERENCES day_rhythm(id) ON DELETE CASCADE,
+    on_date TEXT NOT NULL,
+    kind TEXT NOT NULL,         -- 'lead' | 'due' | 'slipping'
+    sent_at TEXT NOT NULL,
+    UNIQUE (rhythm_id, on_date, kind)
+);
+
+-- What he actually committed to today, as distinct from what is merely open.
+--
+-- Not the same as status='doing': that means started. This means "I am choosing this for
+-- today", which is the decision the day planner exists to help him make, and it has to be
+-- per-day so that not getting to something is visible as a fact rather than quietly
+-- carried forward as though it were still today's plan.
+CREATE TABLE IF NOT EXISTS day_picks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    task_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    on_date TEXT NOT NULL,
+    picked_at TEXT NOT NULL,
+    UNIQUE (task_id, on_date)
+);
+CREATE INDEX IF NOT EXISTS idx_day_picks_date ON day_picks(owner_user_id, on_date);
+
+CREATE TABLE IF NOT EXISTS task_details (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('phone', 'address', 'person', 'link', 'note')),
+    label TEXT,
+    value TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_details_task ON task_details(task_id, position);
+
+-- "I can't book the trip until Ghost has a vet and a boarding place." A task that is
+-- waiting on another one is not a task he can pick up today, and showing it to him as
+-- though it were is how a list stops being trustworthy.
+--
+-- Many-to-many because the real case is plural: booking the flight is blocked by BOTH the
+-- vet records and the boarding facility, and collapsing that to one blocker would clear
+-- the flight the moment either finished.
+CREATE TABLE IF NOT EXISTS task_blockers (
+    task_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    blocked_by_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, blocked_by_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_blockers_by ON task_blockers(blocked_by_id);
 
 -- Errands with real legwork behind them ("find me a doctor", "look into X") -- delegated
 -- rather than answered inline, and picked up by a background job (personal_agents.py).
@@ -125,8 +255,95 @@ CREATE TABLE IF NOT EXISTS dispute_letters (
     tracking_number TEXT,   -- USPS cert/tracking number, once known
     status TEXT NOT NULL DEFAULT 'quoted' CHECK (status IN ('quoted', 'mailed')),
     quoted_at TEXT NOT NULL,
-    mailed_at TEXT
+    mailed_at TEXT,
+    -- When USPS says it landed. The FCRA clock runs from RECEIPT, not from posting, which
+    -- is the whole reason these go certified: without a delivery date the deadline is a
+    -- guess, and a deadline you cannot prove is one you cannot enforce.
+    delivered_at TEXT,
+    -- When the bureau's answer is legally due. Stored rather than computed on read so the
+    -- date does not silently move if the rule or the estimate changes after the fact --
+    -- what matters later is the deadline as it stood when the letter landed.
+    response_due_at TEXT,
+    -- Set when something actually came back, so an overdue letter is distinguishable from
+    -- one that was answered and simply not chased.
+    response_received_at TEXT,
+    response_summary TEXT
 );
+
+-- A credit report as pulled on a day, and the accounts on it.
+--
+-- Separate from the debt tracker on purpose, and they answer different questions. `debts`
+-- is what he OWES -- assembled from statement emails, incomplete, and the thing the
+-- financial planner budgets against. A tradeline is what a BUREAU SAYS, which is a claim
+-- about him that may be wrong, stale, or not his at all. Disputing is the act of
+-- challenging the second; paying is the act of settling the first. Conflating them would
+-- mean a paid-off debt looked like a fixed report, and it is not: a collection can sit on
+-- a report for seven years after it is paid.
+CREATE TABLE IF NOT EXISTS credit_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    bureau TEXT NOT NULL CHECK (bureau IN ('experian', 'equifax', 'transunion', 'other')),
+    pulled_on TEXT NOT NULL,
+    score INTEGER,
+    score_model TEXT,              -- 'FICO 8', 'VantageScore 3.0' -- they differ by 50+ points
+    source TEXT,                   -- annualcreditreport.com, a monitoring app, a lender pull
+    notes TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_reports_owner ON credit_reports(owner_user_id, pulled_on DESC);
+
+CREATE TABLE IF NOT EXISTS credit_tradelines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL REFERENCES credit_reports(id) ON DELETE CASCADE,
+    creditor TEXT NOT NULL,
+    account_last4 TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'other' CHECK (kind IN (
+        'credit_card', 'loan', 'student_loan', 'auto', 'mortgage', 'medical',
+        'collections', 'other')),
+    status TEXT,                   -- as the bureau words it: 'open', 'closed', 'charge-off'
+    balance REAL,
+    credit_limit REAL,             -- utilisation is 30% of a FICO score, so this matters
+    opened_on TEXT,                -- age of accounts is another 15%
+    closed_on TEXT,
+    past_due REAL,
+    -- The things that actually hold a score down, each dated: a late payment stops
+    -- counting long before the account falls off, and knowing WHEN is the difference
+    -- between disputing it and waiting it out.
+    derogatory TEXT,               -- 'collection', 'charge-off', 'late_30', 'late_60', ...
+    derogatory_on TEXT,
+    falls_off_on TEXT,             -- seven years from first delinquency, where known
+    disputed_item_id INTEGER REFERENCES dispute_items(id),
+    notes TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_tradelines_report ON credit_tradelines(report_id);
+
+-- Cards and loans worth applying for, and what happened when he did.
+--
+-- Kept as a reviewable suggestion rather than an action: an application is a hard inquiry
+-- and a new account, which move a score in both directions at once, so nothing here is
+-- ever applied for automatically. Turning one into a task is HIS click.
+CREATE TABLE IF NOT EXISTS credit_recommendations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'card' CHECK (kind IN (
+        'card', 'loan', 'secured_card', 'credit_builder', 'other')),
+    issuer TEXT,
+    why TEXT NOT NULL,             -- what it does for HIS situation, not a product blurb
+    reward TEXT,                   -- cashback / points / miles, in his words
+    annual_fee REAL,
+    est_approval TEXT,             -- 'likely' | 'borderline' | 'unlikely', with reasoning in why
+    priority INTEGER,
+    status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN (
+        'suggested', 'planned', 'applied', 'approved', 'declined', 'dismissed')),
+    task_id INTEGER REFERENCES personal_tasks(id),
+    decided_at TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_recs_owner ON credit_recommendations(owner_user_id, status);
 
 -- The debt tracker. A sibling of credit_score_entries/dispute_items above, and it exists
 -- because of exactly one thing the owner said when he was asked to list his debts out so
@@ -266,6 +483,34 @@ def init_personal_db(db_path: str) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(personal_tasks)")}
         if "notified_at" not in cols:
             conn.execute("ALTER TABLE personal_tasks ADD COLUMN notified_at TEXT")
+
+        # Splitting his life from the system's. Every project that existed when this was
+        # added was Jarvis build work, and every task under one inherits that; the
+        # unparented ones were his errands -- the vet, the car, the licence.
+        #
+        # Backfilled by PROJECT rather than by reading the task text, because guessing
+        # from wording is exactly how "wake-word arbitration" ends up filed as a Saturday
+        # errand. A handful of unparented build tasks will be misfiled as personal, which
+        # is visible and one click to fix; the alternative silently mixes them again.
+        project_cols = {row[1] for row in conn.execute("PRAGMA table_info(personal_projects)")}
+        if "track" not in project_cols:
+            conn.execute("ALTER TABLE personal_projects ADD COLUMN track TEXT NOT NULL "
+                         "DEFAULT 'project'")
+        if "track" not in cols:
+            conn.execute("ALTER TABLE personal_tasks ADD COLUMN track TEXT NOT NULL "
+                         "DEFAULT 'personal'")
+            conn.execute("UPDATE personal_tasks SET track = 'project' "
+                         "WHERE project_id IS NOT NULL")
+
+        # Dispute letters gained a real clock. Existing rows keep NULL deadlines rather
+        # than being back-computed: the FCRA window runs from receipt, and inventing a
+        # delivery date for a letter posted months ago would put a deadline on the screen
+        # that nothing could defend.
+        letter_cols = {row[1] for row in conn.execute("PRAGMA table_info(dispute_letters)")}
+        for column in ("delivered_at", "response_due_at", "response_received_at",
+                       "response_summary"):
+            if column not in letter_cols:
+                conn.execute(f"ALTER TABLE dispute_letters ADD COLUMN {column} TEXT")
         conn.commit()
 
 
@@ -328,22 +573,44 @@ def update_project(db_path: str, owner_user_id: int, project_id: int, **fields) 
 
 # --- tasks -------------------------------------------------------------------
 
+TASK_TRACKS = ("personal", "project")
+
+
 def create_task(
     db_path: str, owner_user_id: int, text: str, project_id: int | None = None,
-    priority: str = "normal", due_at: str | None = None,
+    priority: str = "normal", due_at: str | None = None, track: str | None = None,
 ) -> int:
+    """A task, on one of the two tracks.
+
+    An explicit `track` wins; otherwise a task inside a project takes that project's,
+    which is what keeps the two from ever disagreeing. With neither, it is personal --
+    a task created by talking to Jarvis about the day almost always is.
+    """
+    if track is not None and track not in TASK_TRACKS:
+        raise ValueError(f"track must be one of {TASK_TRACKS}")
     now = _now()
     with closing(_connect(db_path)) as conn:
+        if track is None:
+            track = "personal"
+            if project_id is not None:
+                row = conn.execute(
+                    "SELECT track FROM personal_projects WHERE id = ? AND owner_user_id = ?",
+                    (project_id, owner_user_id)).fetchone()
+                if row is not None:
+                    track = row["track"]
         cur = conn.execute(
-            "INSERT INTO personal_tasks (owner_user_id, project_id, text, priority, due_at, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (owner_user_id, project_id, text, priority, due_at, now, now),
+            "INSERT INTO personal_tasks (owner_user_id, project_id, text, priority, due_at,"
+            " track, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (owner_user_id, project_id, text, priority, due_at, track, now, now),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def list_tasks(db_path: str, owner_user_id: int, status: str | None = None, project_id: int | None = None):
+def list_tasks(db_path: str, owner_user_id: int, status: str | None = None,
+               project_id: int | None = None, track: str | None = None):
+    """His tasks. `track` filters to one side of the split; None returns both, which is
+    right for a project view and wrong for planning a day."""
     query = (
         "SELECT t.*, p.name AS project_name FROM personal_tasks t"
         " LEFT JOIN personal_projects p ON p.id = t.project_id"
@@ -356,6 +623,9 @@ def list_tasks(db_path: str, owner_user_id: int, status: str | None = None, proj
     if project_id is not None:
         query += " AND t.project_id = ?"
         params.append(project_id)
+    if track is not None:
+        query += " AND t.track = ?"
+        params.append(track)
     query += (
         " ORDER BY CASE t.status WHEN 'doing' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,"
         " CASE t.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, t.created_at"
@@ -367,10 +637,15 @@ def list_tasks(db_path: str, owner_user_id: int, status: str | None = None, proj
 def update_task(db_path: str, owner_user_id: int, task_id: int, **fields) -> bool:
     allowed = {
         k: v for k, v in fields.items()
-        if k in ("text", "status", "priority", "due_at", "project_id") and v is not None
+        if k in ("text", "status", "priority", "due_at", "project_id", "track")
+        and v is not None
     }
     if not allowed:
         return False
+    # Moving a misfiled task across the split, which the backfill guarantees there will
+    # be some of: it classified by project, and an unparented build task landed as personal.
+    if "track" in allowed and allowed["track"] not in TASK_TRACKS:
+        raise ValueError(f"track must be one of {TASK_TRACKS}")
     # A due_at edit means any earlier due-date notification is stale -- without this, a
     # task rescheduled after it already fired once would silently never notify again.
     if "due_at" in allowed:
@@ -383,6 +658,215 @@ def update_task(db_path: str, owner_user_id: int, task_id: int, **fields) -> boo
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- what a task needs in order to be done ---------------------------------------
+
+DETAIL_KINDS = ("phone", "address", "person", "link", "note")
+
+
+def add_task_detail(db_path: str, task_id: int, kind: str, value: str,
+                    label: str | None = None) -> int:
+    """A phone number, address, name, link or note attached to a task.
+
+    Typed so the UI can make it usable: a phone number becomes tappable and an address
+    opens in maps. That is the whole reason this is not one free-text notes field --
+    a number buried in a paragraph is one he has to retype into his phone.
+    """
+    if kind not in DETAIL_KINDS:
+        raise ValueError(f"detail kind must be one of {DETAIL_KINDS}")
+    if not (value or "").strip():
+        raise ValueError("a detail needs a value")
+    with closing(_connect(db_path)) as conn:
+        position = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS n FROM task_details WHERE task_id = ?",
+            (task_id,)).fetchone()["n"]
+        cur = conn.execute(
+            """INSERT INTO task_details (task_id, kind, label, value, position, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (task_id, kind, (label or "").strip() or None, value.strip(), position, _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_task_details(db_path: str, task_ids: list[int]) -> dict:
+    if not task_ids:
+        return {}
+    marks = ",".join("?" for _ in task_ids)
+    out: dict[int, list[dict]] = {}
+    with closing(_connect(db_path)) as conn:
+        for row in conn.execute(
+                f"SELECT * FROM task_details WHERE task_id IN ({marks}) ORDER BY task_id, position",
+                task_ids):
+            out.setdefault(row["task_id"], []).append(dict(row))
+    return out
+
+
+def delete_task_detail(db_path: str, detail_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute("DELETE FROM task_details WHERE id = ?", (detail_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def block_task(db_path: str, task_id: int, blocked_by_id: int) -> bool:
+    """Records that one task cannot start until another finishes.
+
+    Refuses to block a task on itself, and refuses a cycle: A waiting on B waiting on A
+    means neither is ever offered again, and the list silently loses two tasks with
+    nothing on screen to explain why.
+    """
+    if task_id == blocked_by_id:
+        raise ValueError("a task cannot block itself")
+    if _would_cycle(db_path, task_id, blocked_by_id):
+        raise ValueError("that would make the two tasks wait on each other")
+    with closing(_connect(db_path)) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO task_blockers (task_id, blocked_by_id, created_at) VALUES (?, ?, ?)",
+                (task_id, blocked_by_id, _now()))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def _would_cycle(db_path: str, task_id: int, blocked_by_id: int) -> bool:
+    """True if blocked_by_id already waits on task_id, directly or down a chain."""
+    with closing(_connect(db_path)) as conn:
+        seen, frontier = set(), [blocked_by_id]
+        while frontier:
+            current = frontier.pop()
+            if current == task_id:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            frontier.extend(r["blocked_by_id"] for r in conn.execute(
+                "SELECT blocked_by_id FROM task_blockers WHERE task_id = ?", (current,)))
+    return False
+
+
+def unblock_task(db_path: str, task_id: int, blocked_by_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "DELETE FROM task_blockers WHERE task_id = ? AND blocked_by_id = ?",
+            (task_id, blocked_by_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# --- the daily rhythm ------------------------------------------------------------
+
+RHYTHM_CATEGORIES = ("wake", "work", "care", "health", "relationship", "project",
+                     "fun", "wind_down", "other")
+
+
+def add_rhythm(db_path: str, owner_user_id: int, name: str, kind: str,
+               category: str = "other", at_time: str | None = None,
+               days: str | None = None, target_per_week: int | None = None,
+               lead_minutes: int | None = None, hard: bool = False,
+               notes: str | None = None) -> int:
+    if kind not in ("anchor", "habit"):
+        raise ValueError("kind must be 'anchor' or 'habit'")
+    if category not in RHYTHM_CATEGORIES:
+        raise ValueError(f"category must be one of {RHYTHM_CATEGORIES}")
+    if kind == "anchor" and not at_time:
+        raise ValueError("an anchor needs a time of day")
+    if kind == "habit" and not target_per_week:
+        raise ValueError("a habit needs a target per week")
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO day_rhythm (owner_user_id, name, kind, category, at_time, days,
+                                       target_per_week, lead_minutes, hard, notes,
+                                       created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, name.strip(), kind, category, at_time, days, target_per_week,
+             lead_minutes, 1 if hard else 0, notes, _now(), _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_rhythm(db_path: str, owner_user_id: int, include_disabled: bool = False):
+    query = "SELECT * FROM day_rhythm WHERE owner_user_id = ?"
+    if not include_disabled:
+        query += " AND enabled = 1"
+    query += " ORDER BY kind, at_time IS NULL, at_time, name"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, (owner_user_id,)))
+
+
+def update_rhythm(db_path: str, owner_user_id: int, rhythm_id: int, **fields) -> bool:
+    allowed = {k: v for k, v in fields.items() if k in (
+        "name", "category", "at_time", "days", "target_per_week", "lead_minutes",
+        "hard", "notes", "enabled") and v is not None}
+    if not allowed:
+        return False
+    if "category" in allowed and allowed["category"] not in RHYTHM_CATEGORIES:
+        raise ValueError(f"category must be one of {RHYTHM_CATEGORIES}")
+    if "hard" in allowed:
+        allowed["hard"] = 1 if allowed["hard"] else 0
+    if "enabled" in allowed:
+        allowed["enabled"] = 1 if allowed["enabled"] else 0
+    sets = ", ".join(f"{k} = ?" for k in allowed)
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            f"UPDATE day_rhythm SET {sets}, updated_at = ? WHERE id = ? AND owner_user_id = ?",
+            [*allowed.values(), _now(), rhythm_id, owner_user_id])
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def log_rhythm(db_path: str, rhythm_id: int, on_date: str, state: str = "done",
+               note: str | None = None, source: str = "chat") -> bool:
+    """Records that something happened, or deliberately did not.
+
+    A skip is stored as an answer rather than left as an absence. "Skipped the bike, was
+    away that night" is a fact about his week; a blank row would make that week look
+    identical to one where he ignored the question entirely.
+    """
+    if state not in ("done", "skipped"):
+        raise ValueError("state must be 'done' or 'skipped'")
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """INSERT INTO rhythm_log (rhythm_id, on_date, state, at, note, source)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (rhythm_id, on_date) DO UPDATE SET
+                   state = excluded.state, at = excluded.at,
+                   note = excluded.note, source = excluded.source""",
+            (rhythm_id, on_date, state, _now(), note, source))
+        conn.commit()
+        return True
+
+
+def pick_for_day(db_path: str, owner_user_id: int, task_id: int, on_date: str) -> bool:
+    """Commits a task to a given day. Idempotent -- picking twice is not two picks."""
+    with closing(_connect(db_path)) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO day_picks (owner_user_id, task_id, on_date, picked_at)"
+                " VALUES (?, ?, ?, ?)",
+                (owner_user_id, task_id, on_date, _now()))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def unpick_for_day(db_path: str, owner_user_id: int, task_id: int, on_date: str) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "DELETE FROM day_picks WHERE owner_user_id = ? AND task_id = ? AND on_date = ?",
+            (owner_user_id, task_id, on_date))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def picks_for_day(db_path: str, owner_user_id: int, on_date: str) -> list[int]:
+    with closing(_connect(db_path)) as conn:
+        return [r["task_id"] for r in conn.execute(
+            "SELECT task_id FROM day_picks WHERE owner_user_id = ? AND on_date = ?"
+            " ORDER BY picked_at", (owner_user_id, on_date))]
 
 
 def due_tasks(db_path: str, as_of: str | None = None):
@@ -668,6 +1152,11 @@ DEBT_KINDS = (
 )
 DEBT_STATUSES = ("active", "paid_off", "in_dispute", "closed")
 DEBT_TRACKING_STATES = ("proposed", "tracked", "dismissed")
+
+# Older than this and a balance is history, not a balance. A year is generous for a
+# card and far too generous for a collection account; the point is only that nothing
+# reports a 2023 figure as today's.
+STALE_AFTER_DAYS = 365
 DEBT_SOURCES = ("email", "chat", "manual")
 
 # Corporate boilerplate that is never the distinguishing part of a creditor's name, so
@@ -769,6 +1258,114 @@ def match_debt(candidates: list[dict], creditor_key: str, account_last4: str = "
     return {"debt_id": None, "ambiguous": True,
             "reason": (f"{len(same_creditor)} accounts with this creditor and no account "
                        "number in the message to tell them apart")}
+
+
+def add_credit_report(db_path: str, owner_user_id: int, bureau: str, pulled_on: str,
+                      score: int | None = None, score_model: str | None = None,
+                      source: str | None = None, notes: str | None = None) -> int:
+    if bureau not in ("experian", "equifax", "transunion", "other"):
+        raise ValueError("bureau must be experian, equifax, transunion or other")
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO credit_reports (owner_user_id, bureau, pulled_on, score,
+                                           score_model, source, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, bureau, pulled_on, score, score_model, source, notes, _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def add_tradeline(db_path: str, report_id: int, creditor: str, **fields) -> int:
+    """One account as a bureau reports it. Claims about him, not his ledger."""
+    # Only columns actually given: several carry NOT NULL defaults, and writing an
+    # explicit None over a default is how "kind" and "account_last4" ended up violating
+    # their own constraints.
+    allowed = {k: fields[k] for k in (
+        "account_last4", "kind", "status", "balance", "credit_limit", "opened_on",
+        "closed_on", "past_due", "derogatory", "derogatory_on", "falls_off_on", "notes")
+        if fields.get(k) is not None}
+    if allowed.get("kind") and allowed["kind"] not in DEBT_KINDS:
+        raise ValueError(f"kind must be one of {DEBT_KINDS}")
+    columns = ", ".join(["report_id", "creditor", *allowed, "created_at"])
+    marks = ", ".join(["?"] * (len(allowed) + 3))
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            f"INSERT INTO credit_tradelines ({columns}) VALUES ({marks})",
+            [report_id, creditor, *allowed.values(), _now()])
+        conn.commit()
+        return cur.lastrowid
+
+
+def add_credit_recommendation(db_path: str, owner_user_id: int, name: str, why: str,
+                              kind: str = "card", **fields) -> int:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO credit_recommendations (owner_user_id, name, kind, issuer, why,
+                   reward, annual_fee, est_approval, priority, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, name, kind, fields.get("issuer"), why, fields.get("reward"),
+             fields.get("annual_fee"), fields.get("est_approval"), fields.get("priority"),
+             fields.get("notes"), _now(), _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_credit_recommendation(db_path: str, owner_user_id: int, rec_id: int,
+                                 **fields) -> bool:
+    allowed = {k: v for k, v in fields.items() if k in (
+        "name", "kind", "issuer", "why", "reward", "annual_fee", "est_approval",
+        "priority", "status", "task_id", "notes") and v is not None}
+    if not allowed:
+        return False
+    if "status" in allowed:
+        allowed["decided_at"] = _now()
+    sets = ", ".join(f"{k} = ?" for k in allowed)
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            f"UPDATE credit_recommendations SET {sets}, updated_at = ?"
+            f" WHERE id = ? AND owner_user_id = ?",
+            [*allowed.values(), _now(), rec_id, owner_user_id])
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def list_credit_recommendations(db_path: str, owner_user_id: int, status: str | None = None):
+    query = "SELECT * FROM credit_recommendations WHERE owner_user_id = ?"
+    params: list = [owner_user_id]
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    query += " ORDER BY priority IS NULL, priority, created_at"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
+def record_dispute_response(db_path: str, owner_user_id: int, letter_id: int,
+                            summary: str, received_on: str | None = None) -> bool:
+    """A bureau answered. Stops the letter reading as overdue, which is the state that
+    matters -- an unanswered dispute past its window is leverage, and one that was
+    answered and simply not recorded looks identical until somebody checks."""
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """UPDATE dispute_letters SET response_received_at = ?, response_summary = ?
+               WHERE id = ? AND dispute_item_id IN (
+                   SELECT id FROM dispute_items WHERE owner_user_id = ?)""",
+            (received_on or _today(), summary, letter_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def record_letter_delivered(db_path: str, owner_user_id: int, letter_id: int,
+                            delivered_on: str, response_due_at: str | None = None) -> bool:
+    """USPS confirmed delivery, which starts the statutory clock for real."""
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """UPDATE dispute_letters SET delivered_at = ?, response_due_at = ?
+               WHERE id = ? AND dispute_item_id IN (
+                   SELECT id FROM dispute_items WHERE owner_user_id = ?)""",
+            (delivered_on, response_due_at, letter_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def create_debt(
@@ -873,6 +1470,46 @@ def update_debt(db_path: str, owner_user_id: int, debt_id: int, **fields) -> boo
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def merge_debts(db_path: str, owner_user_id: int, keep_id: int, merge_ids: list[int],
+                note: str | None = None) -> dict:
+    """Records that several rows are one obligation: keep one, dismiss the rest.
+
+    The mail sweep files a row per creditor NAME, so a card sold to a collector and
+    serviced by an agency becomes three rows for one debt -- and totalling them invents
+    money the owner does not owe. This is how he says so.
+
+    Dismissed rather than deleted, and the observations stay attached to their own rows.
+    Those rows are the evidence: a statement email really did arrive from Unifin, and
+    throwing that away would make the merge unreviewable and lose the provenance the whole
+    debt tracker is built on. `list_debts` already excludes anything not 'tracked', so a
+    dismissed row leaves every total immediately without leaving the record.
+
+    Refuses to dismiss the row being kept -- that would silently erase the debt entirely,
+    which is the one outcome worse than double-counting it.
+    """
+    targets = [i for i in merge_ids if i != keep_id]
+    if not targets:
+        return {"kept": keep_id, "merged": [], "note": "nothing to merge"}
+
+    with closing(_connect(db_path)) as conn:
+        kept = conn.execute(
+            "SELECT creditor, account_last4 FROM debts WHERE id = ? AND owner_user_id = ?",
+            (keep_id, owner_user_id)).fetchone()
+        if kept is None:
+            raise ValueError(f"no debt {keep_id} to merge into")
+        label = f"{kept['creditor']}" + (f" (...{kept['account_last4']})" if kept["account_last4"] else "")
+        reason = (note or "").strip() or f"Same obligation as {label}"
+        placeholders = ",".join("?" for _ in targets)
+        cur = conn.execute(
+            f"""UPDATE debts SET tracking_state = 'dismissed', updated_at = ?,
+                   notes = COALESCE(notes || ' | ', '') || ?
+                WHERE id IN ({placeholders}) AND owner_user_id = ? AND tracking_state != 'dismissed'""",
+            [_now(), f"Merged into debt #{keep_id}: {reason}", *targets, owner_user_id])
+        conn.commit()
+        merged = cur.rowcount
+    return {"kept": keep_id, "kept_label": label, "merged": merged, "merged_ids": targets}
 
 
 def set_debt_priority(db_path: str, owner_user_id: int, debt_id: int, priority: int | None) -> bool:
@@ -1057,6 +1694,62 @@ def list_debts(
     return [attach_current_values(d, by_debt.get(d["id"], [])) for d in debts]
 
 
+def _age_days(observed_on: str | None, today: date) -> int | None:
+    if not observed_on:
+        return None
+    try:
+        return (today - date.fromisoformat(str(observed_on)[:10])).days
+    except ValueError:
+        return None
+
+
+def group_debts(debts: list[dict], today: date | None = None) -> dict:
+    """Debts collapsed to the obligations they actually represent.
+
+    Grouped on `account_last4`, never on the creditor name. Names change every time a debt
+    is sold or handed to a new agency -- that is exactly how one card became seven rows --
+    while the account number survives the handoff. Rows with no account number cannot be
+    grouped safely and are returned on their own rather than matched on a guess.
+
+    Nothing is merged or deleted here. A group is a claim that these rows LOOK like one
+    debt, with the evidence attached so the owner can confirm or reject it; deciding is
+    his, and acting on it is done through the debt tools he already has.
+    """
+    today = today or date.today()
+    grouped: dict[str, list[dict]] = {}
+    singles: list[dict] = []
+    for debt in debts:
+        last4 = (debt.get("account_last4") or "").strip()
+        if last4:
+            grouped.setdefault(last4, []).append(debt)
+        else:
+            singles.append(debt)
+
+    groups, ungrouped = [], list(singles)
+    for last4, rows in sorted(grouped.items()):
+        if len(rows) == 1:
+            ungrouped.append(rows[0])
+            continue
+        balances = sorted({r["current_balance"] for r in rows if r["current_balance"] is not None})
+        ages = [a for a in (_age_days(r.get("last_observed_on"), today) for r in rows) if a is not None]
+        groups.append({
+            "account_last4": last4,
+            "rows": rows,
+            "names": [r["creditor"] for r in rows],
+            # The balances the rows disagree about. One value means they agree and the
+            # group is almost certainly one debt; several means somebody's figure is out
+            # of date, and which one is current is the question to put to him.
+            "distinct_balances": balances,
+            "newest_age_days": min(ages) if ages else None,
+            # What summing the rows naively would have added, versus counting the group
+            # once. The difference is the size of the mistake being avoided.
+            "naive_sum": round(sum(r["current_balance"] or 0 for r in rows), 2),
+            "likely_balance": balances[-1] if balances else None,
+        })
+
+    return {"groups": groups, "ungrouped": ungrouped}
+
+
 def suggest_payoff_orders(debts: list[dict]) -> dict:
     """Two legitimate payoff strategies over the same debts, as SUGGESTIONS.
 
@@ -1113,9 +1806,30 @@ def debt_summary(db_path: str, owner_user_id: int) -> dict:
         (d for d in active if d["estimated_monthly_interest"] is not None),
         key=lambda d: d["estimated_monthly_interest"], default=None,
     )
+    # The rows are not the obligations. The mail sweep files one per creditor NAME, so a
+    # card sold to a collector and serviced by an agency is three rows for one debt, and
+    # summing them invents money he does not owe -- $6,514 of it when this was written.
+    # Every caller of this function reports a debt total to him, including the chat tool,
+    # so the corrected figure belongs here rather than in one screen that knows better.
+    grouping = group_debts(active)
+    obligations = (
+        [(g["likely_balance"], g["newest_age_days"]) for g in grouping["groups"]]
+        + [(r["current_balance"], _age_days(r.get("last_observed_on"), date.today()))
+           for r in grouping["ungrouped"]])
+    counted_once = round(sum(b for b, _ in obligations if b is not None), 2)
+    recent = round(sum(b for b, age in obligations
+                       if b is not None and age is not None and age <= STALE_AFTER_DAYS), 2)
+
     return {
         "debt_count": len(active),
-        "total_balance": round(sum(balances), 2) if balances else 0.0,
+        # Counting each obligation once, not each row. `naive_row_sum` keeps the old
+        # number visible so the gap is explainable rather than looking like a bug.
+        "total_balance": counted_once,
+        "naive_row_sum": round(sum(balances), 2) if balances else 0.0,
+        "obligation_count": len(obligations),
+        "duplicate_group_count": len(grouping["groups"]),
+        # The only figure safe to plan a payoff against: seen within the last year.
+        "recent_balance_floor": recent,
         "known_balance_count": len(balances),
         "unknown_balance_count": len(active) - len(balances),
         "total_minimum_payment": round(sum(minimums), 2) if minimums else 0.0,

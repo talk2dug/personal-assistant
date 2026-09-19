@@ -9,11 +9,11 @@ import {
   YAxis,
 } from 'recharts'
 
-const CYAN = '#22e8ff'
-const CYAN_BRIGHT = '#a9f8ff'
-const AMBER = '#ffb020'
-const GRID = 'rgba(34, 232, 255, 0.12)'
-const DIM_TEXT = '#5f8a94'
+const CYAN = '#94bce3'
+const CYAN_BRIGHT = '#b5d9fd'
+const AMBER = '#e8a33d'
+const GRID = 'rgba(148, 188, 227, 0.12)'
+const DIM_TEXT = '#7ea3c4'
 
 function formatMoney(amount) {
   return (amount ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
@@ -86,7 +86,7 @@ export default function ProjectionChart({ series, goals }) {
                   position: 'top',
                   fontSize: 10,
                   fill: AMBER,
-                  fontFamily: 'Rajdhani',
+                  fontFamily: 'Barlow',
                   fontWeight: 700,
                 }}
               />

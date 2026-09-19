@@ -261,7 +261,10 @@ def build_personal_context(
     letterstream_tools = letterstream.mcp_client if letterstream is not None else None
     kroger_tools = kroger.mcp_client if kroger is not None else None
     return PersonalContext(mcp_client=PersonalClient(
-        cfg.db_path, owner_user_id, letterstream=letterstream_tools, kroger=kroger_tools))
+        cfg.db_path, owner_user_id, letterstream=letterstream_tools, kroger=kroger_tools,
+        # A routine is lived in local time: without this, logging "fed Ghost" at 8pm would
+        # file against tomorrow's date for most of the evening.
+        tz_name=cfg.timezone))
 
 
 def build_era_context(cfg) -> EraContext | None:
@@ -278,6 +281,24 @@ def build_era_context(cfg) -> EraContext | None:
     ]
     logger.info("Era: discovered %d tools, %d gated as sensitive", len(era_tools), len(cfg.era_sensitive_tools))
     return EraContext(mcp_client=mcp_client, era_tools=era_tools, sensitive_tools=set(cfg.era_sensitive_tools))
+
+
+def build_cellular_context(cfg):
+    """SMS-sending tools, gated on the cellular channel actually being configured.
+
+    Needs no network check at startup, unlike every other builder here: the "client" is
+    this machine's own database. A queued text waits for the Pi to collect it, so the
+    modem being asleep, out of signal or unplugged is not a reason to withhold the
+    capability -- the message simply goes when the radio is back, which is the behaviour
+    you want from the channel that exists for outages.
+    """
+    from .engine import CellularContext, _SmsClient
+    from .sms_tools import SMS_SENSITIVE_TOOLS
+    if not getattr(cfg, "sms_sending_enabled", False):
+        return None
+    logger.info("Cellular SMS sending: enabled (send_text requires confirmation)")
+    return CellularContext(mcp_client=_SmsClient(cfg.db_path),
+                           sensitive_tools=set(SMS_SENSITIVE_TOOLS))
 
 
 def build_recipe_context(cfg) -> RecipeContext | None:
@@ -633,11 +654,20 @@ def build_letterstream_context(cfg) -> LetterStreamContext | None:
     from .letterstream_client import LetterStreamClient, LetterStreamTools
 
     client = LetterStreamClient(cfg.letterstream_api_id, cfg.letterstream_api_key)
-    try:
-        status = client.account_status()
-    except Exception as e:
-        logger.warning("LetterStream account check failed (%s) — disabled this session", e)
-        return None
+
+    # The balance check is a courtesy, not a gate, and it is CACHED.
+    #
+    # Two things went wrong here at once and both are worth stating. The check spent a
+    # metered status request on every single boot, which is invisible at one or two
+    # restarts a day and ruinous during a crash loop -- one burned roughly 190 of them in
+    # six hours and exhausted the daily quota. Then the rate-limit error was treated as a
+    # fatal capability failure, so the ability to MAIL a letter was withdrawn because of a
+    # quota on a different endpoint entirely. Nothing had ever been mailed.
+    #
+    # So: remember the last good answer for a day, and if the check cannot be made,
+    # degrade to "balance unknown" rather than to "no letters at all". Mailing still costs
+    # real money and still needs his explicit confirmation -- that gate is untouched.
+    status, status_note = _letterstream_status(cfg, client)
 
     from_addr = {
         "name_1": cfg.letterstream_from_name, "addr_1": cfg.letterstream_from_address,
@@ -645,6 +675,53 @@ def build_letterstream_context(cfg) -> LetterStreamContext | None:
         "state": cfg.letterstream_from_state, "zip": cfg.letterstream_from_zip,
     }
     tools = LetterStreamTools(client, from_addr)
-    logger.info("LetterStream: connected (balance $%s%s)", status.get("balance", "?"),
-               ", TEST MODE" if status.get("testmode") == "enabled" else "")
+    if status is None:
+        logger.warning("LetterStream: connected, balance unknown (%s)", status_note)
+    else:
+        logger.info("LetterStream: connected (balance $%s%s)%s", status.get("balance", "?"),
+                    ", TEST MODE" if status.get("testmode") == "enabled" else "",
+                    f" [{status_note}]" if status_note else "")
     return LetterStreamContext(mcp_client=tools, sensitive_tools=LETTERSTREAM_SENSITIVE_TOOLS)
+
+
+# How long a balance reading stays good enough to boot on. A day: the number only moves
+# when he mails something, and a restart is not new information about it.
+LETTERSTREAM_STATUS_TTL_HOURS = 24
+LETTERSTREAM_STATUS_KEY = "letterstream_account_status"
+
+
+def _letterstream_status(cfg, client):
+    """The account status, from cache when it is fresh. Returns (status, note).
+
+    A None status means "could not check", never "do not use it" -- see the caller.
+    """
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    cached = db.get_setting(cfg.db_path, LETTERSTREAM_STATUS_KEY, None)
+    if cached:
+        try:
+            payload = json.loads(cached)
+            checked = datetime.fromisoformat(payload["checked_at"])
+            if datetime.now(timezone.utc) - checked < timedelta(hours=LETTERSTREAM_STATUS_TTL_HOURS):
+                return payload["status"], f"cached {checked.isoformat(timespec='minutes')}"
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    try:
+        status = client.account_status()
+    except Exception as e:
+        # A rate limit says "ask again later", so keep whatever was last known rather than
+        # throwing the integration away over it.
+        if cached:
+            try:
+                return json.loads(cached)["status"], f"stale cache, live check failed: {e}"
+            except (ValueError, KeyError, TypeError):
+                pass
+        return None, str(e)
+
+    db.set_setting(cfg.db_path, LETTERSTREAM_STATUS_KEY, json.dumps({
+        "status": status,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }))
+    return status, ""

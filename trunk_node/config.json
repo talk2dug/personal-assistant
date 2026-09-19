@@ -1,0 +1,47 @@
+{
+  "ver": 2,
+  "sourcePartsHint": "Two RTL-SDRs by burned-in serial (1000/1001). The real CRRS Site 003 P25 channels are just five: 856.0875/856.5375/857.0875(control)/857.5375/859.5375, spanning only 3.45 MHz, so two 2.4 MHz dongles cover them all. 1000@856.8 holds the control channel + three voice; 1001@858.7 holds 859.5375. (The original 853.0 center was a mistake -- that band is the LEGACY Motorola system, a different system.)",
+  "sources": [
+    {
+      "serial": "1000",
+      "center": 856800000,
+      "rate": 2400000,
+      "gain": 36,
+      "ppm": 0,
+      "agc": false,
+      "digitalRecorders": 4,
+      "driver": "osmosdr",
+      "device": "rtl=1000"
+    },
+    {
+      "serial": "1001",
+      "center": 858700000,
+      "rate": 2400000,
+      "gain": 36,
+      "ppm": 0,
+      "agc": false,
+      "digitalRecorders": 4,
+      "driver": "osmosdr",
+      "device": "rtl=1001"
+    }
+  ],
+  "systems": [
+    {
+      "shortName": "crrs",
+      "systemNameHint": "Capital Region Radio System (Richmond/Henrico/Chesterfield), P25 Phase II simulcast, Site 003. Control channel 857.0875 confirmed live. POLICE ENCRYPTED (auto-skipped); FIRE/EMS in the clear -- the target. NOTE: locks + decodes system identity fine, but per-call grant (TSBK) decode is not working -- this is a SIMULCAST decode-quality limit on RTL-SDRs, not a config error (verified: correct channels, encryption shown, newer image -- all still zero grants).",
+      "type": "p25",
+      "control_channels": [857087500],
+      "modulation": "qpsk",
+      "talkgroupsFile": "talkgroups.csv",
+      "recordUnknown": true,
+      "hideEncrypted": true,
+      "audioArchive": true,
+      "callLog": true
+    }
+  ],
+  "captureDir": "/app/media",
+  "callTimeout": 3,
+  "logFile": true,
+  "frequencyFormat": "mhz",
+  "controlWarnRate": 10
+}

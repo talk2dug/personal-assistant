@@ -1,11 +1,12 @@
 """Finance dashboard section: balances/bills/income (read from the Era cache tables,
 refreshed periodically by scheduler.py — not live per-request), savings goals CRUD,
 and the calendar/projection views built from finance.py's pure computation."""
+import re
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ...core import db, finance, meal_plan_db
+from ...core import db, finance, finance_brief, meal_plan_db, staff
 from ..auth import require_owner
 
 router = APIRouter(prefix="/api/finance", tags=["finance"])
@@ -17,6 +18,74 @@ def _current_balance(db_path: str) -> float:
     that can actually cover upcoming bills, not a blended net-worth-ish figure. See
     finance.classify_account_type/group_account_balances for how accounts are bucketed."""
     return finance.spendable_balance(db.list_era_accounts(db_path))
+
+
+@router.get("/reconcile")
+async def reconcile(request: Request):
+    """What about his debt picture a human has to settle before any plan is worth making.
+
+    Separate from /summary on purpose: the summary answers "where do I stand", this
+    answers "what is blocking me from knowing". They are different questions and the
+    second one is a queue, not a number.
+    """
+    owner = require_owner(request)
+    return finance_brief.reconciliation(request.app.state.cfg.db_path, owner["id"])
+
+
+@router.get("/planner")
+async def planner(request: Request):
+    """The financial planner's latest report, so the dashboard can lead with the one
+    action it named instead of making him read the whole thing to find it."""
+    require_owner(request)
+    cfg = request.app.state.cfg
+    employee = staff.get_staff(cfg.db_path, "financial_planner")
+    if employee is None:
+        return {"hired": False}
+    runs = staff.recent_work(cfg.db_path, "financial_planner", limit=1)
+    latest = runs[0] if runs else None
+    return {
+        "hired": True,
+        "cadence": employee.get("cadence"),
+        "status": employee.get("status"),
+        "latest": latest,
+        # Pulled out so the UI never has to parse markdown to find the headline.
+        "one_thing": _one_thing(latest.get("output") if latest else None),
+    }
+
+
+def _one_thing(output: str | None) -> str | None:
+    """The planner's own top line, lifted from its report.
+
+    It is asked to lead with "THE ONE THING", so the contract is its own heading rather
+    than a guess at which paragraph matters. Returns None rather than a wrong sentence if
+    the heading is not there -- showing the wrong action as the headline is worse than
+    showing none.
+    """
+    if not output:
+        return None
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        if "ONE THING" in line.upper():
+            body = []
+            for following in lines[index + 1:]:
+                if following.strip().startswith("#"):
+                    break
+                if following.strip():
+                    body.append(following.strip())
+            return _plain(" ".join(body)) or None
+    return None
+
+
+# The planner writes markdown -- it is read as a document in the Office too -- but the
+# dashboard shows this one line as a sentence, and "account **...7560**" with the
+# asterisks showing reads as a rendering bug rather than emphasis. Stripped here rather
+# than in the page so there is exactly one place that knows the report is markdown.
+_EMPHASIS = re.compile(r"\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|__(.+?)__")
+
+
+def _plain(text: str) -> str:
+    text = _EMPHASIS.sub(lambda m: next(g for g in m.groups() if g is not None), text)
+    return " ".join(text.split()).strip()
 
 
 @router.get("/summary")

@@ -33,7 +33,30 @@ DEFAULT_STARTING_CASH = 10_000.0
 
 # A single order may not exceed this share of total equity. The simulation is meant to
 # show whether the strategy reads the market, not whether one all-in bet happened to land.
-MAX_ORDER_PCT_OF_EQUITY = 25.0
+#
+# Lowered from 25% so a full book is several names rather than three or four. At 25% the
+# desk could not have run six positions even if it wanted to, and in practice it ran one:
+# every closed round-trip in the ledger to 2026-09-16 was a single position opened and
+# closed with nothing else on the book beside it.
+MAX_ORDER_PCT_OF_EQUITY = 15.0
+
+# And no single coin may grow past this share, however many orders build it. The per-order
+# cap alone does not bound a position -- three add-ons to one ticker clear it one at a
+# time and still end up as the whole book, which is exactly the concentration the slot
+# count below is meant to break up.
+MAX_POSITION_PCT_OF_EQUITY = 20.0
+
+# How many coins the desk is expected to have working at once. Not enforced as a hard
+# ceiling -- it is what the briefing counts free slots against, and what tells the model
+# that a book of one is an under-filled book rather than a normal state of affairs.
+#
+# The reason it ran one at a time was never a rule saying so. It was that its screen only
+# ever showed it two or three charts (see technicals.desk_briefing), so a single qualifying
+# setup was a good run. With the whole tracked universe screened, several names qualifying
+# at once is the ordinary case, and nothing should imply it must pick just one of them.
+# More concurrent names is also more independent samples per day, which is the only way a
+# desk measured on payoff ratio learns anything at this cadence.
+TARGET_CONCURRENT_POSITIONS = 6
 
 # How long after a stop-loss exit a coin is off-limits for a fresh buy. A real, confirmed
 # incident: the same ticker bought, stopped out, and immediately re-bought minutes later
@@ -41,6 +64,28 @@ MAX_ORDER_PCT_OF_EQUITY = 25.0
 # twice and re-risks capital on a thesis that just failed. A genuinely new catalyst can
 # still win an exception once the window passes; this only stops the immediate whipsaw.
 STOP_LOSS_COOLDOWN_HOURS = 2.0
+
+# --- mechanical exits ---------------------------------------------------------
+#
+# Measured over the 92 closed round-trips of the run archived on 2026-09-13: a 42.4% win
+# rate, average win +$2.39, average loss -$2.85 -- a payoff ratio of 0.84 where 1.36 was
+# needed just to break even. Expectancy -$0.63 a trade, which is a guaranteed bleed no
+# amount of better coin-picking fixes.
+#
+# The cause was not selection. 90 of those 92 exits were the model closing the position
+# itself rather than a stop firing, and it held winners a median of 2.0 hours against
+# 8.7 hours for losers -- it banked gains early and sat on losses hoping they came back.
+# Textbook disposition effect, and it inverts the payoff ratio all on its own.
+#
+# So the exit decision is no longer the model's to make. It commits a stop and a target
+# at entry and the position leaves on one of them, or on the clock. The model still
+# chooses what to buy, when, and how much -- it just cannot snatch a winner back.
+MIN_REWARD_RISK = 2.0
+
+# A thesis that has not worked in two days is not going to be rescued by a third day of
+# the model looking at it. This also bounds how long capital can sit in a position that
+# is drifting sideways, neither stopping out nor reaching its target.
+MAX_HOLD_HOURS = 48.0
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_accounts (
@@ -69,6 +114,10 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     -- level yet; a position can hold either, both, or neither.
     stop_loss REAL,
     take_profit REAL,
+    -- When this position was FIRST opened (adding to it does not reset this), so a
+    -- maximum hold can be enforced. A thesis that has not worked in two days is not
+    -- going to be rescued by the model staring at it for a third.
+    opened_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (account_id, code)
 );
@@ -91,7 +140,9 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     quote_age_sec INTEGER,
     -- Set on a sell only, by comparing the fill price against the position's own stored
     -- stop_loss/take_profit at the moment of the sell (see _classify_exit) -- never
-    -- parsed from prose. 'stop_loss' | 'take_profit' | 'discretionary' | NULL (buys).
+    -- parsed from prose. 'stop_loss' | 'take_profit' | 'timeout' | 'discretionary' |
+    -- NULL (buys). 'discretionary' is now only reachable through an explicit
+    -- allow_exit call, since the model can no longer close a position itself.
     -- What the re-entry cooldown (see execute_orders' buy path) actually keys off.
     exit_kind TEXT,
     at TEXT NOT NULL
@@ -120,31 +171,88 @@ ORDER_INSTRUCTIONS = """
 --- PLACING PAPER TRADES ---
 You do not execute trades. End your response with a fenced ```orders block containing
 JSON, and the system will fill it against the live price cache and report back to you
-next run. An empty list is a legitimate and often correct answer -- you are not required
-to trade on every run, and churning costs {fee_pct}% per side.
+next run. You may place SEVERAL orders in one block, and normally should.
 
 ```orders
 {{"orders": [
-  {{"side": "buy",  "code": "SOL", "usd": 500, "stop_loss": 130.0, "take_profit": 165.0, "reason": "why, in one line"}},
-  {{"side": "sell", "code": "DASH", "qty": "all", "reason": "why, in one line"}}
+  {{"side": "buy", "code": "SOL", "usd": 70, "stop_loss": 130.0, "take_profit": 220.0, "reason": "why, in one line"}},
+  {{"side": "buy", "code": "ARB", "usd": 70, "stop_loss": 0.148, "take_profit": 0.191, "reason": "why, in one line"}}
 ]}}
 ```
 
-Rules that are enforced in code, not by you:
-  * Buys are sized in `usd`; sells in `qty` (a number, or "all" to close the position).
-  * You cannot spend cash you do not have, or sell a coin you do not hold.
-  * No single order may exceed {max_pct}% of total equity.
+YOU RUN A BOOK OF ABOUT {target_positions} NAMES, NOT ONE TRADE AT A TIME. Your briefing
+counts your free slots every run. A free slot is capital doing nothing, and a book of one
+position is an under-filled book, not a cautious one -- the risk that matters here is
+concentration, and {target_positions} independent positions carry less of it than one
+position four times the size. If four setups on your screen each clear the bar, take four.
+Assess every one on its own merits; do not rank them against each other and keep only the
+best, because you are not choosing one trade, you are filling slots.
+
+The bar itself does not move for any of this. It is the same bar, applied more often --
+volume comes from looking at more charts, never from lowering it.
+
+YOU ONLY DECIDE ENTRIES. You cannot close a position -- there is no sell you can place.
+A position leaves on the stop_loss or the take_profit you committed when you opened it,
+or automatically after {max_hold_hours:g}h. This is not a restriction on your judgement,
+it is where your judgement now goes: the only chance you get to decide how a trade ends
+is the moment you open it, so set the two numbers you actually mean. You cannot move them
+afterward either -- not by editing them, and not by adding a token amount to a position to
+"restate" a tighter stop and lock a gain early. That was the disposition effect that lost
+the money the first time, and it is closed now: an add-on that changes a level is refused.
+
+Why, in the desk's own numbers: over 92 closed round-trips you won 42.4% of the time --
+which is fine -- but your average win was +$2.39 against an average loss of -$2.85,
+because you held winners a median of 2.0 hours and losers 8.7 hours. Taking profits early
+and giving losses room is what lost the money, not the coins you picked.
+
+Rules enforced in code, not by you:
+  * Buys are sized in `usd`. No single order may exceed {max_pct}% of total equity --
+    that is roughly one slot, and it is the size to work in.
+  * No single coin may exceed {max_position_pct}% of equity in total, add-ons included.
+    Capital that cannot go into one name should go into another, not into a bigger bet.
+  * You cannot spend cash you do not have.
   * Fills use the cached price, not a price you state. Do not predict your fill.
-  * Every buy must set `stop_loss` and/or `take_profit` as real numeric prices (not a
-    percentage, not "later") -- these are stored on the position and enforced
-    automatically between your runs, not something you have to remember or re-derive.
-    Adding to an existing position keeps its current stop_loss/take_profit unless you
-    explicitly state a new one -- state one only when you actually mean to move it.
-  * A coin stopped out (price hit its stored stop_loss) cannot be re-bought for
-    {cooldown_hours:g}h -- that failed thesis needs to actually cool off, not get
-    re-entered on the next momentum call. The rejection will tell you if this is why.
-Report your reasoning in prose above the block. If you are not trading, say why.
+  * Every buy MUST set both `stop_loss` and `take_profit` as real numeric prices (not a
+    percentage, not "later"). A buy missing either is refused.
+  * `stop_loss` must be below the fill price and `take_profit` above it. A stop above
+    your entry closes the position the instant it opens.
+  * The target must be at least {min_rr:g}x the distance to the stop. At a 42% win rate
+    that ratio is what turns this book positive on arithmetic alone. If a trade is not
+    worth {min_rr:g}:1 to you, it is not worth taking -- that is the trade-off, and
+    passing on that one is a perfectly good answer.
+  * Adding to a position INHERITS the stop and target you committed when you opened it and
+    cannot change them -- exits are set once, at entry. An add-on that restates a different
+    stop or target is refused, so do not top a position up purely to move its stop.
+    (Adding also does NOT restart its {max_hold_hours:g}h clock.)
+  * A coin stopped out cannot be re-bought for {cooldown_hours:g}h -- that failed thesis
+    needs to cool off, not get re-entered on the next momentum call.
+  * Churn costs {fee_pct}% per side. That is an argument against trading the same coin
+    repeatedly, not against holding several different ones.
+
+If nothing on the screen clears the bar, an empty list is the right answer and you should
+say so in one line. But check the whole screened list before concluding that -- it is
+built from the entry patterns you are asked to look for, with the extended charts already
+filtered out, so on most runs something on it is worth a position. Report your reasoning
+in prose above the block.
 """
+
+
+def render_order_instructions() -> str:
+    """ORDER_INSTRUCTIONS with this module's own limits filled in.
+
+    The caller used to assemble these seven keyword arguments itself, and so did two
+    tests, so adding one placeholder to the template broke all three at once with a
+    KeyError far from the edit. The values are this module's to know; nobody else should
+    have to keep a list of them in sync.
+    """
+    return ORDER_INSTRUCTIONS.format(
+        fee_pct=DEFAULT_FEE_PCT,
+        max_pct=MAX_ORDER_PCT_OF_EQUITY,
+        max_position_pct=MAX_POSITION_PCT_OF_EQUITY,
+        target_positions=TARGET_CONCURRENT_POSITIONS,
+        cooldown_hours=STOP_LOSS_COOLDOWN_HOURS,
+        min_rr=MIN_REWARD_RISK,
+        max_hold_hours=MAX_HOLD_HOURS)
 
 
 def init_paper_db(db_path: str) -> None:
@@ -159,6 +267,14 @@ def init_paper_db(db_path: str) -> None:
             conn.execute("ALTER TABLE paper_positions ADD COLUMN stop_loss REAL")
         if "take_profit" not in pos_cols:
             conn.execute("ALTER TABLE paper_positions ADD COLUMN take_profit REAL")
+        if "opened_at" not in pos_cols:
+            conn.execute("ALTER TABLE paper_positions ADD COLUMN opened_at TEXT")
+            # Backfill from updated_at rather than leaving NULL: a position already open
+            # when this shipped would otherwise have no age at all, and the choice is
+            # between "never times out" and "times out immediately". updated_at is the
+            # last time it was touched, which for an untouched position IS its open time.
+            conn.execute("UPDATE paper_positions SET opened_at = updated_at "
+                         "WHERE opened_at IS NULL")
         trade_cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)")}
         if "exit_kind" not in trade_cols:
             conn.execute("ALTER TABLE paper_trades ADD COLUMN exit_kind TEXT")
@@ -198,11 +314,43 @@ def _parse_level(value) -> float | None:
     return level if level > 0 else None
 
 
-def _classify_exit(price: float, pos) -> str:
+def _level_moved(stated: float | None, committed: float | None) -> bool:
+    """Whether an add-on's stated exit level would change the one the position committed
+    when it was first opened. An omitted level (None) inherits and is never a move; a
+    stated level equal to the committed one (within float tolerance) is not a move either;
+    anything else is a move, in either direction. Exits are set at entry and are not
+    revised -- see the buy path in execute_orders for why that door had to be closed."""
+    if stated is None:
+        return False
+    if committed is None:
+        return True
+    return abs(stated - committed) > abs(committed) * 1e-6 + 1e-12
+
+
+def _fmt_level(value) -> str:
+    return "none" if value is None else f"${value:,.6g}"
+
+
+def _held_hours(opened_at) -> float | None:
+    """How long a position has been open, or None if it predates the opened_at column
+    and was never backfilled -- in which case the maximum hold simply does not apply,
+    rather than a missing timestamp being read as "infinitely old" and force-closing it."""
+    opened = _parse_at(opened_at) if opened_at else None
+    if opened is None:
+        return None
+    return (datetime.now(timezone.utc) - opened).total_seconds() / 3600
+
+
+def _classify_exit(price: float, pos, override: str | None = None) -> str:
     """Whether a sell at `price` was a stop-loss, a take-profit, or a discretionary
     close -- from the position's own persisted levels, never from prose. A position with
     both levels set and a price that (due to a gap) cleared both in one tick is called a
     stop-loss: preserving capital is the one of the two that actually mattered."""
+    # A time exit is the one kind that cannot be read off the price: the position left
+    # because the clock ran out, at whatever price that happened to be. The caller that
+    # forced it says so, rather than this guessing from a price that cleared no level.
+    if override:
+        return override
     stop_loss = pos["stop_loss"] if "stop_loss" in pos.keys() else None
     take_profit = pos["take_profit"] if "take_profit" in pos.keys() else None
     if stop_loss is not None and price <= stop_loss:
@@ -308,6 +456,31 @@ def portfolio(db_path: str, name: str = "crypto") -> dict:
     }
 
 
+def book_slots(db_path: str, name: str = "crypto") -> dict:
+    """How full the book is, in names rather than dollars.
+
+    Dollars were always in the briefing; names never were, and "one position, 96% cash"
+    reads as a fully-deployed book if you only look at the P&L line. This is what the
+    desk counts its free slots against.
+    """
+    snap = portfolio(db_path, name)
+    open_names = len(snap["positions"])
+    free = max(0, TARGET_CONCURRENT_POSITIONS - open_names)
+    slot = snap["equity"] * MAX_ORDER_PCT_OF_EQUITY / 100
+    return {
+        "open": open_names,
+        "target": TARGET_CONCURRENT_POSITIONS,
+        "free": free,
+        "cash": snap["cash"],
+        "equity": snap["equity"],
+        "slot_size": round(slot, 2),
+        # What can actually be deployed right now: free slots at a full slot each, bounded
+        # by the cash on hand. A desk told it has four free slots and $6 of cash has been
+        # told something useless.
+        "deployable": round(min(snap["cash"], free * slot), 2),
+    }
+
+
 _FENCE = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.S)
 
 
@@ -353,12 +526,18 @@ def parse_orders(text: str) -> list[dict]:
 
 
 def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
-                   staff_key: str | None = None) -> dict:
+                   staff_key: str | None = None, allow_exit: bool = False) -> dict:
     """Validate and fill proposed orders. Returns fills and rejections.
 
     Every rejection carries a reason, and both are persisted: the next run's briefing
     tells the employee what actually happened, which is the only way a simulated trader
     can learn that its sizing is wrong.
+
+    `allow_exit` is what separates a proposal from an enforcement. Exits are mechanical
+    (see MIN_REWARD_RISK's note) so a model-proposed sell is refused; only check_stops(),
+    which fills a position's own committed levels, passes True. It is a parameter rather
+    than a check on staff_key because a caller's authority should be something it states
+    at the call site, not something inferred from a string it happens to be labelled with.
     """
     acct = ensure_account(db_path, name)
     fills, rejects = [], []
@@ -435,32 +614,135 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 cap = equity * MAX_ORDER_PCT_OF_EQUITY / 100
                 if usd > cap:
                     reject(order, f"${usd:,.2f} exceeds the {MAX_ORDER_PCT_OF_EQUITY}% "
-                                  f"per-order cap of ${cap:,.2f}")
+                                  f"per-order cap of ${cap:,.2f} -- the book is meant to "
+                                  f"run about {TARGET_CONCURRENT_POSITIONS} names at once, "
+                                  f"so size for a slot rather than for the whole account")
+                    continue
+                # Existing exposure counts toward the per-coin cap, so a position cannot
+                # be walked past it one compliant add-on at a time.
+                existing = (pos["qty"] * price) if pos is not None else 0.0
+                pos_cap = equity * MAX_POSITION_PCT_OF_EQUITY / 100
+                if existing + usd > pos_cap + 1e-9:
+                    reject(order, f"{code} would reach ${existing + usd:,.2f}, past the "
+                                  f"{MAX_POSITION_PCT_OF_EQUITY}% per-coin cap of "
+                                  f"${pos_cap:,.2f} (already holding ${existing:,.2f}) -- "
+                                  f"put the capital into a different name instead")
                     continue
                 fee = usd * fee_pct / 100
                 if usd + fee > cash + 1e-9:
                     reject(order, f"insufficient cash: need ${usd + fee:,.2f}, have ${cash:,.2f}")
                     continue
+                # Exit levels are committed when a position is FIRST opened and are
+                # immutable afterward. A new entry states both here; an add-on inherits
+                # them and cannot move them.
+                #
+                # The model cannot place a sell -- exits are mechanical (see
+                # MIN_REWARD_RISK) -- but once that shipped it rediscovered the disposition
+                # effect through the one door left open: a token add-on, some as small as
+                # $0.01 with the reason "restate tighter stop only, no new capital added",
+                # placed purely to ratchet the stop up under a winner and bank the gain
+                # early. It became 53% of every buy the desk placed; 59 of 71 exits turned
+                # into stop-losses, 39 of them closing at a small PROFIT off a raised stop,
+                # and the average win collapsed from the +$4.40 an actual target pays
+                # toward +$1.65. That is the very behaviour the mechanical exits removed,
+                # let straight back in, and it is what flattened the equity curve after
+                # the 2026-09-16 rewrite.
+                #
+                # So an add-on that states a level which would MOVE a committed one is
+                # refused -- the lesson, counted back to the model in its briefing --
+                # rather than silently obeyed. An omitted or unchanged level inherits.
+                if pos is not None:
+                    stated_stop = _parse_level(order.get("stop_loss"))
+                    stated_take = _parse_level(order.get("take_profit"))
+                    if (_level_moved(stated_stop, pos["stop_loss"])
+                            or _level_moved(stated_take, pos["take_profit"])):
+                        have = (f"stop {_fmt_level(pos['stop_loss'])}, "
+                                f"target {_fmt_level(pos['take_profit'])}")
+                        reject(order, f"{code} already carries the exit plan it was opened "
+                                      f"with ({have}), and an add-on cannot move it -- the "
+                                      f"moment you open a position is the only place you "
+                                      f"decide how it ends. Restating a tighter stop to lock "
+                                      f"a gain early is the disposition effect that cost the "
+                                      f"desk its edge; if a thesis has changed, let the "
+                                      f"position leave on the levels you committed.")
+                        continue
+                    stop_loss = pos["stop_loss"]
+                    take_profit = pos["take_profit"]
+                else:
+                    stop_loss = _parse_level(order.get("stop_loss"))
+                    take_profit = _parse_level(order.get("take_profit"))
+
+                # Every position here is LONG, so a coherent plan is
+                # stop_loss < fill price < take_profit. _parse_level only ever checked
+                # "is it a positive number", which let a stop ABOVE the entry through --
+                # and check_stops() then closed the position on its very next tick, at a
+                # price that had not moved, for the cost of two fees.
+                #
+                # This actually happened: TAO was bought at $235.13 with a stop of $250
+                # and was stopped out in the same minute (2026-09-14T07:52), turning a
+                # thesis the analyst had researched into a $0.20 round-trip to nowhere.
+                #
+                # Refused rather than silently repaired: dropping the bad level would
+                # leave the position running with no stop at all, and quietly rewriting
+                # it to something "sensible" would invent a risk decision the model never
+                # made. A rejection is also the only one of the three the model is told
+                # about -- rejections are counted back to it in its own briefing.
+                if stop_loss is not None and stop_loss >= price:
+                    reject(order, f"stop_loss ${stop_loss:,.6g} is at or above the "
+                                  f"${price:,.6g} fill price -- a long's stop must sit "
+                                  f"below it, or the position is closed the moment it opens")
+                    continue
+                if take_profit is not None and take_profit <= price:
+                    reject(order, f"take_profit ${take_profit:,.6g} is at or below the "
+                                  f"${price:,.6g} fill price -- a long's target must sit "
+                                  f"above it, or the position is closed the moment it opens")
+                    continue
+
+                # Exits are mechanical (see MIN_REWARD_RISK), so BOTH levels are now
+                # mandatory rather than "one or the other": a position the model cannot
+                # close itself, with only half a plan, has no defined way out on one side.
+                if stop_loss is None or take_profit is None:
+                    missing = "stop_loss" if stop_loss is None else "take_profit"
+                    reject(order, f"every buy needs both stop_loss and take_profit as "
+                                  f"numeric prices -- {missing} is missing, and exits are "
+                                  f"mechanical now, so an open position with no committed "
+                                  f"level on one side has no way out on that side")
+                    continue
+
+                # The payoff ratio is set here, at entry, or it is not set at all. At the
+                # desk's measured 42.4% win rate a 2:1 target turns a losing book into a
+                # winning one on arithmetic alone -- and unlike a win rate, this is
+                # something the model can actually be held to.
+                risk, reward = price - stop_loss, take_profit - price
+                if reward < risk * MIN_REWARD_RISK:
+                    reject(order, f"target is only {reward / risk:.2f}x the risk "
+                                  f"(${reward:,.6g} up vs ${risk:,.6g} down); "
+                                  f"{MIN_REWARD_RISK:g}x is the minimum -- either move the "
+                                  f"target out or bring the stop closer, but a trade you "
+                                  f"win 42% of the time has to pay more than it risks")
+                    continue
+
+                # Cash moves only once the order is known to be fillable -- every refusal
+                # above this line must leave the balance untouched.
                 qty = usd / price
                 new_qty = (pos["qty"] if pos else 0.0) + qty
                 # Fees fold into cost basis, so realised P&L is the round-trip result.
                 new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd + fee) / new_qty
                 cash -= usd + fee
-                stop_loss = _parse_level(order.get("stop_loss"))
-                take_profit = _parse_level(order.get("take_profit"))
-                if stop_loss is None and pos is not None:
-                    stop_loss = pos["stop_loss"]
-                if take_profit is None and pos is not None:
-                    take_profit = pos["take_profit"]
+
+                # Adding to a position must NOT restart its clock, or a position could be
+                # kept alive past the maximum hold indefinitely by topping it up.
+                opened_at = pos["opened_at"] if pos is not None and pos["opened_at"] else now
                 conn.execute(
                     """INSERT INTO paper_positions (account_id, code, qty, avg_cost,
-                                                     stop_loss, take_profit, updated_at)
-                       VALUES (?,?,?,?,?,?,?)
+                                                     stop_loss, take_profit, opened_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?)
                        ON CONFLICT(account_id, code) DO UPDATE SET
                            qty = excluded.qty, avg_cost = excluded.avg_cost,
                            stop_loss = excluded.stop_loss, take_profit = excluded.take_profit,
+                           opened_at = excluded.opened_at,
                            updated_at = excluded.updated_at""",
-                    (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, now))
+                    (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, opened_at, now))
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
@@ -471,6 +753,16 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                               "usd": round(usd, 2), "fee": round(fee, 2), "reason": reason})
 
             else:
+                if not allow_exit:
+                    reject(order, "exits are mechanical: a position closes on the "
+                                  "stop_loss or take_profit you committed at entry, or "
+                                  "after {:g}h, and you cannot close one early. Measured "
+                                  "over 92 closed trades, choosing your own exits meant "
+                                  "holding winners 2.0h and losers 8.7h, which is what "
+                                  "made the book lose money. Set the levels you actually "
+                                  "mean when you open the position."
+                                  .format(MAX_HOLD_HOURS))
+                    continue
                 if pos is None or pos["qty"] <= 0:
                     reject(order, f"no {code} position to sell")
                     continue
@@ -498,7 +790,7 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 # price -- never parsed from prose -- so the re-entry cooldown above has
                 # something real to key off regardless of whether this sell was the
                 # model's own discretionary call or check_stops' automatic one.
-                exit_kind = _classify_exit(price, pos)
+                exit_kind = _classify_exit(price, pos, order.get("exit_kind"))
                 remaining = pos["qty"] - qty
                 if remaining <= 1e-12:
                     conn.execute("DELETE FROM paper_positions WHERE account_id = ? AND code = ?",
@@ -539,9 +831,11 @@ def check_stops(db_path: str, name: str = "crypto") -> dict:
     """
     acct = ensure_account(db_path, name)
     with closing(_connect(db_path)) as conn:
+        # Every open position, not only those carrying a level: since exits became
+        # mechanical the maximum hold applies to all of them, and a position that somehow
+        # has neither level would otherwise be the one thing that could never be closed.
         positions = conn.execute(
-            """SELECT * FROM paper_positions WHERE account_id = ? AND qty > 0
-                   AND (stop_loss IS NOT NULL OR take_profit IS NOT NULL)""",
+            "SELECT * FROM paper_positions WHERE account_id = ? AND qty > 0",
             (acct["id"],)).fetchall()
         if not positions:
             return {"fills": [], "rejections": [], "portfolio": portfolio(db_path, name)}
@@ -559,10 +853,18 @@ def check_stops(db_path: str, name: str = "crypto") -> dict:
         elif p["take_profit"] is not None and price >= p["take_profit"]:
             orders.append({"side": "sell", "code": p["code"], "qty": "all",
                            "reason": f"Automatic take-profit: price ${price:,.6g} >= target ${p['take_profit']:,.6g}"})
+        else:
+            held_h = _held_hours(p["opened_at"] if "opened_at" in p.keys() else None)
+            if held_h is not None and held_h >= MAX_HOLD_HOURS:
+                orders.append({"side": "sell", "code": p["code"], "qty": "all",
+                               "exit_kind": "timeout",
+                               "reason": f"Automatic time exit: held {held_h:.1f}h, "
+                                         f"past the {MAX_HOLD_HOURS:g}h maximum"})
 
     if not orders:
         return {"fills": [], "rejections": [], "portfolio": portfolio(db_path, name)}
-    return execute_orders(db_path, orders, name=name, staff_key="system:check_stops")
+    return execute_orders(db_path, orders, name=name, staff_key="system:check_stops",
+                          allow_exit=True)
 
 
 def recent_trades(db_path: str, name: str = "crypto", limit: int = 20) -> list[dict]:

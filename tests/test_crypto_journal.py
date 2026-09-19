@@ -282,7 +282,8 @@ class TestRecordRun:
                         VALUES ('SOL','SOL',1,200.0,1,?,?,?)""", (now, now, now))
         conn.commit(); conn.close()
         paper_trading.ensure_account(db, starting_cash=1000.0)
-        paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 100}])
+        paper_trading.execute_orders(db, [{"side": "buy", "code": "SOL", "usd": 100,
+                                           "stop_loss": 180.0, "take_profit": 260.0}])
 
         crypto_journal.record_run(
             obsidian, TRADER, None, role="trader", now=NOW, db_path=db,
@@ -390,14 +391,23 @@ class TestHousekeepingSelection:
         return path
 
     def test_only_employees_granted_the_feed_are_journalled(self, db):
+        """The feed is the switch, and it still is -- but it is now on by default, so the
+        excluded case has to be built by turning it off rather than by not asking for it."""
         from assistant.core import staff
         keeper = staff.hire(db, "Desk Trader",
                             "Fifteen years trading crypto markets across spot and derivatives.")["key"]
         other = staff.hire(db, "Backend Dev",
                            "Ten years of Python backend work, including crypto price feeds.")["key"]
-        staff.set_data_feeds(db, keeper, "market,journal")
+        staff.set_data_feeds(db, other, "")
         keys = [e["key"] for e in crypto_journal.journal_employees(db)]
         assert keeper in keys and other not in keys
+
+    def test_a_new_hire_is_journalled_without_being_asked(self, db):
+        """The change itself: memory is no longer something somebody has to remember to
+        grant. Twelve of eighteen employees had none because nobody did."""
+        from assistant.core import staff
+        key = staff.hire(db, "Plain Analyst", "Reads reports and summarises them.")["key"]
+        assert key in [e["key"] for e in crypto_journal.journal_employees(db)]
 
     def test_housekeeping_with_no_vault_is_a_no_op(self, db):
         assert crypto_journal.run_housekeeping(db, None) == []

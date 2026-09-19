@@ -344,6 +344,25 @@ def compile_system_prompt(title: str, job_description: str, department: str,
 MARKET_SIGNALS = ("crypto", "bitcoin", "btc", "ethereum", "altcoin", "token",
                   "trading", "trader", "market cap", "coin", "defi", "exchange")
 
+# Read-only, like "market" and unlike "paper": it hands over the owner's real balances,
+# bills, budgets and debts to READ. It grants no power to move a dollar -- every change to
+# a budget, a savings goal or a debt still goes through his own confirmed tool calls -- so
+# inferring it from wording carries none of the risk that made "paper" grant-only.
+FINANCE_SIGNALS = ("financial planner", "personal finance", "personal finances", "budget",
+                   "budgeting", "cash flow", "cashflow", "savings", "debt", "net worth",
+                   "spending", "bills", "financial planning")
+
+# Also read-only. It hands over his score history, report, disputes and their deadlines to
+# READ; drafting a letter or applying for a card remains something he confirms himself.
+CREDIT_SIGNALS = ("credit score", "credit report", "credit repair", "dispute letter",
+                  "disputes", "fcra", "credit bureau", "tradeline", "utilisation",
+                  "utilization", "collections", "credit specialist", "credit")
+
+# Read-only as well: what the radios heard (NOAA conditions, EAS warnings, flagged
+# scanner calls) and the RF sensor node's baseline. Nothing in it can transmit.
+RADIO_SIGNALS = ("radio", "scanner", "noaa", "weather radio", "sdr", "rf ", "surroundings",
+                 "neighbourhood watch", "neighborhood watch", "security watch", "severe weather")
+
 # "paper" is deliberately absent from inference. It hands out a ledger that can be
 # traded, and this module's whole premise is that a job description must not be able to
 # grant its own powers -- inferring it from wording would let any employee that merely
@@ -360,9 +379,21 @@ def infer_data_feeds(title: str, job_description: str, standing: str = "") -> st
     and therefore inspectable; `data_feeds` can be set explicitly to override it.
     """
     text = f"{title} {job_description} {standing}".lower()
-    feeds = []  # read-only context only; anything that can act is granted by hand
+    # Everyone journals. An employee runs in isolation with no memory between runs, so
+    # without the vault it re-derives the same conclusions forever and cannot get better at
+    # anything -- which is the entire point of hiring one rather than asking a question.
+    # It was opt-in and 12 of 18 had no memory at all, including two hired the same day.
+    # Read-only in the same sense as the other feeds: the journal is written by the
+    # orchestrator from what actually happened, never by the employee about itself.
+    feeds = ["journal"]
     if any(w in text for w in MARKET_SIGNALS):
         feeds.append("market")
+    if any(w in text for w in FINANCE_SIGNALS):
+        feeds.append("finance")
+    if any(w in text for w in CREDIT_SIGNALS):
+        feeds.append("credit")
+    if any(w in text for w in RADIO_SIGNALS):
+        feeds.append("radio")
     return ",".join(feeds)
 
 
@@ -535,7 +566,12 @@ def set_data_feeds(db_path: str, key: str, feeds: str) -> bool:
     # inferred for consistency with the other two, not because a wrong grant is dangerous:
     # the worst case is prompt budget spent on a policy that doesn't govern that role. See
     # agent_policy.py.
-    valid = {"market", "paper", "journal", "policy"}
+    # "finance" and "credit" are read-only like "market": they hand over his balances,
+    # bills, debts, scores and disputes to READ. Neither can move a dollar or send a
+    # letter -- those stay behind his own confirmed tool calls. They were added to
+    # infer_data_feeds without being added here, so inference could produce a feed this
+    # function then rejected as unknown.
+    valid = {"market", "paper", "journal", "policy", "finance", "credit", "radio"}
     wanted = [f.strip().lower() for f in (feeds or "").split(",") if f.strip()]
     unknown = [f for f in wanted if f not in valid]
     if unknown:
@@ -660,7 +696,22 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
     """
     if not feeds:
         return ""
-    market_parts, paper_parts = [], []
+    market_parts, paper_parts, finance_parts, credit_parts, radio_parts = [], [], [], [], []
+    if "radio" in feeds:
+        try:
+            from . import radio
+            radio_parts.append(radio.briefing(db_path))
+        except Exception as e:
+            radio_parts.append(f"RADIO FEED: unavailable ({type(e).__name__}). Say the radio "
+                               "feed is down rather than describing conditions.")
+    if "credit" in feeds:
+        from . import credit
+        credit_parts.append(credit.briefing(db_path, 1))
+    if "finance" in feeds:
+        from . import finance_brief
+        # owner_user_id 1 is the owner: this feed is his money by definition, and an
+        # employee is hired by him, not by a user account of its own.
+        finance_parts.append(finance_brief.briefing(db_path, 1))
     if "market" in feeds:
         try:
             from . import market_data
@@ -681,6 +732,12 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 for c in top:
                     lines.append(f"  {c['code']} {_fmt_price(c['price_usd'])} "
                                  f"1h {c['change_1h_pct']}% 24h {c['change_24h_pct']}%")
+                # A corrupt row is not a mover. The feed has really printed
+                # +12,019,772% on a coin, and handing that to a trader as "in motion" is
+                # how a bad row becomes a position.
+                from . import technicals
+                movers = [m for m in movers if technicals.sane_move(m["change_hour_pct"])]
+                day = [m for m in day if technicals.sane_move(m["change_day_pct"])]
                 if movers:
                     lines.append("  1h movers (context on what is in motion, not a "
                                  "shortlist to trade):")
@@ -709,6 +766,25 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 lines.append(f"  TRADEABLE ON THIS FEED ({len(tracked)} codes) -- propose "
                              "trades ONLY from this list, anything else will be rejected:")
                 lines.append("    " + ", ".join(tracked))
+
+                # The chart. Positions first -- knowing when to get OUT is the half it
+                # kept getting wrong, and 90 of its first 92 exits were it closing a
+                # winner early on nerve rather than on a signal. Then the screen.
+                try:
+                    from . import paper_trading
+                    held = [p["code"] for p in paper_trading.portfolio(db_path)["positions"]]
+                except Exception:
+                    held = []
+                # Screened across the WHOLE tracked set, not the movers list. The old
+                # focus list was `held + top few 1h movers`, which meant every chart the
+                # desk ever saw was on it BECAUSE the coin had just moved -- and a coin
+                # that just moved is extended, and its rules correctly forbid chasing an
+                # extended chart. Screen and rule cancelled out: six trades in four days,
+                # with the desk itself writing "only three coins have technicals this run"
+                # on run after run while 242 coins sat tradeable and unlooked-at.
+                desk = technicals.desk_briefing(db_path, tracked, held)
+                if desk:
+                    lines.append(desk)
                 market_parts.append("\n".join(lines))
         except Exception as e:
             market_parts.append(f"CRYPTO FEED: unavailable ({type(e).__name__}). "
@@ -727,6 +803,21 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                      f"({snap['total_return_pct']:+.2f}% from ${snap['starting_cash']:,.0f})",
                      f"  realised ${snap['realized_pnl']:,.2f} | "
                      f"unrealised ${snap['unrealized_pnl']:,.2f} | {snap['trades']} trades so far"]
+            # Free slots, in names. The dollar lines above have always been here and
+            # they read as a full book when they are not: "1 position, 96% cash" is an
+            # under-filled book, and nothing in this briefing ever said so.
+            slots = paper_trading.book_slots(db_path)
+            if slots["free"] > 0:
+                lines.append(
+                    f"  BOOK: {slots['open']} of ~{slots['target']} slots filled -- "
+                    f"{slots['free']} FREE, about ${slots['slot_size']:,.2f} a slot, "
+                    f"${slots['deployable']:,.2f} deployable right now. Free slots are "
+                    f"capital doing nothing; fill the ones you have a qualifying setup "
+                    f"for this run, on the same bar as always.")
+            else:
+                lines.append(f"  BOOK: {slots['open']} of ~{slots['target']} slots filled "
+                             f"-- full. Manage what you hold; a slot frees up when a "
+                             f"position hits a level or times out.")
             if snap["positions"]:
                 lines.append("  open positions:")
                 for pos in snap["positions"]:
@@ -769,7 +860,9 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
             paper_parts.append(f"PAPER PORTFOLIO: unavailable ({type(e).__name__}). "
                                "Do not trade this run.")
 
-    parts = paper_parts + market_parts
+    # Finance first for the same reason the paper portfolio leads: an employee should
+    # read its own situation before it reads anything it might react to.
+    parts = credit_parts + finance_parts + paper_parts + market_parts + radio_parts
     if not parts:
         return ""
     return ("\n\n--- LIVE DATA, captured just now. These figures are exact and "
@@ -926,10 +1019,7 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             prompt += crypto_journal.build_prior_context(obsidian, emp["title"], role=role)
         if "paper" in feeds:
             from . import paper_trading
-            prompt += paper_trading.ORDER_INSTRUCTIONS.format(
-                fee_pct=paper_trading.DEFAULT_FEE_PCT,
-                max_pct=paper_trading.MAX_ORDER_PCT_OF_EQUITY,
-                cooldown_hours=paper_trading.STOP_LOSS_COOLDOWN_HOURS)
+            prompt += paper_trading.render_order_instructions()
         if journaling:
             # Last, so the output-order note it ends with (prose, journal, orders, verdict)
             # is the final instruction the model reads about how to lay its reply out.

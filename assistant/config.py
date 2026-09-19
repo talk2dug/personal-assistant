@@ -62,7 +62,33 @@ class Config:
     web_port: int = 8080
     phone_mcp_url: str | None = None
     phone_sensitive_tools: list[str] = None
-    stt_model_size: str = "small.en"
+    # Whisper size for voice input. base.en by default, measured rather than assumed:
+    # on this CPU, over 8 realistic Jarvis commands, base.en ran 3x faster than small.en
+    # (7.5x vs 2.5x realtime) for a 9.3% vs 8.6% word error rate -- inside the noise.
+    # tiny.en was another 1.8x faster again but nearly doubled the error rate to 15.6%,
+    # which is the wrong trade for spoken commands that name devices and tickers.
+    # Speech-to-text was ~46% of the whole voice round trip before this.
+    stt_model_size: str = "base.en"
+    # Who may drive Jarvis by text message. THIS IS A SECURITY BOUNDARY, not a
+    # convenience filter: anyone in the world can text the LTE line, and an unlisted
+    # sender reaching handle_message() would be an unauthenticated stranger with the
+    # owner's mail, money, calendar and front door. Empty means nobody -- it fails
+    # closed, and no default here is deliberate. See core/cellular.is_allowed.
+    sms_allowed_numbers: list[str] = None
+    # A weaker tier: these numbers may talk to Jarvis but run as an isolated guest user
+    # with the owner's integrations genuinely absent (core/cellular.guest_contexts).
+    # Also fails closed.
+    sms_guest_numbers: list[str] = None
+    # Whether Jarvis may send texts on the owner's behalf. Off by default: every send
+    # still needs his explicit confirmation, but the capability itself should be a
+    # deliberate choice rather than something that appears because a modem was plugged in.
+    sms_sending_enabled: bool = False
+    # WAN failover: when the house connection drops, send Jarvis's outbound traffic
+    # through the proxy on the Pi that holds the LTE modem. Off by default -- it spends
+    # a metered cellular plan, so it has to be switched on deliberately.
+    wan_failover_enabled: bool = False
+    wan_failover_proxy: str | None = None
+    wan_failover_interval_seconds: int = 60
     mail_sensitive_tools: list[str] = None
     # How often the autonomous junk-flagging pass runs (see scheduler.py's
     # mail_junk_scan job) and the score (junk_filter.score_message) a message needs to
@@ -130,6 +156,20 @@ class Config:
     # very first request after that pays a real ~10s reload cost instead of the
     # sub-second warm response the fast path exists to provide.
     local_llm_keepalive_interval_seconds: int = 600
+    # Radio awareness (assistant/radio_main.py, the JarvisRadio service). The mounts are
+    # fm_node's Icecast streams on jarvishackrf2; the hosts are ssh_hosts names, polled
+    # with fixed commands only. radio_home_area is free text naming the streets/area the
+    # scanner triage should treat as "near home" (never a full address in a prompt).
+    radio_weather_url: str = "http://192.168.0.161:8000/weather.mp3"
+    radio_scanner_url: str = "http://192.168.0.161:8000/scanner.mp3"
+    radio_eas_host: str | None = "jarvishackrf2"
+    radio_eas_events_path: str = "/home/pi/fm_node/eas_events.jsonl"
+    radio_rf_host: str | None = "jarvishackrf"
+    radio_rf_baseline_cmd: str = "python3 /home/pi/rf-sensor/rf_baseline.py --json --days 30"
+    radio_home_area: str | None = None
+    radio_conditions_interval_seconds: int = 600
+    radio_eas_poll_seconds: int = 60
+    radio_rf_poll_seconds: int = 900
     obsidian_vault_path: str | None = None
     ha_base_url: str | None = None
     ha_token: str | None = None
@@ -302,6 +342,56 @@ class Config:
     # business_agents_enabled — that switch is about the print business's unattended agents,
     # and nesting this under it would make personal research silently never run by default.
     personal_research_interval_minutes: int = 30
+    # ---------------------------------------------------------------------------------
+    # VoIP / SIP calling (the JarvisVoip service -- assistant/voip_main.py).
+    #
+    # This is the workaround for the carrier BLOCKING voice on the jarvisaudio2 LTE line:
+    # SMS works there (see the cellular.* fields above), voice does not, so a real SIP
+    # account gives Jarvis an actual phone number it can place and receive calls on. SIP
+    # is IP-based and has nothing to do with the LTE modem -- it does NOT have to run on
+    # jarvisaudio2; voip_host picks where the SIP user-agent lives (None = this Windows
+    # box, where the STT/TTS/engine already run, so call audio bridges to whisper/piper
+    # in-process rather than making a second LAN hop).
+    #
+    # EVERYTHING here defaults off/None: with voip_enabled False (or creds missing) the
+    # service is a benign no-op that never registers and never dials, exactly like the
+    # business block staying absent. Nothing registers against the SIP account until the
+    # owner sets voip_enabled True AND supplies sip_user/sip_password.
+    #
+    # Provider on file is VoIP.ms. Registration is to the POP (sip_registrar,
+    # e.g. washington2.voip.ms); the generic sip.voip.ms is the SIP-URI domain. The auth
+    # user is a VoIP.ms SUB-ACCOUNT (format like 123456_jarvis), never the DID. The DID
+    # (sip_did) is the assigned number used as caller-ID and the number people call.
+    voip_enabled: bool = False
+    # ssh_hosts name of the machine that runs the SIP user-agent, or None for this box.
+    voip_host: str | None = None
+    # The SIP registrar / outbound POP you authenticate to (VoIP.ms: washington2.voip.ms).
+    sip_registrar: str | None = None
+    # The SIP-URI domain / realm (VoIP.ms: sip.voip.ms). Falls back to sip_registrar.
+    sip_domain: str | None = None
+    # Auth / SIP username -- a VoIP.ms sub-account, e.g. "123456_jarvis". NOT the DID.
+    sip_user: str | None = None
+    sip_password: str | None = None
+    # Optional outbound proxy. VoIP.ms normally needs none (proxy == registrar); leave
+    # None unless the provider specifically hands one out.
+    sip_proxy: str | None = None
+    sip_port: int = 5060                 # 5060 for UDP/TCP; 5061 for TLS.
+    sip_transport: str = "udp"           # "udp" | "tcp" | "tls" (VoIP.ms supports all).
+    # The assigned DID / phone number, digits only, used as caller-ID and the inbound
+    # number. On file: 5718322742 (571-832-2742), SIP URI 5718322742@sip.voip.ms.
+    sip_did: str | None = None
+    # Offered codecs, best-first. PCMU (ulaw) and G.722 are the safe VoIP.ms defaults and
+    # decode straight to the 16 kHz/8 kHz PCM whisper/piper already speak.
+    sip_codecs: list[str] = field(default_factory=lambda: ["PCMU", "G722", "PCMA"])
+    # Whether Jarvis may place OUTBOUND calls that reach a human. Off by default and, like
+    # sms_sending_enabled, a deliberate switch: a call still needs the owner's explicit
+    # confirmation per placement, but the capability itself should not appear just because
+    # a SIP account was configured.
+    voip_calling_enabled: bool = False
+    # Who may drive Jarvis by CALLING IN. Security boundary, fails closed exactly like
+    # sms_allowed_numbers: anyone can dial the DID, and an unlisted caller reaching the
+    # conversational path would be an unauthenticated stranger. Empty means nobody.
+    voip_allowed_callers: list[str] = None
 
 
 def load_config(path: str = "config.json") -> Config:
@@ -335,7 +425,13 @@ def load_config(path: str = "config.json") -> Config:
         # command) require explicit confirmation; everything else (camera, mic, location, contacts,
         # SMS read, call log, device controls) executes immediately.
         phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
-        stt_model_size=data.get("stt_model_size", "small.en"),
+        stt_model_size=data.get("stt_model_size", "base.en"),
+        sms_allowed_numbers=data.get("sms_allowed_numbers") or [],
+        sms_guest_numbers=data.get("sms_guest_numbers") or [],
+        sms_sending_enabled=data.get("sms_sending_enabled", False),
+        wan_failover_enabled=data.get("wan_failover_enabled", False),
+        wan_failover_proxy=data.get("wan_failover_proxy"),
+        wan_failover_interval_seconds=data.get("wan_failover_interval_seconds", 60),
         # Matches the phone/Era gating policy: only tools with a real, hard-to-fully-undo
         # consequence require confirmation. send_email leaves the account for good;
         # archive_email/delete_email each remove a message from wherever the user currently
@@ -365,6 +461,17 @@ def load_config(path: str = "config.json") -> Config:
         local_llm_model=data.get("local_llm_model", "gemma4:12b-it-q4_K_M"),
         local_llm_timeout_seconds=data.get("local_llm_timeout_seconds", 20.0),
         local_llm_keepalive_interval_seconds=data.get("local_llm_keepalive_interval_seconds", 600),
+        radio_weather_url=data.get("radio_weather_url", "http://192.168.0.161:8000/weather.mp3"),
+        radio_scanner_url=data.get("radio_scanner_url", "http://192.168.0.161:8000/scanner.mp3"),
+        radio_eas_host=data.get("radio_eas_host", "jarvishackrf2"),
+        radio_eas_events_path=data.get("radio_eas_events_path", "/home/pi/fm_node/eas_events.jsonl"),
+        radio_rf_host=data.get("radio_rf_host", "jarvishackrf"),
+        radio_rf_baseline_cmd=data.get("radio_rf_baseline_cmd",
+                                       "python3 /home/pi/rf-sensor/rf_baseline.py --json --days 30"),
+        radio_home_area=data.get("radio_home_area"),
+        radio_conditions_interval_seconds=data.get("radio_conditions_interval_seconds", 600),
+        radio_eas_poll_seconds=data.get("radio_eas_poll_seconds", 60),
+        radio_rf_poll_seconds=data.get("radio_rf_poll_seconds", 900),
         obsidian_vault_path=data.get("obsidian_vault_path"),
         ha_base_url=data.get("ha_base_url"),
         ha_token=data.get("ha_token"),
@@ -446,4 +553,19 @@ def load_config(path: str = "config.json") -> Config:
         pipeline_interval_hours=data.get("pipeline_interval_hours", 12),
         business_digest_hour=data.get("business_digest_hour", 8),
         personal_research_interval_minutes=data.get("personal_research_interval_minutes", 30),
+        # VoIP / SIP calling (JarvisVoip). All safe defaults: off, no registration, no
+        # dialing until voip_enabled True and sip_user/sip_password are supplied.
+        voip_enabled=data.get("voip_enabled", False),
+        voip_host=data.get("voip_host"),
+        sip_registrar=data.get("sip_registrar"),
+        sip_domain=data.get("sip_domain"),
+        sip_user=data.get("sip_user"),
+        sip_password=data.get("sip_password"),
+        sip_proxy=data.get("sip_proxy"),
+        sip_port=data.get("sip_port", 5060),
+        sip_transport=data.get("sip_transport", "udp"),
+        sip_did=data.get("sip_did"),
+        sip_codecs=data.get("sip_codecs") or ["PCMU", "G722", "PCMA"],
+        voip_calling_enabled=data.get("voip_calling_enabled", False),
+        voip_allowed_callers=data.get("voip_allowed_callers") or [],
     )

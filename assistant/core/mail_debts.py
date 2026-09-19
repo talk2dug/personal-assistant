@@ -82,6 +82,7 @@ from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 
 from . import business_db, mail_db, personal_db
+from .claude_cli import LLMRefusalError
 
 logger = logging.getLogger(__name__)
 
@@ -611,10 +612,13 @@ def run_debt_mail_sweep_once(
         try:
             found = mail_client.search_uids(
                 SEARCH_TERMS, folder=folder, limit=shortlist_limit, exclude=already)
-        except Exception:
+        except Exception as exc:
             # One unreadable folder must not end the sweep -- the rest of his mail is
-            # still worth searching, and this folder is retried on the next run.
-            logger.exception("mail debts: could not search folder %s", folder)
+            # still worth searching, and this folder is retried on the next run. A folder
+            # that simply can't be selected (a \Noselect container or a client-only
+            # mailbox) is an expected condition, so log a one-line warning rather than a
+            # full stack trace on every run.
+            logger.warning("mail debts: could not search folder %s: %s", folder, exc)
             continue
         stats["folders_searched"] += 1
 
@@ -640,6 +644,17 @@ def run_debt_mail_sweep_once(
             stats["scanned"] += 1
             try:
                 result = classify_debt(llm, message, today=today)
+            except LLMRefusalError:
+                # The model's safety classifier refused this specific message and will
+                # refuse it every run (deterministic). Mark it judged so the 30-min sweep
+                # stops re-sending it forever (it was firing ~48x/day on one message); it
+                # simply won't be auto-classified. If it is a real debt it stays in the
+                # mailbox for manual review -- we skip the classification, not the email.
+                logger.warning(
+                    "mail debts: LLM refused to classify %s uid %s; marking scanned to stop the retry loop",
+                    folder, uid)
+                mail_db.mark_debt_scanned(db_path, owner_user_id, folder, uid, is_debt=False)
+                continue
             except Exception:
                 logger.exception("mail debts: classification failed for %s uid %s", folder, uid)
                 continue

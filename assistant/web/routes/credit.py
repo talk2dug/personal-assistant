@@ -50,6 +50,62 @@ async def _call(letterstream, name: str, arguments: dict) -> dict:
 
 # --- credit scores -------------------------------------------------------------
 
+@router.get("/picture")
+async def picture(request: Request):
+    """Everything about his credit in one call: where he stands, what is in flight, what
+    is owed to him by when, and what is worth doing next.
+
+    One GET rather than five, for the same reason the day planner is: the answers are
+    related — a dispute deadline changes what is worth doing this week, and utilisation
+    changes which card is worth applying for — and fetching them apart lets the page show
+    a picture that disagrees with itself mid-load.
+    """
+    owner = require_owner(request)
+    from ...core import credit as credit_core
+    return credit_core.picture(request.app.state.cfg.db_path, owner["id"])
+
+
+@router.put("/recommendations/{rec_id}")
+async def update_recommendation(rec_id: int, request: Request):
+    owner = require_owner(request)
+    body = await request.json()
+    ok = personal_db.update_credit_recommendation(
+        request.app.state.cfg.db_path, owner["id"], rec_id,
+        **{k: v for k, v in body.items() if k != "rec_id"})
+    if not ok:
+        raise HTTPException(404, "no such recommendation, or nothing to change")
+    return {"ok": True}
+
+
+@router.post("/recommendations/{rec_id}/task")
+async def recommendation_to_task(rec_id: int, request: Request):
+    """Turn a suggested card or loan into something on his list.
+
+    His click, never automatic: an application is a hard inquiry and a new account, which
+    move the score in both directions, so the decision stays his. The task carries the
+    reasoning across so he is not left with a bare card name in a week's time.
+    """
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    rec = next((r for r in personal_db.list_credit_recommendations(cfg.db_path, owner["id"])
+                if r["id"] == rec_id), None)
+    if rec is None:
+        raise HTTPException(404, "no such recommendation")
+    if rec.get("task_id"):
+        return {"ok": True, "task_id": rec["task_id"], "already": True}
+
+    task_id = personal_db.create_task(
+        cfg.db_path, owner["id"], f"Apply for {rec['name']}", track="personal")
+    personal_db.add_task_detail(cfg.db_path, task_id, "note", rec["why"], label="Why")
+    if rec.get("reward"):
+        personal_db.add_task_detail(cfg.db_path, task_id, "note", rec["reward"], label="Rewards")
+    if rec.get("issuer"):
+        personal_db.add_task_detail(cfg.db_path, task_id, "person", rec["issuer"], label="Issuer")
+    personal_db.update_credit_recommendation(cfg.db_path, owner["id"], rec_id,
+                                             status="planned", task_id=task_id)
+    return {"ok": True, "task_id": task_id}
+
+
 @router.get("/scores")
 async def list_scores(request: Request, bureau: str | None = None):
     user = require_owner(request)

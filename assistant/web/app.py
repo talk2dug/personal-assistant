@@ -43,6 +43,8 @@ from .routes.active_work import router as active_work_router
 from .routes.agents import router as agents_router
 from .routes.chat import router as chat_router
 from .routes.cameras import router as cameras_router
+from .routes.cellular import router as cellular_router
+from .routes.command_center import router as command_center_router
 from .routes.credit import router as credit_router
 from .routes.debts import router as debts_router
 from .routes.crypto import router as crypto_router
@@ -57,7 +59,10 @@ from .routes.kitchen import router as kitchen_router
 from .routes.media import router as media_router
 from .routes.openai_compat import router as openai_compat_router
 from .routes.personal_tasks import router as personal_tasks_router
+from .routes.day import router as day_router
+from .routes.pipelines import router as pipelines_router
 from .routes.review import router as review_router
+from .routes.rf import router as rf_router
 from .routes.schedule import router as schedule_router
 from .routes.tools import router as tools_router
 from .routes.vision import router as vision_router
@@ -68,7 +73,7 @@ def create_app(
     cfg, llm, era, calendar, phone=None, stt=None, mail=None, obsidian=None, home_assistant=None,
     business=None, personal=None, bridge=None, speaker=None, static_dir: str | None = None,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
-    recipe=None, local_llm=None,
+    recipe=None, local_llm=None, cellular_ctx=None,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis")
     app.add_middleware(SessionMiddleware, secret_key=cfg.web_session_secret or "dev-insecure-secret-change-me")
@@ -94,6 +99,7 @@ def create_app(
     app.state.letterstream = letterstream
     app.state.git_ops = git_ops
     app.state.recipe = recipe
+    app.state.cellular_ctx = cellular_ctx
 
     app.include_router(auth_router)
     app.include_router(chat_router)
@@ -119,6 +125,11 @@ def create_app(
     app.include_router(credit_router)
     app.include_router(debts_router)
     app.include_router(vision_router)
+    app.include_router(command_center_router)
+    app.include_router(cellular_router)
+    app.include_router(day_router)
+    app.include_router(pipelines_router)
+    app.include_router(rf_router)
 
     if static_dir and Path(static_dir).is_dir():
         app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")

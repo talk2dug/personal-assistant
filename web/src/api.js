@@ -159,8 +159,27 @@ export const api = {
     return request(`/api/email/importance?${params.toString()}`)
   },
 
+  // One aggregated read for the Command Center board -- see routes/command_center.py
+  // for why the cheap panels travel together instead of one endpoint each.
+  commandCenter: () => request('/api/command-center/snapshot'),
+
+  // The business team's work grouped by the product it belongs to, rather than as a
+  // flat queue of unrelated approvals -- see routes/pipelines.py.
+  pipelines: (market) => request(`/api/pipelines${market ? `?market=${market}` : ''}`),
+  pipeline: (id) => request(`/api/pipelines/${id}`),
+  setPipelineMarket: (id, market) =>
+    request(`/api/pipelines/${id}/market`, { method: 'PUT', body: JSON.stringify({ market }) }),
+
   activeWork: () => request('/api/active-work'),
   sshHostsStatus: () => request('/api/infra/ssh-hosts'),
+
+  // RF / Around the house -- the jarvishackrf sensor node's street picture. The dashboard
+  // is a cheap cached read; refresh re-polls the Pi over SSH; labelDevice names a
+  // transmitter as Jack's own (rf_sensorctl label, run on the node). See routes/rf.py.
+  rfDashboard: () => request('/api/rf/dashboard'),
+  rfRefresh: () => request('/api/rf/refresh', { method: 'POST' }),
+  rfLabelDevice: (device) =>
+    request('/api/rf/devices/label', { method: 'POST', body: JSON.stringify(device) }),
 
   kitchenRecipes: (query) => request(`/api/kitchen/recipes${query ? `?query=${encodeURIComponent(query)}` : ''}`),
   createRecipe: (recipe) => request('/api/kitchen/recipes', { method: 'POST', body: JSON.stringify(recipe) }),
@@ -273,6 +292,45 @@ export const api = {
   setFinanceSafetyBuffer: (safetyBuffer) =>
     request('/api/finance/safety-buffer', { method: 'PUT', body: JSON.stringify({ safety_buffer: safetyBuffer }) }),
   financeInsights: () => request('/api/finance/insights'),
+
+  // What has to be settled by a human before any plan is worth making, and the planner's
+  // own headline action. Separate calls because they answer different questions: one is a
+  // queue of work, the other is the single thing to do first.
+  // The day planner. One GET for the whole plan: the three answers are related, and
+  // fetching them separately lets the page render a plan that contradicts itself.
+  dayPlan: (onDate, track) => request('/api/day'
+    + (onDate || track ? `?${new URLSearchParams({
+        ...(onDate ? { on_date: onDate } : {}),
+        ...(track ? { track } : {}),
+      })}` : '')),
+  pickForDay: (taskId, onDate) =>
+    request(`/api/day/pick/${taskId}`, { method: 'POST', body: JSON.stringify({ on_date: onDate }) }),
+  unpickForDay: (taskId, onDate) =>
+    request(`/api/day/pick/${taskId}${onDate ? `?on_date=${onDate}` : ''}`, { method: 'DELETE' }),
+  logRhythm: (rhythmId, state, onDate) =>
+    request(`/api/day/rhythm/${rhythmId}/log`, {
+      method: 'POST', body: JSON.stringify({ state, on_date: onDate }),
+    }),
+  clearRhythmLog: (rhythmId, onDate) =>
+    request(`/api/day/rhythm/${rhythmId}/log${onDate ? `?on_date=${onDate}` : ''}`,
+            { method: 'DELETE' }),
+
+  // The whole credit picture in one call: the answers are related -- a dispute deadline
+  // changes what is worth doing this week -- and fetching them apart lets the page show
+  // something that disagrees with itself mid-load.
+  creditPicture: () => request('/api/credit/picture'),
+  updateRecommendation: (id, patch) =>
+    request(`/api/credit/recommendations/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  recommendationToTask: (id) =>
+    request(`/api/credit/recommendations/${id}/task`, { method: 'POST' }),
+
+  financeReconcile: () => request('/api/finance/reconcile'),
+  financePlanner: () => request('/api/finance/planner'),
+  mergeDebts: (keepId, mergeIds, note) =>
+    request('/api/debts/merge', {
+      method: 'POST',
+      body: JSON.stringify({ keep_id: keepId, merge_ids: mergeIds, note }),
+    }),
   financeNetWorth: () => request('/api/finance/net-worth'),
 
   // Debts. listDebts defaults to tracked-only: a debt the mail sweep found in his history

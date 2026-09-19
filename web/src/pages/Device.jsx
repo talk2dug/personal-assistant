@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from 'react'
  * kiosk browser is launched with.
  */
 
-const ACCENT = '#22e8ff'
+const ACCENT = '#94bce3'
 const BAR_COUNT = 72
 const POLL_MS = 700
 // A kiosk has no "close" button worth reading from across a room -- it returns to the

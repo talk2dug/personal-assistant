@@ -23,7 +23,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from . import agent_notes, business_db, review_examples
+from . import agent_notes, art_render, business_db, review_examples
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +417,22 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
                     ref_table="product_concepts", ref_id=concept_id,
                 )
 
+        # Retire the leads this run worked from, or the feed never advances. Nothing ever
+        # wrote this status: list_trend_leads returns the top `limit` by score and the
+        # creator handed back the same three every run forever, with 99 others below them
+        # never once read. It went unnoticed only because the "already proposed" list in
+        # the prompt kept the repeats from landing -- so the real cost was invisible: a
+        # web-searching model call every tick, re-reading ideas it had already mined.
+        #
+        # A lead that produced nothing is 'passed', not left 'new': it was considered, and
+        # leaving it would park it at the top of the list to be reconsidered forever.
+        made = {c["trend_lead_id"] for c in
+                business_db.list_product_concepts(db_path, owner_user_id, limit=limit * 4)
+                if c.get("trend_lead_id")}
+        for lead in leads:
+            business_db.set_trend_lead_status(
+                db_path, owner_user_id, lead["id"], "made" if lead["id"] in made else "passed")
+
         summary = f"Product creator: {new_count} new concepts proposed."
         business_db.finish_agent_run(db_path, run_id, "ok", summary, json.dumps(concepts)[:4000])
         return {"status": "ok", "new": new_count, "summary": summary}
@@ -426,8 +442,34 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
         return {"status": "error", "new": 0}
 
 
-def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int = 3) -> dict:
-    """Gives approved concepts artwork direction and a ready-to-use image prompt."""
+def _directions_from(brief: dict) -> list[dict]:
+    """The visual directions in a brief, however the model chose to express them.
+
+    It is asked for a "directions" list, but it sometimes answers in the older single-
+    prompt shape. Accepting both costs three lines and turns "the model phrased it
+    differently today" from a lost concept into a card with one option instead of three.
+    """
+    directions = brief.get("directions")
+    if isinstance(directions, list) and directions:
+        return [d for d in directions if isinstance(d, dict) and d.get("image_prompt")]
+    if brief.get("image_prompt"):
+        return [{"label": "Direction 1", "rationale": brief.get("style_direction"),
+                 "image_prompt": brief["image_prompt"]}]
+    return []
+
+
+def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int = 3,
+                     bridge=None) -> dict:
+    """Art-directs approved concepts, renders the options, and files them to be picked.
+
+    The render happens before the review card is written, not after it is approved. The
+    owner asked for exactly that -- "I need to see the art work and not just text" -- and
+    it is also the more honest gate: approving a prompt is approving a guess about what
+    the prompt will produce, and half the time the guess is wrong.
+
+    bridge is a gpu_bridge.GpuBridge. Without one the agent still works and still files
+    briefs; they are just text, the way they were before.
+    """
     run_id = business_db.start_agent_run(db_path, "art_director")
     try:
         concepts = business_db.concepts_without(db_path, owner_user_id, "art_briefs", limit=limit)
@@ -436,8 +478,20 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                 db_path, run_id, "skipped", "No approved concepts waiting on artwork.")
             return {"status": "skipped", "new": 0}
 
+        # Wait for the card rather than working around it. Every render would block for
+        # its full timeout and the run would end up filing exactly the text-only cards
+        # this was rewritten to stop filing -- and it would cost a web-searching model
+        # call per concept to do it. Doing nothing leaves the concepts unbriefed, so the
+        # next tick picks them up as if this run had never happened.
+        reserved = art_render.reserved_reason(bridge)
+        if reserved:
+            note = f"simrig is reserved ({reserved}) — leaving the artwork until it is free."
+            business_db.finish_agent_run(db_path, run_id, "skipped", note)
+            return {"status": "skipped", "new": 0, "summary": note}
+
         verdicts = review_examples.build_verdict_briefing(db_path, owner_user_id, "art_director")
         new_count = 0
+        rendered_count = 0
         for concept in concepts:
             prompt = (
                 f"{_profile_text(profile)}{verdicts}\n\n"
@@ -448,41 +502,109 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                 f"Medium requirements: {_medium_guidance(concept.get('product_type'))}\n\n"
                 f"Search the web if you need to check what the current visual treatment of "
                 f"this subject looks like, then art-direct it.\n\n"
+                f"Propose {art_render.DEFAULT_DIRECTIONS} GENUINELY DIFFERENT visual "
+                f"directions — different composition, palette and treatment, not the same "
+                f"idea reworded. Each one will be rendered and the owner picks between the "
+                f"actual images, so a direction that only differs in wording wastes his "
+                f"time and a render.\n\n"
                 f"Return ONLY a JSON object, no prose, with keys: \"style_direction\" "
-                f"(2-3 sentences on the visual approach and why it suits this audience and "
-                f'medium), "image_prompt" (a single complete prompt ready to paste into an '
-                f'image generator, incorporating the medium requirements), "aspect" '
-                f'(e.g. "1:1", "4:5", "3:2"), "notes" (anything the maker needs to know — '
-                f"colour count, bleed, minimum stroke width, cut-line considerations)."
+                f"(2-3 sentences on the overall visual approach and why it suits this "
+                f'audience and medium), "aspect" (e.g. "1:1", "4:5", "3:2"), "notes" '
+                f"(anything the maker needs to know — colour count, bleed, minimum stroke "
+                f'width, cut-line considerations), and "directions": a list of '
+                f'{art_render.DEFAULT_DIRECTIONS} objects each with "label" (2-4 words '
+                f'naming the look), "rationale" (one line on what makes this one different '
+                f'and who it lands with), and "image_prompt" (a single complete prompt '
+                f"ready to paste into an image generator, incorporating the medium "
+                f"requirements)."
             )
             raw = llm.research(prompt, system_prompt=ART_DIRECTOR_SYSTEM, timeout=600)
             brief = _extract_json(raw)
-            if not isinstance(brief, dict) or not brief.get("image_prompt"):
+            if not isinstance(brief, dict):
                 continue
+            directions = _directions_from(brief)
+            if not directions:
+                continue
+
+            aspect = brief.get("aspect")
+            options, failures = art_render.render_directions(
+                bridge, directions, aspect=aspect, negative=NEGATIVE_PROMPT)
+            if not options:
+                continue
+            rendered_count += sum(1 for o in options if o.get("media_path"))
+
+            # The brief carries the first direction's prompt as its working one. Which
+            # direction actually wins is his call, and approving an option writes that
+            # prompt back here (see business_tools.apply_review_decision).
             brief_id = business_db.create_art_brief(
                 db_path, owner_user_id, title=concept["name"], concept_id=concept["id"],
-                style_direction=brief.get("style_direction"), image_prompt=brief.get("image_prompt"),
-                negative_prompt=NEGATIVE_PROMPT, aspect=brief.get("aspect"), notes=brief.get("notes"),
+                style_direction=brief.get("style_direction"), image_prompt=options[0]["body"],
+                negative_prompt=NEGATIVE_PROMPT, aspect=aspect, notes=brief.get("notes"),
             )
             business_db.create_review_item(
                 db_path, owner_user_id, f"Art direction: {concept['name']}", kind="art",
                 summary=brief.get("style_direction"),
                 detail="\n\n".join(p for p in (
-                    f"Image prompt:\n{brief.get('image_prompt')}",
-                    f"Aspect: {brief.get('aspect')}" if brief.get("aspect") else None,
+                    f"Aspect: {aspect}" if aspect else None,
                     f"Notes: {brief.get('notes')}" if brief.get("notes") else None,
+                    # Named plainly rather than hidden: a card showing two pictures where
+                    # it says three directions needs to say why, or it reads as a bug.
+                    ("Could not render:\n" + "\n".join(failures)) if failures else None,
                 ) if p),
                 source_agent="art_director", ref_table="art_briefs", ref_id=brief_id,
+                options=options,
             )
             new_count += 1
 
-        summary = f"Art director: {new_count} briefs written."
+        summary = (f"Art director: {new_count} briefs written, "
+                   f"{rendered_count} images rendered to pick from.")
         business_db.finish_agent_run(db_path, run_id, "ok" if new_count else "error", summary)
-        return {"status": "ok" if new_count else "error", "new": new_count, "summary": summary}
+        return {"status": "ok" if new_count else "error", "new": new_count,
+                "rendered": rendered_count, "summary": summary}
     except Exception as e:
         logger.exception("art director failed")
         business_db.finish_agent_run(db_path, run_id, "error", f"Art director failed: {e}")
         return {"status": "error", "new": 0}
+
+
+def backfill_art_renders(db_path: str, owner_user_id: int, bridge, limit: int = 10) -> dict:
+    """Gives the art cards written under the old order their pictures.
+
+    run_art_director now renders before it files, but the cards already in the queue were
+    written the other way round and are still sitting there as prose. Rather than raise
+    them again -- which would lose their place and their age -- each one keeps its card
+    and gains the image its own brief describes.
+
+    One picture each, not three: these briefs were written with a single prompt, and
+    inventing two more directions here would be a different decision from the one he was
+    asked to make.
+    """
+    reserved = art_render.reserved_reason(bridge)
+    if reserved:
+        return {"status": "skipped", "rendered": 0,
+                "summary": f"simrig is reserved ({reserved})."}
+
+    pending = [i for i in business_db.list_review_items(db_path, owner_user_id, status="pending")
+               if i["kind"] == "art" and i["ref_table"] == "art_briefs" and not i["options"]]
+    rendered = 0
+    for item in pending[:limit]:
+        brief = next((b for b in business_db.list_art_briefs(db_path, owner_user_id, limit=200)
+                      if b["id"] == item["ref_id"]), None)
+        if brief is None or not brief.get("image_prompt"):
+            continue
+        options, failures = art_render.render_directions(
+            bridge,
+            [{"label": "As briefed", "rationale": brief.get("style_direction"),
+              "image_prompt": brief["image_prompt"]}],
+            aspect=brief.get("aspect"), negative=brief.get("negative_prompt"))
+        if not options or not options[0].get("media_path"):
+            logger.warning("art backfill could not render brief %s: %s", brief["id"], failures)
+            continue
+        business_db.add_review_options(db_path, owner_user_id, item["id"], options)
+        rendered += 1
+
+    return {"status": "ok", "rendered": rendered, "pending": len(pending),
+            "summary": f"Rendered {rendered} of {len(pending)} text-only art cards."}
 
 
 def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int = 3) -> dict:

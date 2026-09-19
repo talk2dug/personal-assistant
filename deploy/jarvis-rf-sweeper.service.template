@@ -1,0 +1,29 @@
+# Jarvis RF wideband sweeper -- drives the HackRF (hackrf_sweep) on an interval and folds
+# each survey into the rf_signals table (sensor_node/rf_store.py). The Tier-2 "what's
+# around us" baseline; sensor_node/rf_sweeper.py has the full rationale.
+#
+# A .template: %USER% and %INSTALL_DIR% are filled in at install time. Runs on the RF
+# sensor node (jarvishackrf), system python3, no venv. Owns the HackRF; the companion
+# jarvis-rf-sensor unit owns the RTL-SDR -- the two radios do not contend.
+#
+# Requires the PortaPack to be in "HackRF mode" (accepted limitation). When it is not,
+# the sweeper logs "no sweep data" and retries next interval rather than failing the unit.
+
+[Unit]
+Description=Jarvis RF wideband sweeper (hackrf_sweep -> rf_signals)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%INSTALL_DIR%
+ExecStart=/usr/bin/python3 %INSTALL_DIR%/rf_sweeper.py --db %INSTALL_DIR%/rf.db
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

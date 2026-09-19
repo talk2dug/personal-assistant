@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis EAS/SAME alert watcher on the NOAA stream -> eas_events.jsonl
+After=jarvis-fm-weather.service icecast2.service
+Wants=jarvis-fm-weather.service
+
+[Service]
+User=pi
+Environment=EAS_STREAM_URL=http://127.0.0.1:8000/weather.mp3
+Environment=EAS_EVENTS_PATH=/home/pi/fm_node/eas_events.jsonl
+Environment=EAS_MY_FIPS=051760,051087,051041,051085
+ExecStart=/usr/bin/python3 /home/pi/fm_node/eas_watch.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

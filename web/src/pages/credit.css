@@ -25,11 +25,11 @@
 .credit-score-table td {
   padding: 0.4rem 0.6rem;
   text-align: left;
-  border-bottom: 1px solid rgba(34, 232, 255, 0.12);
+  border-bottom: 1px solid rgba(148, 188, 227, 0.12);
 }
 
-.credit-bureau-experian { color: #22e8ff; }
-.credit-bureau-equifax { color: #ffb020; }
+.credit-bureau-experian { color: #94bce3; }
+.credit-bureau-equifax { color: #e8a33d; }
 .credit-bureau-transunion { color: #ff5da2; }
 .credit-bureau-other { color: #9aa0a6; }
 
@@ -86,7 +86,7 @@
 }
 
 .dispute-item-row {
-  border: 1px solid rgba(34, 232, 255, 0.15);
+  border: 1px solid rgba(148, 188, 227, 0.15);
   border-radius: 6px;
 }
 
@@ -115,9 +115,9 @@
 }
 
 .status-drafted { color: #9aa0a6; }
-.status-mailed { color: #ffb020; }
+.status-mailed { color: #e8a33d; }
 .status-resolved { color: #3ddc84; }
-.status-quoted { color: #22e8ff; }
+.status-quoted { color: #94bce3; }
 
 .dispute-item-creditor { font-weight: 600; }
 .dispute-item-desc { opacity: 0.75; flex: 1; }
@@ -125,7 +125,7 @@
 
 .dispute-item-body {
   padding: 0 0.8rem 0.8rem 0.8rem;
-  border-top: 1px solid rgba(34, 232, 255, 0.1);
+  border-top: 1px solid rgba(148, 188, 227, 0.1);
 }
 
 .dispute-letters-header {
@@ -141,7 +141,7 @@
   justify-content: space-between;
   gap: 1rem;
   padding: 0.5rem 0;
-  border-top: 1px solid rgba(34, 232, 255, 0.08);
+  border-top: 1px solid rgba(148, 188, 227, 0.08);
 }
 
 .dispute-letter-meta {
@@ -188,7 +188,7 @@
 
 .confirm-mail-modal {
   background: #0b1418;
-  border: 1px solid rgba(34, 232, 255, 0.3);
+  border: 1px solid rgba(148, 188, 227, 0.3);
   border-radius: 8px;
   padding: 1.25rem;
   max-width: 560px;
@@ -198,7 +198,7 @@
 }
 
 .confirm-mail-warning {
-  color: #ffb020;
+  color: #e8a33d;
   font-weight: 600;
   font-size: 0.9rem;
 }
@@ -214,7 +214,7 @@
 .confirm-mail-cost {
   font-size: 1.1rem;
   font-weight: 700;
-  color: #ffb020;
+  color: #e8a33d;
 }
 
 .confirm-mail-letter-text {

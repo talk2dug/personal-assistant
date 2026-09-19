@@ -59,6 +59,9 @@ async def send_message(request: Request):
     letterstream = request.app.state.letterstream if is_owner else None
     git_ops = request.app.state.git_ops if is_owner else None
     recipe = request.app.state.recipe if is_owner else None
+    # Owner-only, like every other outward-facing capability here: a guest at a terminal
+    # must not be able to send texts as Jack.
+    cellular_ctx = request.app.state.cellular_ctx if is_owner else None
     local_llm = request.app.state.local_llm if is_owner else None
     # handle_message blocks (LLM call to simrig, and sometimes Era/CalDAV/the phone) and Era/phone
     # tool calls internally use asyncio.run(), which raises if called from a thread that already
@@ -71,7 +74,7 @@ async def send_message(request: Request):
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         image_bytes=image_bytes, viewing_context=viewing_context,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops, recipe=recipe, local_llm=local_llm,
+        git_ops=git_ops, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
     )
     reply = await loop.run_in_executor(None, call)
     # show_camera (if the model called it this turn) leaves its result here rather than

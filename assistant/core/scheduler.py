@@ -12,7 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from . import (
     agents, business_db, crypto_journal, db, github_client, kitchen_db, location,
     mail_bills, mail_db, mail_debts, mail_importance, mail_triage, market_data,
-    paper_trading, personal_agents, personal_db, staff,
+    paper_trading, personal_agents, personal_db, staff, wan_failover,
 )
 from .mail_client import JUNK_FOLDER
 from .engine import handle_message
@@ -68,13 +68,16 @@ def start(
     mail_importance_max_flags_per_run: int = mail_importance.DEFAULT_MAX_FLAGS_PER_RUN,
     mail_debts_interval_minutes: int = 360,
     mail_debts_per_run_limit: int = mail_debts.DEFAULT_PER_RUN_LIMIT,
+    wan_failover_enabled: bool = False, wan_failover_proxy: str | None = None,
+    wan_failover_interval_seconds: int = 60,
     mail_debts_shortlist_limit: int = mail_debts.DEFAULT_SHORTLIST_LIMIT,
     kroger_sync_interval_seconds: int = 3600,
     task_watchdog_interval_seconds: int = 60,
     review_watchdog_interval_seconds: int = 900, review_watchdog_stale_hours: float = 2.0,
     github_watchdog_interval_seconds: int = 180,
     local_llm=None, local_llm_keepalive_interval_seconds: int = 600,
-    staff_assignment_timeout_seconds: int = 10800,
+    staff_assignment_timeout_seconds: int = 10800, bridge=None,
+    rhythm_nudge_interval_seconds: int = 60, rhythm_sms_number: str | None = None,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -136,6 +139,24 @@ def start(
             db.mark_reminder_sent(db_path, reminder["id"])
 
     scheduler.add_job(_tick, "interval", seconds=poll_interval_seconds, id="reminder_poll")
+
+    if wan_failover_enabled and wan_failover_proxy:
+        # Watches the house connection and, when it dies, moves Jarvis's outbound calls
+        # onto the LTE modem's proxy. Runs on its own short interval because the whole
+        # value is in noticing quickly -- and it is cheap: three TCP connects when the
+        # WAN is healthy, which is nearly always.
+        def _wan_tick():
+            try:
+                result = wan_failover.evaluate(db_path, wan_failover_proxy, enabled=True)
+                if result.get("changed"):
+                    logger.warning("WAN failover state changed: %s", result)
+            except Exception:
+                logger.exception("WAN failover check failed")
+
+        scheduler.add_job(_wan_tick, "interval",
+                          seconds=wan_failover_interval_seconds, id="wan_failover")
+        logger.info("WAN failover armed: proxy %s, every %ss",
+                    wan_failover_proxy, wan_failover_interval_seconds)
 
     if calendar is not None:
         owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
@@ -454,7 +475,15 @@ def start(
 
             def _pipeline_tick():
                 agents.run_product_creator(db_path, llm, owner["id"], profile)
-                agents.run_art_director(db_path, llm, owner["id"], profile)
+                # The art director renders its options before filing them, so this tick
+                # can now sit on the GPU queue for a few minutes. That is fine here -- it
+                # runs every 12 hours and the renders respect the same reservation
+                # everything else does -- but it is why the bridge has to reach it.
+                agents.run_art_director(db_path, llm, owner["id"], profile, bridge=bridge)
+                # The art cards written before the order was flipped are still in the
+                # queue as prose. Self-limiting: once a card has its picture it is never
+                # picked up again, so this costs one query a tick forever after.
+                agents.backfill_art_renders(db_path, owner["id"], bridge)
                 agents.run_store_manager(db_path, llm, owner["id"], profile)
                 agents.run_social_director(db_path, llm, owner["id"], profile)
 
@@ -472,6 +501,23 @@ def start(
                 _guarded("digest", _digest_tick), "cron", hour=business_intervals["digest_hour"], minute=0,
                 timezone=tz_name, id="business_digest",
             )
+
+        # The daily rhythm: anchors he asked to be reminded about by text. Ticks every
+        # minute because a lead time is a window, not an instant -- "leave in 15 minutes"
+        # sent at minute 3 of that window is still useful, sent after it is a reproach.
+        # The work is one indexed query when nothing is due, which is almost always.
+        def _rhythm_tick():
+            from . import routine
+            sent = routine.send_due_nudges(
+                db_path, owner["id"], sms_number=rhythm_sms_number,
+                notify=lambda text: notify(owner["telegram_chat_id"], text),
+                tz_name=tz_name)
+            for nudge in sent:
+                logger.info("rhythm nudge: %s (delivered=%s)", nudge["name"], nudge["delivered"])
+
+        scheduler.add_job(
+            _guarded_simple("rhythm", _rhythm_tick), "interval",
+            seconds=rhythm_nudge_interval_seconds, id="rhythm_nudges")
 
         # The research queue runs regardless of owner lookup — it's keyed on queued rows.
         # It starts a minute after boot rather than waiting out a full interval: an
@@ -598,6 +644,25 @@ def start(
                 seconds=kroger_sync_interval_seconds, id="kroger_sync",
                 next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
             )
+
+    # Radio watch delivery. The worker (assistant/radio_main.py, the JarvisRadio service)
+    # fills radio_items but never notifies; this is the only path from there to the phone,
+    # through the same notify funnel as everything else. Every minute rather than on the
+    # staff tick: a tornado warning must not queue behind a 5-minute cadence.
+    def _radio_deliver_tick():
+        from . import radio
+        owner_row = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+        if owner_row is None:
+            return
+        sent = radio.deliver_pending(
+            db_path, lambda text: notify(owner_row["telegram_chat_id"], text))
+        if sent:
+            logger.info("radio watch: delivered %d notification(s)", sent)
+
+    scheduler.add_job(
+        _guarded_simple("radio_deliver", _radio_deliver_tick), "interval", seconds=60,
+        id="radio_deliver", next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45),
+    )
 
     if market_api_key:
         # The crypto feed. Deliberately outside the business_agents_enabled gate: the
@@ -906,8 +971,19 @@ def run_review_watchdog(db_path: str, llm, notify, hours: float = 2.0, tz_name: 
             "Briefly let the owner know it's still waiting on his decision."
         )
         try:
+            # A staleness nudge is a NOTIFICATION: it must only describe what's waiting,
+            # never take action. It previously forwarded the full tool surface (**context,
+            # including home_assistant) on the theory that the pending_actions gate kept it
+            # safe -- but that gate only covers *sensitive* HA domains (lock/cover/alarm),
+            # so non-gated actions like light.turn_on executed with no confirmation. With a
+            # stale phantom "turn the living lights on" sitting in the memory window, the
+            # LLM re-fired it off every nudge and toggled the living-room lights overnight.
+            # Run it text-only: with no contexts, handle_message registers no device/outbound
+            # tools at all. The item title/kind/summary are already in the prompt, so no tool
+            # is needed to phrase the nudge. (context is still accepted for caller-interface
+            # stability but is deliberately not forwarded.)
             reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name,
-                                   source=REVIEW_WATCHDOG_SOURCE, **context)
+                                   source=REVIEW_WATCHDOG_SOURCE)
             if reply:
                 notify(owner["telegram_chat_id"], reply)
             results.append({"item_id": item["id"], "notified": bool(reply)})
@@ -957,8 +1033,13 @@ def run_github_watchdog(db_path: str, git_ops_client, llm, notify, tz_name: str 
             "Briefly let the owner know what changed and whether it needs his attention."
         )
         try:
+            # Text-only for the same reason as run_review_watchdog: a PR-state nudge is a
+            # notification, not an actuator. Forwarding **context (home_assistant, etc.) let
+            # a synthesized nudge fire non-gated device actions; the PR details are all in
+            # the prompt, so drop the tool surface entirely. (context still accepted for
+            # caller-interface stability, deliberately not forwarded.)
             reply = handle_message(db_path, llm, owner["id"], prompt, tz_name=tz_name,
-                                   source=GITHUB_WATCHDOG_SOURCE, **context)
+                                   source=GITHUB_WATCHDOG_SOURCE)
             if reply:
                 notify(owner["telegram_chat_id"], reply)
             results.append({"pr_number": change["pr_number"], "notified": bool(reply)})

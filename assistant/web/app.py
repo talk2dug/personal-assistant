@@ -62,6 +62,7 @@ from .routes.personal_tasks import router as personal_tasks_router
 from .routes.day import router as day_router
 from .routes.pipelines import router as pipelines_router
 from .routes.review import router as review_router
+from .routes.rf import router as rf_router
 from .routes.schedule import router as schedule_router
 from .routes.tools import router as tools_router
 from .routes.vision import router as vision_router
@@ -128,6 +129,7 @@ def create_app(
     app.include_router(cellular_router)
     app.include_router(day_router)
     app.include_router(pipelines_router)
+    app.include_router(rf_router)
 
     if static_dir and Path(static_dir).is_dir():
         app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")

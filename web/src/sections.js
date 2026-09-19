@@ -20,6 +20,7 @@ import Kitchen from './pages/Kitchen'
 import Media from './pages/Media'
 import Pipelines from './pages/Pipelines'
 import Review from './pages/Review'
+import RfAround from './pages/RfAround'
 import Schedule from './pages/Schedule'
 import Tasks from './pages/Tasks'
 
@@ -54,6 +55,12 @@ export const SECTIONS = [
     context: 'the Media section, showing the catalogue by kind and volume' },
   { key: 'agents', label: 'Office', element: Agents, wide: true,
     context: 'the Office, showing the full staff roster and what each agent is doing' },
+  { key: 'rf', label: 'RF / Around the House', element: RfAround, wide: true,
+    context: 'the RF / Around the House section, showing the sensor node\'s picture of the '
+      + 'street: every transmitter classified (his own sensors, neighbours\' fixtures, '
+      + 'passing and recurring vehicles, new/unknown devices), the devices seen in the last '
+      + '24 hours with vehicle visit counts and intervals, and the control to flag and name '
+      + 'a device as his own' },
 ]
 
 export const SECTION_BY_KEY = Object.fromEntries(SECTIONS.map((s) => [s.key, s]))

@@ -173,6 +173,14 @@ export const api = {
   activeWork: () => request('/api/active-work'),
   sshHostsStatus: () => request('/api/infra/ssh-hosts'),
 
+  // RF / Around the house -- the jarvishackrf sensor node's street picture. The dashboard
+  // is a cheap cached read; refresh re-polls the Pi over SSH; labelDevice names a
+  // transmitter as Jack's own (rf_sensorctl label, run on the node). See routes/rf.py.
+  rfDashboard: () => request('/api/rf/dashboard'),
+  rfRefresh: () => request('/api/rf/refresh', { method: 'POST' }),
+  rfLabelDevice: (device) =>
+    request('/api/rf/devices/label', { method: 'POST', body: JSON.stringify(device) }),
+
   kitchenRecipes: (query) => request(`/api/kitchen/recipes${query ? `?query=${encodeURIComponent(query)}` : ''}`),
   createRecipe: (recipe) => request('/api/kitchen/recipes', { method: 'POST', body: JSON.stringify(recipe) }),
   getRecipe: (id) => request(`/api/kitchen/recipes/${id}`),

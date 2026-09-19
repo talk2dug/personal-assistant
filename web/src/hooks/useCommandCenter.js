@@ -42,6 +42,7 @@ export function useCommandCenter() {
   const [netWorth, setNetWorth] = useState(null)
   const [crypto, setCrypto] = useState(null)
   const [schedule, setSchedule] = useState(null)
+  const [rf, setRf] = useState(null)
   const [slowErrors, setSlowErrors] = useState({})
 
   // Nothing on this board is worth a network request while it's in a background tab —
@@ -62,13 +63,14 @@ export function useCommandCenter() {
   }, [])
 
   const loadSlow = useCallback(async () => {
-    const [w, h, f, nw, c, s] = await Promise.allSettled([
+    const [w, h, f, nw, c, s, r] = await Promise.allSettled([
       api.activeWork(),
       api.sshHostsStatus(),
       Promise.all([api.financeSummary(), api.financeSafeToSpend()]),
       api.financeNetWorth(),
       api.cryptoDashboard(),
       api.scheduleReminders(),
+      api.rfDashboard(),
     ])
     const errors = {}
     const take = (result, set, key) => {
@@ -81,6 +83,7 @@ export function useCommandCenter() {
     take(nw, (v) => setNetWorth(v || []), 'netWorth')
     take(c, setCrypto, 'crypto')
     take(s, (v) => setSchedule(v || []), 'schedule')
+    take(r, setRf, 'rf')
     setSlowErrors(errors)
   }, [])
 
@@ -103,6 +106,6 @@ export function useCommandCenter() {
 
   return {
     snapshot, snapshotError, lastUpdate, refresh: loadSnapshot,
-    work, hosts, finance, netWorth, crypto, schedule, slowErrors,
+    work, hosts, finance, netWorth, crypto, schedule, rf, slowErrors,
   }
 }

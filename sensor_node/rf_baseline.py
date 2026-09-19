@@ -116,6 +116,13 @@ def analyse(conn: sqlite3.Connection, days: int, now: datetime | None = None) ->
         span_days = max((last_seen - first_seen).days, 0)
         is_new = (now - first_seen) <= NEW_WINDOW
         last24 = [v for v in visits if now - v[0] <= timedelta(hours=24)]
+        # Per-device last-24h detail the Command Center needs: how many times it was
+        # seen today and, for a vehicle, the gaps between those visits ("back every ~40
+        # min" vs "once this morning"). Intervals are minutes between consecutive visit
+        # STARTS, so a single visit has none and a car that keeps returning has a series.
+        last24_starts = [v[0] for v in last24]
+        intervals_min = [round((last24_starts[i] - last24_starts[i - 1]).total_seconds() / 60.0, 1)
+                         for i in range(1, len(last24_starts))]
 
         if d.get("registered"):
             cls = "own"
@@ -137,15 +144,35 @@ def analyse(conn: sqlite3.Connection, days: int, now: datetime | None = None) ->
             else:
                 cls = "unknown"
 
+        try:
+            seen_cmds = json.loads(d["seen_cmds"]) if d.get("seen_cmds") else []
+        except (TypeError, ValueError):
+            seen_cmds = []
         entry = {
             "fingerprint": fp, "model": model, "label": d.get("label"),
             "class": cls, "vehicle": vehicle,
+            # Registry fields so the UI can label a named device and offer the short id
+            # as the selector when flagging an unregistered one.
+            "registered": bool(d.get("registered")),
+            "location": d.get("location"), "device_type": d.get("device_type"),
+            "id_field": d.get("id_field"), "id_value": d.get("id_value"),
+            "seen_cmds": seen_cmds,
+            "last_rssi": d.get("last_rssi"), "last_snr": d.get("last_snr"),
             "first_seen": first_seen.isoformat(), "last_seen": last_seen.isoformat(),
             "events": len(times), "visits": len(visits), "days_seen": len(days_seen),
             "span_days": span_days,
             "hours_local": sorted(hours.items()),
             "visits_last_24h": len(last24),
             "typical_hours": [h for h, _ in hours.most_common(3)],
+            "last_24h": {
+                "visits": len(last24),
+                "events": sum(v[2] for v in last24),
+                "first_seen": last24_starts[0].isoformat() if last24_starts else None,
+                "last_seen": last24[-1][1].isoformat() if last24 else None,
+                "interval_minutes": intervals_min,
+                "mean_interval_minutes": (round(sum(intervals_min) / len(intervals_min), 1)
+                                          if intervals_min else None),
+            },
         }
         report_devices.append(entry)
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
+import AroundHouse from '../components/cc/AroundHouse'
 import Console from '../components/cc/Console'
 import CryptoDesk from '../components/cc/CryptoDesk'
 import DeviceMesh from '../components/cc/DeviceMesh'
@@ -43,7 +44,7 @@ const STALE_MS = 20000
 export default function CommandCenter() {
   const {
     snapshot, snapshotError, lastUpdate,
-    work, hosts, finance, netWorth, crypto, schedule, slowErrors,
+    work, hosts, finance, netWorth, crypto, schedule, rf, slowErrors,
   } = useCommandCenter()
 
   const [weather, setWeather] = useState(null)
@@ -97,6 +98,7 @@ export default function CommandCenter() {
             onOpen={() => openSection('kitchen')}
             onOpenCameras={() => setCamerasOpen(true)}
           />
+          <AroundHouse rf={rf} error={slowErrors.rf} onOpen={() => openSection('rf')} />
         </div>
 
         <div className="cc-col cc-col-mid">

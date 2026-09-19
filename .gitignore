@@ -31,3 +31,6 @@ web/dist/
 # Isolated TTS environment (CPU torch + snac for Orpheus SNAC decoding) -- same reason
 # .venv-vision is ignored: a multi-hundred-MB ML stack does not belong in the repo.
 .venv-tts/
+
+# Local DB snapshots — never commit (they are full copies of jarvis.db)
+jarvis.backup-*.db

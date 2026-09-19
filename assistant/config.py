@@ -342,6 +342,56 @@ class Config:
     # business_agents_enabled — that switch is about the print business's unattended agents,
     # and nesting this under it would make personal research silently never run by default.
     personal_research_interval_minutes: int = 30
+    # ---------------------------------------------------------------------------------
+    # VoIP / SIP calling (the JarvisVoip service -- assistant/voip_main.py).
+    #
+    # This is the workaround for the carrier BLOCKING voice on the jarvisaudio2 LTE line:
+    # SMS works there (see the cellular.* fields above), voice does not, so a real SIP
+    # account gives Jarvis an actual phone number it can place and receive calls on. SIP
+    # is IP-based and has nothing to do with the LTE modem -- it does NOT have to run on
+    # jarvisaudio2; voip_host picks where the SIP user-agent lives (None = this Windows
+    # box, where the STT/TTS/engine already run, so call audio bridges to whisper/piper
+    # in-process rather than making a second LAN hop).
+    #
+    # EVERYTHING here defaults off/None: with voip_enabled False (or creds missing) the
+    # service is a benign no-op that never registers and never dials, exactly like the
+    # business block staying absent. Nothing registers against the SIP account until the
+    # owner sets voip_enabled True AND supplies sip_user/sip_password.
+    #
+    # Provider on file is VoIP.ms. Registration is to the POP (sip_registrar,
+    # e.g. washington2.voip.ms); the generic sip.voip.ms is the SIP-URI domain. The auth
+    # user is a VoIP.ms SUB-ACCOUNT (format like 123456_jarvis), never the DID. The DID
+    # (sip_did) is the assigned number used as caller-ID and the number people call.
+    voip_enabled: bool = False
+    # ssh_hosts name of the machine that runs the SIP user-agent, or None for this box.
+    voip_host: str | None = None
+    # The SIP registrar / outbound POP you authenticate to (VoIP.ms: washington2.voip.ms).
+    sip_registrar: str | None = None
+    # The SIP-URI domain / realm (VoIP.ms: sip.voip.ms). Falls back to sip_registrar.
+    sip_domain: str | None = None
+    # Auth / SIP username -- a VoIP.ms sub-account, e.g. "123456_jarvis". NOT the DID.
+    sip_user: str | None = None
+    sip_password: str | None = None
+    # Optional outbound proxy. VoIP.ms normally needs none (proxy == registrar); leave
+    # None unless the provider specifically hands one out.
+    sip_proxy: str | None = None
+    sip_port: int = 5060                 # 5060 for UDP/TCP; 5061 for TLS.
+    sip_transport: str = "udp"           # "udp" | "tcp" | "tls" (VoIP.ms supports all).
+    # The assigned DID / phone number, digits only, used as caller-ID and the inbound
+    # number. On file: 5718322742 (571-832-2742), SIP URI 5718322742@sip.voip.ms.
+    sip_did: str | None = None
+    # Offered codecs, best-first. PCMU (ulaw) and G.722 are the safe VoIP.ms defaults and
+    # decode straight to the 16 kHz/8 kHz PCM whisper/piper already speak.
+    sip_codecs: list[str] = field(default_factory=lambda: ["PCMU", "G722", "PCMA"])
+    # Whether Jarvis may place OUTBOUND calls that reach a human. Off by default and, like
+    # sms_sending_enabled, a deliberate switch: a call still needs the owner's explicit
+    # confirmation per placement, but the capability itself should not appear just because
+    # a SIP account was configured.
+    voip_calling_enabled: bool = False
+    # Who may drive Jarvis by CALLING IN. Security boundary, fails closed exactly like
+    # sms_allowed_numbers: anyone can dial the DID, and an unlisted caller reaching the
+    # conversational path would be an unauthenticated stranger. Empty means nobody.
+    voip_allowed_callers: list[str] = None
 
 
 def load_config(path: str = "config.json") -> Config:
@@ -503,4 +553,19 @@ def load_config(path: str = "config.json") -> Config:
         pipeline_interval_hours=data.get("pipeline_interval_hours", 12),
         business_digest_hour=data.get("business_digest_hour", 8),
         personal_research_interval_minutes=data.get("personal_research_interval_minutes", 30),
+        # VoIP / SIP calling (JarvisVoip). All safe defaults: off, no registration, no
+        # dialing until voip_enabled True and sip_user/sip_password are supplied.
+        voip_enabled=data.get("voip_enabled", False),
+        voip_host=data.get("voip_host"),
+        sip_registrar=data.get("sip_registrar"),
+        sip_domain=data.get("sip_domain"),
+        sip_user=data.get("sip_user"),
+        sip_password=data.get("sip_password"),
+        sip_proxy=data.get("sip_proxy"),
+        sip_port=data.get("sip_port", 5060),
+        sip_transport=data.get("sip_transport", "udp"),
+        sip_did=data.get("sip_did"),
+        sip_codecs=data.get("sip_codecs") or ["PCMU", "G722", "PCMA"],
+        voip_calling_enabled=data.get("voip_calling_enabled", False),
+        voip_allowed_callers=data.get("voip_allowed_callers") or [],
     )

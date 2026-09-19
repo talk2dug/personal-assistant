@@ -611,10 +611,13 @@ def run_debt_mail_sweep_once(
         try:
             found = mail_client.search_uids(
                 SEARCH_TERMS, folder=folder, limit=shortlist_limit, exclude=already)
-        except Exception:
+        except Exception as exc:
             # One unreadable folder must not end the sweep -- the rest of his mail is
-            # still worth searching, and this folder is retried on the next run.
-            logger.exception("mail debts: could not search folder %s", folder)
+            # still worth searching, and this folder is retried on the next run. A folder
+            # that simply can't be selected (a \Noselect container or a client-only
+            # mailbox) is an expected condition, so log a one-line warning rather than a
+            # full stack trace on every run.
+            logger.warning("mail debts: could not search folder %s: %s", folder, exc)
             continue
         stats["folders_searched"] += 1
 

@@ -199,7 +199,11 @@ class MailClient:
         """
         conn = self._imap()
         try:
-            conn.select(folder, readonly=True)
+            # Quote the mailbox name: folders with spaces (e.g. "Apple Mail To Do") must
+            # be sent as a quoted IMAP string, or the server parses only the first word
+            # and returns BAD Parse Error. Escaping \ and " keeps unusual names safe;
+            # quoting a plain name like INBOX is still valid IMAP.
+            conn.select('"%s"' % folder.replace("\\", "\\\\").replace('"', '\\"'), readonly=True)
             found: set[str] = set()
             for criterion, value in terms:
                 try:
@@ -222,7 +226,7 @@ class MailClient:
     def read_message(self, uid: str, folder: str = "INBOX", max_chars: int = 4000) -> dict:
         conn = self._imap()
         try:
-            conn.select(folder, readonly=True)
+            conn.select('"%s"' % folder.replace("\\", "\\\\").replace('"', '\\"'), readonly=True)
             _, data = conn.uid("fetch", uid, "(BODY.PEEK[])")
             if not data or data[0] is None:
                 return {"error": f"no message with uid {uid}"}

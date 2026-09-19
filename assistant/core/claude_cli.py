@@ -55,6 +55,26 @@ DENIED_TOOLS = [
 DEFAULT_CLI_PATH = os.path.expanduser(r"~\.local\bin\claude.exe")
 
 
+class LLMRefusalError(RuntimeError):
+    """The model's safety classifier refused the request (stop_reason "refusal" -- e.g. the
+    [bio] classifier firing on message content). Distinct from a transient failure because
+    it is DETERMINISTIC: the same input is refused every time. Callers that process a queue
+    (e.g. the debt-mail sweep) should skip the offending item rather than re-send it every
+    run. Subclasses RuntimeError so existing `except RuntimeError`/`except Exception`
+    handlers still catch it unchanged."""
+
+
+def _is_refusal(raw: str) -> bool:
+    """True when CLI output is a safety-classifier refusal (deterministic), so callers can
+    tell it apart from a transient error. Matches the machine field first, with the stable
+    refusal phrase as a fallback."""
+    return (
+        '"stop_reason":"refusal"' in raw
+        or '"stop_reason": "refusal"' in raw
+        or "can't help with this" in raw
+    )
+
+
 class ClaudeCLIClient:
     agentic = True
     # Tells engine.build_system_prompt this backend can actually search the web, so the
@@ -119,8 +139,15 @@ class ClaudeCLIClient:
             raise RuntimeError(f"the request took longer than {self.timeout}s")
 
         if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-            raise RuntimeError(detail[0] if detail else f"claude exited {proc.returncode}")
+            raw = proc.stderr or proc.stdout or ""
+            detail = raw.strip().splitlines()
+            msg = detail[0] if detail else f"claude exited {proc.returncode}"
+            # A safety-classifier refusal exits non-zero with its result JSON on stdout
+            # (stop_reason "refusal"). Raise the deterministic error type so queue-processing
+            # callers skip the item instead of re-sending it forever.
+            if _is_refusal(raw):
+                raise LLMRefusalError(msg)
+            raise RuntimeError(msg)
 
         try:
             payload = json.loads(proc.stdout)
@@ -128,7 +155,10 @@ class ClaudeCLIClient:
             raise RuntimeError("could not parse the CLI's response")
 
         if payload.get("is_error"):
-            raise RuntimeError(payload.get("result") or "the CLI reported an error")
+            msg = payload.get("result") or "the CLI reported an error"
+            if payload.get("stop_reason") == "refusal" or _is_refusal(proc.stdout):
+                raise LLMRefusalError(msg)
+            raise RuntimeError(msg)
 
         usage = payload.get("usage") or {}
         logger.info(

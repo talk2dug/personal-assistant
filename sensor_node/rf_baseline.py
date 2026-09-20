@@ -203,6 +203,12 @@ def analyse(conn: sqlite3.Connection, days: int, now: datetime | None = None) ->
     n_days = max(1, min(days, (now - since).days))
     hour_base = Counter(_local(t).hour for t in vehicle_visit_times)
     last24_times = [t for t in vehicle_visit_times if now - t <= timedelta(hours=24)]
+    # Passing cars in the last 12 h: one summary number for the Command Center, so the
+    # table no longer needs a row per one-off car. A visit start is one car driving past
+    # (vehicles are keyed per TPMS sensor -- see the module docstring), so this counts
+    # EVERY vehicle sighting in the window, repeat vehicles included, not just the
+    # single-pass class: it answers "how many cars drove by in the last 12 h".
+    last12_times = [t for t in vehicle_visit_times if now - t <= timedelta(hours=12)]
     hour_24 = Counter(_local(t).hour for t in last24_times)
     baseline_per_day = len(vehicle_visit_times) / n_days
     traffic = {
@@ -210,6 +216,8 @@ def analyse(conn: sqlite3.Connection, days: int, now: datetime | None = None) ->
         "vehicle_visits_total": len(vehicle_visit_times),
         "vehicle_visits_per_day": round(baseline_per_day, 2),
         "vehicle_visits_last_24h": len(last24_times),
+        "vehicle_visits_last_12h": len(last12_times),
+        "passing_12h": len(last12_times),
         "busiest_hours_local": [h for h, _ in hour_base.most_common(4)],
         "by_hour_baseline_per_day": {h: round(c / n_days, 2) for h, c in sorted(hour_base.items())},
         "by_hour_last_24h": dict(sorted(hour_24.items())),
@@ -248,7 +256,8 @@ def render(rep: dict) -> str:
         f"passing {c.get('vehicle-passing', 0)}, WATCH {c.get('vehicle-watch', 0)} | "
         f"unknown new {c.get('unknown-new', 0)}",
         f"  vehicle traffic: {t['vehicle_visits_per_day']}/day baseline over {t['baseline_days']}d, "
-        f"{t['vehicle_visits_last_24h']} in last 24h; busiest hours {t['busiest_hours_local']}",
+        f"{t['vehicle_visits_last_24h']} in last 24h, {t.get('passing_12h', 0)} passing in last 12h; "
+        f"busiest hours {t['busiest_hours_local']}",
         "",
     ]
     if rep["alerts"]:

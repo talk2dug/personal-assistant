@@ -309,6 +309,10 @@ export default function RfAround() {
   if (!data) return <div className="rf-page rf-loading">Loading…</div>
 
   const { counts = {}, traffic = {}, alerts = [], devices = [], device_types: types = [] } = data
+  // One-off passing cars are folded out of the device table on the server; they are
+  // represented by a single 12h total instead. passing_12h is null until the Pi baseline
+  // has been redeployed + re-polled with the new field, so fall back to a dash.
+  const { passing_12h: passing12 = null, hidden_passing: hiddenPassing = 0 } = data.passing_summary || {}
   const seen24 = devices
     .filter((d) => d.seen_last_24h)
     .sort((a, b) => (CLASS_ORDER.indexOf(a.class) - CLASS_ORDER.indexOf(b.class))
@@ -360,6 +364,13 @@ export default function RfAround() {
 
       <section>
         <h3>Seen in the last 24 hours</h3>
+        <div className="rf-passing-summary" title="Cars seen only once aren't listed individually — this is the total that drove past in the last 12 hours.">
+          <span className="rf-passing-count">{passing12 ?? '—'}</span>
+          <span className="rf-passing-label">passing {passing12 === 1 ? 'car' : 'cars'} · last 12h</span>
+          {hiddenPassing > 0 && (
+            <span className="rf-passing-hidden">{hiddenPassing} one-off {hiddenPassing === 1 ? 'car' : 'cars'} folded out of the table</span>
+          )}
+        </div>
         <DeviceTable
           devices={seen24}
           types={types}
@@ -370,8 +381,9 @@ export default function RfAround() {
         />
         <p className="rf-hint">
           Flag anything that lives in your home so it registers as yours — a named device
-          becomes class “Mine”. Vehicles show how often they came back today and the gap
-          between visits.
+          becomes class “Mine”. Cars seen only once are counted in the passing total above,
+          not listed; recurring vehicles stay listed with how often they came back and the
+          gap between visits.
         </p>
       </section>
 

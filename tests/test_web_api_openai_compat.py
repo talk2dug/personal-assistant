@@ -142,8 +142,13 @@ def test_ha_endpoint_gets_the_same_contexts_as_every_other_surface(cfg, monkeypa
     # stays out of Jarvis's memory window (see db.recent_messages). A person talking to the
     # voice endpoint is the owner really talking, which is precisely the None case, so
     # passing anything here would be wrong rather than merely unnecessary.
+    # voice_brief is a per-turn style flag, not a capability: it asks for an answer short
+    # enough to be spoken aloud over a phone line. The HA endpoint answers through Home
+    # Assistant's own voice pipeline, which does its own shortening, so it has no business
+    # setting this -- the same reasoning as viewing_context and source above.
     non_contexts = {"db_path", "llm", "requesting_user_id", "user_text", "tz_name",
-                    "image_bytes", "max_tool_hops", "viewing_context", "source"}
+                    "image_bytes", "max_tool_hops", "viewing_context", "source",
+                    "voice_brief"}
     contexts = [p for p in inspect.signature(engine.handle_message).parameters
                 if p not in non_contexts]
 

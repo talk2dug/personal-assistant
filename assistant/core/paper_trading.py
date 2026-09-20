@@ -87,6 +87,15 @@ MIN_REWARD_RISK = 2.0
 # is drifting sideways, neither stopping out nor reaching its target.
 MAX_HOLD_HOURS = 48.0
 
+# How close behind the current price a raised stop may sit, as a fraction of the risk the
+# position originally took (entry - initial stop). A trail is only a trail if it leaves the
+# trade room to breathe: without a floor, "raise the stop to a hair under spot" is just
+# selling at market, which is the disposition effect wearing the trail's coat -- that is
+# the abuse the 2026-09-19 freeze was reaching for, and this is the narrow version of it.
+# At 0.5 the stop follows about half the original risk behind, so a normal pullback does
+# not end the trade but a real reversal does.
+MIN_TRAIL_RISK_FRACTION = 0.5
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,12 +123,33 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     -- level yet; a position can hold either, both, or neither.
     stop_loss REAL,
     take_profit REAL,
+    -- The stop as first committed, never revised. stop_loss above may ratchet UP behind a
+    -- winner; this keeps the original risk (entry - initial_stop) available afterward, so
+    -- the minimum trail distance is measured against the risk actually taken rather than
+    -- against an already-tightened stop, which would let the trail creep to spot.
+    initial_stop_loss REAL,
     -- When this position was FIRST opened (adding to it does not reset this), so a
     -- maximum hold can be enforced. A thesis that has not worked in two days is not
     -- going to be rescued by the model staring at it for a third.
     opened_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (account_id, code)
+);
+
+-- Every accepted stop raise. Position rows are overwritten in place, so without this the
+-- trail leaves no trace: an exit off a raised stop would look exactly like an exit off the
+-- stop set at entry, and that ambiguity is precisely what got the trail misread as the
+-- disposition effect and removed. Refusals land in paper_rejections as usual.
+CREATE TABLE IF NOT EXISTS paper_stop_raises (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES paper_accounts(id),
+    code TEXT NOT NULL,
+    from_stop REAL,
+    to_stop REAL NOT NULL,
+    price REAL NOT NULL,
+    reason TEXT,
+    staff_key TEXT,
+    at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS paper_trades (
@@ -193,17 +223,28 @@ volume comes from looking at more charts, never from lowering it.
 
 YOU ONLY DECIDE ENTRIES. You cannot close a position -- there is no sell you can place.
 A position leaves on the stop_loss or the take_profit you committed when you opened it,
-or automatically after {max_hold_hours:g}h. This is not a restriction on your judgement,
-it is where your judgement now goes: the only chance you get to decide how a trade ends
-is the moment you open it, so set the two numbers you actually mean. You cannot move them
-afterward either -- not by editing them, and not by adding a token amount to a position to
-"restate" a tighter stop and lock a gain early. That was the disposition effect that lost
-the money the first time, and it is closed now: an add-on that changes a level is refused.
+or automatically after {max_hold_hours:g}h. Set the two numbers you actually mean: the
+target is fixed from that moment and cannot be pulled in, because taking profits early is
+what lost the money the first time.
 
-Why, in the desk's own numbers: over 92 closed round-trips you won 42.4% of the time --
-which is fine -- but your average win was +$2.39 against an average loss of -$2.85,
-because you held winners a median of 2.0 hours and losers 8.7 hours. Taking profits early
-and giving losses room is what lost the money, not the coins you picked.
+The stop is different. It may be raised -- never lowered -- behind a position that is
+working, with a `raise_stop` order:
+
+  {{"side": "raise_stop", "code": "ARB", "stop_loss": 0.163, "reason": "why, in one line"}}
+
+That costs no fee and does not touch your target or your size; it only moves risk. Two
+limits: a stop only ever moves up, and a raised stop must stay at least
+{min_trail:g}x the original risk (entry minus your first stop) below the current price.
+Raising it to just under spot is not a trail, it is selling at market, and it is refused.
+
+Why, in the desk's own numbers. Choosing your own exits freely lost money: over 92 closed
+round-trips you won 42.4% of the time with an average win of +$2.39 against an average
+loss of -$2.85, because you held winners a median of 2.0 hours and losers 8.7 hours.
+But trailing the stop while the target stayed fixed is the opposite trade and it worked:
+over 2026-09-17/18 you won 78% of 54 round-trips for +$61.83, and 30 of your 44 stop exits
+closed ABOVE their entry -- losers cut to scratches, winners left alone. When the stop was
+frozen as well for two days, the win rate fell to 44% and the book went flat. So: let the
+target run, and walk the stop up behind it.
 
 Rules enforced in code, not by you:
   * Buys are sized in `usd`. No single order may exceed {max_pct}% of total equity --
@@ -220,9 +261,10 @@ Rules enforced in code, not by you:
     that ratio is what turns this book positive on arithmetic alone. If a trade is not
     worth {min_rr:g}:1 to you, it is not worth taking -- that is the trade-off, and
     passing on that one is a perfectly good answer.
-  * Adding to a position INHERITS the stop and target you committed when you opened it and
-    cannot change them -- exits are set once, at entry. An add-on that restates a different
-    stop or target is refused, so do not top a position up purely to move its stop.
+  * Adding to a position INHERITS its target, which cannot change; an add-on restating a
+    different target is refused. It may state a HIGHER stop (the same trail as above, on
+    the same terms), never a lower one. Use `raise_stop` rather than a token add-on when
+    all you want is the stop moved -- that is what it is for, and it pays no fee.
     (Adding also does NOT restart its {max_hold_hours:g}h clock.)
   * A coin stopped out cannot be re-bought for {cooldown_hours:g}h -- that failed thesis
     needs to cool off, not get re-entered on the next momentum call.
@@ -252,6 +294,7 @@ def render_order_instructions() -> str:
         target_positions=TARGET_CONCURRENT_POSITIONS,
         cooldown_hours=STOP_LOSS_COOLDOWN_HOURS,
         min_rr=MIN_REWARD_RISK,
+        min_trail=MIN_TRAIL_RISK_FRACTION,
         max_hold_hours=MAX_HOLD_HOURS)
 
 
@@ -267,6 +310,13 @@ def init_paper_db(db_path: str) -> None:
             conn.execute("ALTER TABLE paper_positions ADD COLUMN stop_loss REAL")
         if "take_profit" not in pos_cols:
             conn.execute("ALTER TABLE paper_positions ADD COLUMN take_profit REAL")
+        if "initial_stop_loss" not in pos_cols:
+            conn.execute("ALTER TABLE paper_positions ADD COLUMN initial_stop_loss REAL")
+            # A position already open when the ratchet shipped has only its current stop to
+            # go on. Seeding it as the initial one is the conservative read: it understates
+            # the original risk, so the minimum trail it must keep is the tighter of the two.
+            conn.execute("UPDATE paper_positions SET initial_stop_loss = stop_loss "
+                         "WHERE initial_stop_loss IS NULL")
         if "opened_at" not in pos_cols:
             conn.execute("ALTER TABLE paper_positions ADD COLUMN opened_at TEXT")
             # Backfill from updated_at rather than leaving NULL: a position already open
@@ -312,6 +362,24 @@ def _parse_level(value) -> float | None:
     except (TypeError, ValueError):
         return None
     return level if level > 0 else None
+
+
+def _trail_ceiling(price: float, entry: float, initial_stop: float | None,
+                   committed_stop: float | None) -> float:
+    """The highest a stop may be raised to right now: far enough under the price to still
+    be a stop rather than a market sell.
+
+    The gap is a fraction of the risk the trade ORIGINALLY took (entry - initial stop), not
+    of the distance price has since travelled -- a winner that has run 10% should trail at
+    the same respectful distance it always did, not be handed a proportionally wider one.
+    Measuring off the initial stop rather than the current one also stops the ceiling
+    creeping up with each raise, which would let the trail walk itself to spot.
+    """
+    basis = initial_stop if initial_stop is not None else committed_stop
+    risk = (entry - basis) if basis is not None else 0.0
+    if risk <= 0:
+        return price                      # no usable risk basis: only the price itself binds
+    return price - risk * MIN_TRAIL_RISK_FRACTION
 
 
 def _level_moved(stated: float | None, committed: float | None) -> bool:
@@ -567,8 +635,8 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
             code = str(order.get("code") or "").strip().upper()
             side = str(order.get("side") or "").strip().lower()
             reason = str(order.get("reason") or "")[:300]
-            if side not in ("buy", "sell") or not code:
-                reject(order, "order needs a side of buy or sell and a coin code")
+            if side not in ("buy", "sell", "raise_stop") or not code:
+                reject(order, "order needs a side of buy, sell or raise_stop, and a coin code")
                 continue
 
             mark = _prices(conn, [code]).get(code)
@@ -585,6 +653,56 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
             # collectively exceed the cap by each measuring against the starting figure.
             snapshot = portfolio(db_path, name)
             equity = snapshot["equity"]
+
+            if side == "raise_stop":
+                # Moving a stop UP behind a winner is the one exit revision that is not the
+                # disposition effect: it cuts risk without touching the upside, since the
+                # target stays exactly where it was committed. The desk earned +$61.83 over
+                # 2026-09-17/18 doing this -- 30 of its 44 stop exits closed ABOVE entry --
+                # and freezing it outright on 09-19 took the win rate from 78% to 44% and
+                # the book to flat. It has its own side so it costs no fee and leaves no
+                # phantom $0.01 "buy" in the ledger, which is how it used to be expressed.
+                if pos is None or pos["qty"] <= 0:
+                    reject(order, f"no {code} position whose stop could be raised")
+                    continue
+                stated_stop = _parse_level(order.get("stop_loss"))
+                if stated_stop is None:
+                    reject(order, "raise_stop needs a numeric `stop_loss` to raise the stop to")
+                    continue
+                committed = pos["stop_loss"]
+                if committed is not None and stated_stop <= committed:
+                    reject(order, f"{code} already stops at {_fmt_level(committed)}; a stop "
+                                  f"only ever moves up. Giving a loser more room is what "
+                                  f"cost the desk its money the first time.")
+                    continue
+                if stated_stop >= price:
+                    reject(order, f"a stop at {_fmt_level(stated_stop)} is at or above "
+                                  f"{code}'s current {_fmt_level(price)} -- that is a sell, "
+                                  f"not a stop, and exits stay mechanical")
+                    continue
+                initial = (pos["initial_stop_loss"]
+                           if "initial_stop_loss" in pos.keys() else None)
+                ceiling = _trail_ceiling(price, pos["avg_cost"], initial, committed)
+                if stated_stop > ceiling:
+                    reject(order, f"{_fmt_level(stated_stop)} trails {code} too close to its "
+                                  f"{_fmt_level(price)}: a raised stop must stay at least "
+                                  f"{MIN_TRAIL_RISK_FRACTION:g}x the original risk back, so "
+                                  f"{_fmt_level(ceiling)} is as high as it goes right now. "
+                                  f"Pinning the stop under spot to bank a gain early is the "
+                                  f"disposition effect, not a trail.")
+                    continue
+                conn.execute("UPDATE paper_positions SET stop_loss = ?, updated_at = ? "
+                             "WHERE account_id = ? AND code = ?",
+                             (stated_stop, now, acct["id"], code))
+                conn.execute(
+                    """INSERT INTO paper_stop_raises
+                           (account_id, code, from_stop, to_stop, price, reason, staff_key, at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (acct["id"], code, committed, stated_stop, price, reason, staff_key, now))
+                conn.commit()
+                fills.append({"side": "raise_stop", "code": code, "from_stop": committed,
+                              "to_stop": stated_stop, "price": price, "reason": reason})
+                continue
 
             if side == "buy":
                 last_stop_out = conn.execute(
@@ -632,42 +750,61 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 if usd + fee > cash + 1e-9:
                     reject(order, f"insufficient cash: need ${usd + fee:,.2f}, have ${cash:,.2f}")
                     continue
-                # Exit levels are committed when a position is FIRST opened and are
-                # immutable afterward. A new entry states both here; an add-on inherits
-                # them and cannot move them.
+                # The TARGET is committed when a position is first opened and is immutable
+                # afterward; the STOP may ratchet up. A new entry states both here; an
+                # add-on inherits the target and may only tighten the stop.
                 #
-                # The model cannot place a sell -- exits are mechanical (see
-                # MIN_REWARD_RISK) -- but once that shipped it rediscovered the disposition
-                # effect through the one door left open: a token add-on, some as small as
-                # $0.01 with the reason "restate tighter stop only, no new capital added",
-                # placed purely to ratchet the stop up under a winner and bank the gain
-                # early. It became 53% of every buy the desk placed; 59 of 71 exits turned
-                # into stop-losses, 39 of them closing at a small PROFIT off a raised stop,
-                # and the average win collapsed from the +$4.40 an actual target pays
-                # toward +$1.65. That is the very behaviour the mechanical exits removed,
-                # let straight back in, and it is what flattened the equity curve after
-                # the 2026-09-16 rewrite.
+                # This was briefly a total freeze, on the reading that raising a stop under
+                # a winner was the disposition effect returning through the one door left
+                # open -- token $0.01 add-ons "restating" a tighter stop, 53% of all buys,
+                # with the average win falling from the +$4.40 a real target pays toward
+                # +$1.65. The truncation was real, but the conclusion was backwards, and
+                # the ledger settled it: under the trail (2026-09-17/18) the desk won 78%
+                # of 54 round-trips for +$61.83, with 30 of 44 stop exits closing ABOVE
+                # entry. Frozen (09-19/20) it won 44% and made $1.45. Expectancy per trade
+                # was +$1.14 trailing against +$0.08 frozen -- a smaller average win on far
+                # more winners, which is the trade the arithmetic wants.
                 #
-                # So an add-on that states a level which would MOVE a committed one is
-                # refused -- the lesson, counted back to the model in its briefing --
-                # rather than silently obeyed. An omitted or unchanged level inherits.
+                # So the asymmetry is the rule: pulling a target in, or widening a stop,
+                # are the two disposition-effect moves and both stay refused. Raising a
+                # stop is neither -- it cuts risk and leaves the upside alone -- and it
+                # belongs to `raise_stop` above, which needs no fee and no phantom buy.
+                # An omitted or unchanged level inherits.
                 if pos is not None:
                     stated_stop = _parse_level(order.get("stop_loss"))
                     stated_take = _parse_level(order.get("take_profit"))
-                    if (_level_moved(stated_stop, pos["stop_loss"])
-                            or _level_moved(stated_take, pos["take_profit"])):
-                        have = (f"stop {_fmt_level(pos['stop_loss'])}, "
-                                f"target {_fmt_level(pos['take_profit'])}")
-                        reject(order, f"{code} already carries the exit plan it was opened "
-                                      f"with ({have}), and an add-on cannot move it -- the "
-                                      f"moment you open a position is the only place you "
-                                      f"decide how it ends. Restating a tighter stop to lock "
-                                      f"a gain early is the disposition effect that cost the "
-                                      f"desk its edge; if a thesis has changed, let the "
-                                      f"position leave on the levels you committed.")
+                    if _level_moved(stated_take, pos["take_profit"]):
+                        reject(order, f"{code} already targets "
+                                      f"{_fmt_level(pos['take_profit'])} and an add-on cannot "
+                                      f"move it -- pulling a target in to bank early is the "
+                                      f"disposition effect that cost the desk its edge. Raise "
+                                      f"the stop with a `raise_stop` order instead; the "
+                                      f"upside stays where you committed it.")
                         continue
+                    # A stop stated LOWER than the committed one is a loser being given more
+                    # room, and stays refused. A stop stated higher is the trail, and is
+                    # allowed on the same terms as a raise_stop order -- an add-on placed
+                    # after the stop has already been trailed should not have to pretend it
+                    # has not been.
                     stop_loss = pos["stop_loss"]
                     take_profit = pos["take_profit"]
+                    if _level_moved(stated_stop, pos["stop_loss"]):
+                        initial = (pos["initial_stop_loss"]
+                                   if "initial_stop_loss" in pos.keys() else None)
+                        ceiling = _trail_ceiling(price, pos["avg_cost"], initial, pos["stop_loss"])
+                        if (pos["stop_loss"] is not None and stated_stop < pos["stop_loss"]):
+                            reject(order, f"{code} already stops at "
+                                          f"{_fmt_level(pos['stop_loss'])}; an add-on cannot "
+                                          f"widen it. Letting a loser run is what lost the "
+                                          f"money -- size the add-on or let it stop out.")
+                            continue
+                        if stated_stop >= price or stated_stop > ceiling:
+                            reject(order, f"{_fmt_level(stated_stop)} trails {code} too close "
+                                          f"to its {_fmt_level(price)}; "
+                                          f"{_fmt_level(ceiling)} is as high as the stop goes "
+                                          f"right now")
+                            continue
+                        stop_loss = stated_stop
                 else:
                     stop_loss = _parse_level(order.get("stop_loss"))
                     take_profit = _parse_level(order.get("take_profit"))
@@ -733,16 +870,27 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 # Adding to a position must NOT restart its clock, or a position could be
                 # kept alive past the maximum hold indefinitely by topping it up.
                 opened_at = pos["opened_at"] if pos is not None and pos["opened_at"] else now
+                # The original risk belongs to the position, not to the latest order: an
+                # add-on must not reset it, or the trail's minimum distance would be
+                # remeasured against an already-tightened stop and could walk to spot.
+                initial_stop = None
+                if pos is not None and "initial_stop_loss" in pos.keys():
+                    initial_stop = pos["initial_stop_loss"]
+                if initial_stop is None:
+                    initial_stop = pos["stop_loss"] if pos is not None else stop_loss
                 conn.execute(
                     """INSERT INTO paper_positions (account_id, code, qty, avg_cost,
-                                                     stop_loss, take_profit, opened_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?)
+                                                     stop_loss, take_profit, initial_stop_loss,
+                                                     opened_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(account_id, code) DO UPDATE SET
                            qty = excluded.qty, avg_cost = excluded.avg_cost,
                            stop_loss = excluded.stop_loss, take_profit = excluded.take_profit,
+                           initial_stop_loss = excluded.initial_stop_loss,
                            opened_at = excluded.opened_at,
                            updated_at = excluded.updated_at""",
-                    (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, opened_at, now))
+                    (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, initial_stop,
+                     opened_at, now))
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,

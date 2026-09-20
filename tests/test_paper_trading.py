@@ -176,16 +176,13 @@ def test_adding_to_a_position_keeps_the_existing_levels_if_none_restated(db):
     assert row["take_profit"] == 240.0
 
 
-def test_an_add_on_cannot_ratchet_the_committed_stop(db):
-    """Exits are set at entry and are immutable. The model cannot place a sell, but it
-    used to reach the same end by adding a token amount to a winner while restating a
-    tighter stop -- ratcheting the stop up under the position to bank the gain early. That
-    reintroduced the disposition effect the mechanical exits removed and flattened the
-    equity curve; a restate that would move a committed level is now refused."""
+def test_an_add_on_cannot_widen_the_committed_stop(db):
+    """Giving a loser more room is half the disposition effect and stays refused: the stop
+    only ever moves toward the price, never away from it."""
     paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
-    r = paper_trading.execute_orders(db, [buy("SOL", 500, stop=190.0, target=260.0)])
+    r = paper_trading.execute_orders(db, [buy("SOL", 500, stop=170.0, target=260.0)])
     assert not r["fills"]
-    assert "cannot move it" in r["rejections"][0]["reason"]
+    assert "cannot widen it" in r["rejections"][0]["reason"]
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT stop_loss FROM paper_positions WHERE code='SOL'").fetchone()
@@ -193,14 +190,14 @@ def test_an_add_on_cannot_ratchet_the_committed_stop(db):
     assert row["stop_loss"] == 180.0, "the committed stop must survive the restate attempt"
 
 
-def test_a_token_restate_that_only_tightens_the_stop_is_refused(db):
-    """The exploit at its most naked: a $0.01 add-on whose sole purpose is to move the
-    stop. It is refused before any cash moves, so the churn stops too."""
+def test_an_add_on_cannot_pull_the_target_in(db):
+    """The other half: banking a winner early by restating a nearer target. Refused before
+    any cash moves, so the churn stops too."""
     paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
     cash_before = paper_trading.portfolio(db)["cash"]
-    r = paper_trading.execute_orders(db, [buy("SOL", 0.01, stop=195.0, target=260.0)])
+    r = paper_trading.execute_orders(db, [buy("SOL", 0.01, stop=180.0, target=205.0)])
     assert not r["fills"]
-    assert "cannot move it" in r["rejections"][0]["reason"]
+    assert "cannot" in r["rejections"][0]["reason"]
     assert paper_trading.portfolio(db)["cash"] == pytest.approx(cash_before)
 
 
@@ -215,6 +212,125 @@ def test_a_genuine_add_on_that_does_not_move_the_levels_still_fills(db):
     row = conn.execute("SELECT stop_loss, take_profit FROM paper_positions WHERE code='SOL'").fetchone()
     conn.close()
     assert row["stop_loss"] == 180.0 and row["take_profit"] == 260.0
+
+
+class TestTheStopRatchet:
+    """The stop trails up behind a winner; the target never moves.
+
+    This asymmetry is the whole strategy, and it was briefly lost. Freezing BOTH levels
+    (2026-09-19) to close a "restate the stop" exploit also removed the trail that was
+    earning the money: the desk had won 78% of 54 round-trips for +$61.83 over 09-17/18
+    with 30 of its 44 stop exits closing ABOVE entry, and went to a 44% win rate and a
+    flat book for the two days it was frozen. Raising a stop cuts risk without touching
+    the upside -- it is not the disposition effect, and these tests pin that apart.
+    """
+
+    def _move(self, db, code, rate):
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (rate, code))
+        conn.commit(); conn.close()
+
+    def _stop(self, db, code="SOL"):
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT stop_loss, initial_stop_loss FROM paper_positions WHERE code=?",
+            (code,)).fetchone()
+        conn.close()
+        return row
+
+    def test_a_stop_can_be_raised_behind_a_winner(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        r = paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 189.0}])
+        assert r["fills"] and not r["rejections"]
+        assert self._stop(db)["stop_loss"] == 189.0
+
+    def test_raising_a_stop_costs_no_cash_and_files_no_trade(self, db):
+        """It is a risk decision, not a transaction. Expressed as a token add-on it paid a
+        fee and left a phantom buy in the ledger; its own side does neither."""
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        cash_before = paper_trading.portfolio(db)["cash"]
+        conn = sqlite3.connect(db)
+        trades_before = conn.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+        conn.close()
+        paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 189.0}])
+        conn = sqlite3.connect(db)
+        trades_after = conn.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+        raises = conn.execute("SELECT from_stop, to_stop FROM paper_stop_raises").fetchall()
+        conn.close()
+        assert paper_trading.portfolio(db)["cash"] == pytest.approx(cash_before)
+        assert trades_after == trades_before
+        assert raises == [(180.0, 189.0)], "the raise is audited even though it is not a trade"
+
+    def test_a_stop_can_never_be_lowered(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 189.0}])
+        r = paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 185.0}])
+        assert not r["fills"] and "only ever moves up" in r["rejections"][0]["reason"]
+        assert self._stop(db)["stop_loss"] == 189.0
+
+    def test_a_stop_pinned_under_spot_is_refused_as_a_disguised_sell(self, db):
+        """SOL marks at 200 with an original risk of 20, so the trail must stay at least
+        10 back: 195 is selling at market with extra steps."""
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        r = paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 195.0}])
+        assert not r["fills"]
+        assert "too close" in r["rejections"][0]["reason"]
+        assert self._stop(db)["stop_loss"] == 180.0
+
+    def test_the_ceiling_does_not_creep_up_as_the_stop_is_tightened(self, db):
+        """Measured off the ORIGINAL risk, not the current stop. Otherwise each raise
+        narrows the gap it is checked against and the trail walks itself to spot."""
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 189.0}])
+        assert self._stop(db)["initial_stop_loss"] == 180.0
+        r = paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 194.0}])
+        assert not r["fills"], "the ceiling is still 189.9, measured from the entry risk"
+
+    def test_an_add_on_may_state_the_already_raised_stop(self, db):
+        """Adding real capital after a trail should not have to pretend the stop never
+        moved -- but it still cannot move the target."""
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 189.0}])
+        r = paper_trading.execute_orders(db, [buy("SOL", 300, stop=189.0, target=260.0)])
+        assert r["fills"] and not r["rejections"]
+        assert self._stop(db)["initial_stop_loss"] == 180.0, "an add-on does not reset the risk"
+
+    def test_a_raise_on_a_coin_not_held_is_refused(self, db):
+        r = paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 189.0}])
+        assert not r["fills"] and "no SOL position" in r["rejections"][0]["reason"]
+
+    def test_a_trailed_position_exits_on_the_raised_stop_above_its_entry(self, db):
+        """The point of the whole mechanism, end to end: SOL is bought at 200, runs to 240,
+        the stop trails up to 220, and the pullback closes the trade at a PROFIT rather
+        than back at the 180 it was opened with. That is how 30 of those 44 stop exits
+        finished green, and it is exactly what the freeze made impossible."""
+        paper_trading.execute_orders(db, [buy("SOL", 1000, stop=180.0, target=260.0)])
+        self._move(db, "SOL", 240.0)
+        r = paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 220.0}])
+        assert r["fills"], r["rejections"]
+        self._move(db, "SOL", 215.0)
+        paper_trading.check_stops(db)
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT exit_kind, realized FROM paper_trades "
+                           "WHERE side='sell' ORDER BY id DESC LIMIT 1").fetchone()
+        open_rows = conn.execute(
+            "SELECT COUNT(*) FROM paper_positions WHERE code='SOL'").fetchone()[0]
+        conn.close()
+        assert open_rows == 0
+        assert row["exit_kind"] == "stop_loss"
+        assert row["realized"] > 0, "a stop exit ABOVE entry is the trail paying for itself"
 
 
 def test_check_stops_closes_a_position_that_breached_its_stop_loss(db):

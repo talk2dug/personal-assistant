@@ -137,6 +137,60 @@ REQUEST_CAPABILITY_TOOLS = [
     }},
 ]
 
+OWNER_REQUEST_TOOLS = [
+    {"type": "function", "function": {
+        "name": "request_from_owner",
+        "description": (
+            "Ask the owner to SUPPLY something you cannot produce yourself and are now "
+            "stopped without -- an API token, an account signup, a URL, a file off his "
+            "disk, or a purchase. This is not for decisions (use the review queue for "
+            "'which of these mockups'); it is for a hard blocker. It lands on his Needs "
+            "You board, and when he answers you are told on your next run. Re-asking for "
+            "the same `name` updates the existing request instead of filing a duplicate, "
+            "so it is safe to call every run while you remain blocked. NEVER fake, stub, "
+            "or route around a missing credential: a pipeline that looks alive while "
+            "producing work that can never ship is the exact failure that killed the "
+            "previous store. Say plainly in your output that you are blocked."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string", "description": "Short label, e.g. 'Printify API token'."},
+            "kind": {
+                "type": "string",
+                "enum": ["secret", "url", "text", "file", "account", "purchase"],
+                "description": (
+                    "secret = API key/password (stored, never shown back). url = a link. "
+                    "text = a plain value like an account id. file = something on his "
+                    "disk to import. account = go sign up for this. purchase = costs money."
+                ),
+            },
+            "name": {
+                "type": "string",
+                "description": (
+                    "Stable machine name you will read the value back by, e.g. "
+                    "'printify_api_key'. Required for anything you consume programmatically; "
+                    "it is also the key that stops duplicate requests."
+                ),
+            },
+            "why": {"type": "string", "description": "What becomes possible once this exists. Be concrete."},
+            "blocks": {"type": "string", "description": "What stays stopped until then, e.g. 'all order fulfilment'."},
+            "instructions": {"type": "string", "description": "Exact steps for him to obtain it, so he does not have to research it."},
+            "priority": {"type": "integer", "description": "1 highest, 3 lowest. 1 means a pipeline is fully halted."},
+            "prompts": {
+                "type": "array", "items": {"type": "string"},
+                "description": (
+                    "REQUIRED when you are asking for generated imagery, above all a new "
+                    "catalogue model: two or three complete, ready-to-paste Leonardo.ai "
+                    "prompts. He generates these in the Leonardo web UI by hand, so an "
+                    "ask without prompts is an ask he cannot action. Write them in full "
+                    "-- subject, age/build, wardrobe, pose, lighting, background, camera "
+                    "-- and make them consistent enough that the same person is "
+                    "recognisable across every product that persona fronts."
+                ),
+            },
+        }, "required": ["title", "kind", "why"]},
+    }},
+]
+
 # Vinyl cutter (Blue Ridge Custom Co). Split out for the same reason as OPS_PLAN_TOOLS:
 # a narrow, self-contained capability that reads better as its own list than as two more
 # entries in the big one.

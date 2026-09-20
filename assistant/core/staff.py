@@ -1000,7 +1000,11 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
     try:
         # Employees have no tools, so any live data they need must be in the prompt.
         briefing = build_feed_briefing(db_path, feeds)
-        prompt = assignment + build_colleague_briefing(db_path, emp.get("briefing_from")) + briefing
+        # Anything the owner supplied since this employee last ran, so a blocker it
+        # reported gets retried rather than re-reported. See owner_requests.
+        from . import owner_requests as _orq
+        prompt = (assignment + build_colleague_briefing(db_path, emp.get("briefing_from"))
+                  + briefing + _orq.unblock_notice(db_path, emp["key"]))
         if "policy" in feeds:
             # The owner's own standing engineering policy, read straight out of his vault.
             # Pure retrieval -- see agent_policy.py. Placed with the other pre-fetched
@@ -1031,16 +1035,18 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
                     "this LLM backend has no engineer() method, so execute-tier "
                     "employees cannot be given real tool access on it")
             from .git_tools import GIT_TOOLS
-            from .business_tools import OPS_PLAN_TOOLS, REQUEST_CAPABILITY_TOOLS
+            from .business_tools import OPS_PLAN_TOOLS, OWNER_REQUEST_TOOLS, REQUEST_CAPABILITY_TOOLS
             output = llm.engineer(
                 prompt, system_prompt=emp["system_prompt"],
-                tools=GIT_TOOLS + OPS_PLAN_TOOLS + REQUEST_CAPABILITY_TOOLS, timeout=timeout,
+                tools=GIT_TOOLS + OPS_PLAN_TOOLS + REQUEST_CAPABILITY_TOOLS + OWNER_REQUEST_TOOLS,
+                timeout=timeout,
                 employee_key=emp["key"])
         else:
-            from .business_tools import REQUEST_CAPABILITY_TOOLS
+            from .business_tools import OWNER_REQUEST_TOOLS, REQUEST_CAPABILITY_TOOLS
             output = llm.research(
                 prompt, system_prompt=emp["system_prompt"], timeout=timeout,
-                tools=REQUEST_CAPABILITY_TOOLS, employee_key=emp["key"])
+                tools=REQUEST_CAPABILITY_TOOLS + OWNER_REQUEST_TOOLS,
+                employee_key=emp["key"])
         status, error = "delivered", None
 
         if "paper" in feeds and output:

@@ -18,6 +18,7 @@ import Finance from './pages/Finance'
 import Grocery from './pages/Grocery'
 import Kitchen from './pages/Kitchen'
 import Media from './pages/Media'
+import Needs from './pages/Needs'
 import Pipelines from './pages/Pipelines'
 import Review from './pages/Review'
 import RfAround from './pages/RfAround'
@@ -35,6 +36,11 @@ export const SECTIONS = [
     context: 'the Schedule section, showing upcoming reminders and the weather forecast' },
   { key: 'email', label: 'Email', element: Email, wide: true,
     context: 'the Email section, showing the inbox and flagged threads' },
+  { key: 'needs', label: 'Needs you', element: Needs, wide: true,
+    context: 'the Needs You board, showing everything the business team is blocked on and '
+      + 'waiting for him to supply -- API keys, accounts, files, purchases -- grouped by '
+      + 'pipeline, with what each one is blocking and any generation prompts they need '
+      + 'him to run' },
   { key: 'review', label: 'Review queue', element: Review, wide: true,
     context: 'the Review queue, showing work waiting on your approval' },
   { key: 'kitchen', label: 'Kitchen', element: Kitchen, wide: true,

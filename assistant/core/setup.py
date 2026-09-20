@@ -7,7 +7,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, paper_trading, personal_db, staff, standing_digest, vision, work_queue
+from . import business_db, db, gpu_bridge, kitchen_db, market_data, meal_plan_db, ops_plans, owner_requests, paper_trading, personal_db, staff, standing_digest, vision, work_queue
 from .business_tools import BusinessClient
 from .caldav_client import CalDAVClient
 from .comfy_client import ComfyClient
@@ -183,6 +183,7 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     staff.init_staff_db(cfg.db_path)
     market_data.init_market_db(cfg.db_path)
     paper_trading.init_paper_db(cfg.db_path)
+    owner_requests.init_owner_requests(cfg.db_path)
     ops_plans.init_ops_plans_db(cfg.db_path)
     work_queue.init_work_queue_db(cfg.db_path)
     # ssh_hosts defaults to {} (no hosts registered) rather than gating on a whole

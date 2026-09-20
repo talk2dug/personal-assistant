@@ -1635,6 +1635,39 @@ def _dispatch_tool_call(
         except ValueError as e:
             return json.dumps({"error": str(e)})
         return json.dumps({"ok": True, "camera": camera["name"], "location": camera["location"]})
+    if name == "request_from_owner":
+        # The supply-side sibling of request_capability. That one asks for PERMISSION the
+        # owner can grant with a click; this asks for a THING only he can obtain -- a
+        # token, an account, a file. Both exist so a stopped employee says so out loud
+        # instead of stubbing around the gap, which is how the previous store shipped a
+        # storefront nobody could buy from for five weeks without anything reporting it.
+        from . import owner_requests
+        emp = staff.get_staff(db_path, employee_key) if employee_key else None
+        try:
+            req_id = owner_requests.raise_request(
+                db_path, requesting_user_id,
+                title=arguments.get("title", "(unnamed request)"),
+                kind=arguments.get("kind", "text"),
+                name=(arguments.get("name") or None),
+                why=arguments.get("why"),
+                blocks=arguments.get("blocks"),
+                instructions=arguments.get("instructions"),
+                agent_key=employee_key or None,
+                project_id=(emp["project_id"] if emp and "project_id" in emp.keys() else None),
+                priority=int(arguments.get("priority") or 2),
+                prompts=[str(x) for x in (arguments.get("prompts") or []) if str(x).strip()],
+            )
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+        return json.dumps({
+            "ok": True, "request_id": req_id,
+            "message": (
+                "Filed on the owner's Needs You board. You will be told on a later run "
+                "once he supplies it. Until then state plainly that you are blocked -- do "
+                "not fabricate, stub, or work around the missing item."
+            ),
+        })
+
     if name == "request_capability":
         # The one tool every employee has regardless of tier -- see
         # business_tools.REQUEST_CAPABILITY_TOOLS. Approving the review item this

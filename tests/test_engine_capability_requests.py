@@ -80,10 +80,17 @@ def test_rejecting_the_request_grants_nothing(db_path, owner_id):
 
 
 def test_assign_gives_every_tier_the_request_capability_tool(db_path):
-    """Even the otherwise tool-less research tier gets exactly this one tool -- it can't
-    act on anything by itself (it only ever files a review item), so this doesn't loosen
-    'employees produce, they do not act'."""
-    from assistant.core.business_tools import REQUEST_CAPABILITY_TOOLS
+    """Even the otherwise tool-less research tier gets these -- neither can act on
+    anything by itself (one files a review item, the other files a request on the owner's
+    board), so this doesn't loosen 'employees produce, they do not act'.
+
+    There are two such universal tools now: request_capability asks for PERMISSION the
+    owner can grant with a click, request_from_owner asks for a THING only he can obtain.
+    An employee needs both, because being un-permitted and being un-equipped are different
+    ways of being stopped and were previously reported as the same shrug."""
+    from assistant.core.business_tools import OWNER_REQUEST_TOOLS, REQUEST_CAPABILITY_TOOLS
+
+    universal = REQUEST_CAPABILITY_TOOLS + OWNER_REQUEST_TOOLS
 
     research_key = staff.hire(db_path, "Copywriter", "Writes marketing copy.")["key"]
     execute_key = staff.hire(db_path, "Systems Engineer", "Runs infrastructure.")["key"]
@@ -107,8 +114,8 @@ def test_assign_gives_every_tier_the_request_capability_tool(db_path):
     staff.assign(db_path, llm, execute_key, "ship something")
 
     assert llm.research_kwargs["employee_key"] == research_key
-    assert llm.research_kwargs["tools"] == REQUEST_CAPABILITY_TOOLS
+    assert llm.research_kwargs["tools"] == universal
     assert llm.engineer_kwargs["employee_key"] == execute_key
-    request_tool_names = {t["function"]["name"] for t in REQUEST_CAPABILITY_TOOLS}
+    request_tool_names = {t["function"]["name"] for t in universal}
     engineer_tool_names = {t["function"]["name"] for t in llm.engineer_kwargs["tools"]}
     assert request_tool_names <= engineer_tool_names

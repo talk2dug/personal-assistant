@@ -51,6 +51,7 @@ from .routes.crypto import router as crypto_router
 from .routes.devices import router as devices_router
 from .routes.email import router as email_router
 from .routes.email_drafts import router as email_drafts_router
+from .routes.needs import router as needs_router
 from .routes.notifications import router as notifications_router
 from .routes.finance import router as finance_router
 from .routes.grocery import router as grocery_router
@@ -110,6 +111,7 @@ def create_app(
     app.include_router(agents_router)
     app.include_router(active_work_router)
     app.include_router(crypto_router)
+    app.include_router(needs_router)
     app.include_router(review_router)
     app.include_router(devices_router)
     app.include_router(notifications_router)

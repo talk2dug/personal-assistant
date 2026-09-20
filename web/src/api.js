@@ -61,6 +61,14 @@ export const api = {
 
   agentStatus: () => request('/api/agents/status'),
 
+  // The "needs you" board: what the business team is blocked on. Secrets travel one
+  // way -- provideNeed sends a value up, and nothing ever sends one back down.
+  needs: () => request('/api/needs'),
+  provideNeed: (id, value) =>
+    request(`/api/needs/${id}/provide`, { method: 'POST', body: JSON.stringify({ value }) }),
+  setNeedStatus: (id, status, note) =>
+    request(`/api/needs/${id}/status`, { method: 'POST', body: JSON.stringify({ status, note }) }),
+
   cryptoDashboard: () => request('/api/crypto/dashboard'),
 
   scheduleReminders: (scope) => request(`/api/schedule/reminders${scope ? `?scope=${scope}` : ''}`),

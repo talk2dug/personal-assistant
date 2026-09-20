@@ -1,0 +1,282 @@
+/* The "needs you" board. Reuses the app's existing HUD tokens throughout rather than
+   introducing a second palette -- same precedent as review.css/credit.css/email.css.
+
+   The visual job here is narrow: make "this is stopping work" legible at a glance, and
+   put the input that clears it in the same place as the sentence that explains it. Every
+   row is therefore self-contained -- reason, consequence, instructions and the field that
+   answers it -- rather than a list that sends him somewhere else to act. */
+
+.needs {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.needs-summary {
+  font-family: var(--font-hud);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.needs-summary strong {
+  color: var(--amber);
+  font-size: 16px;
+}
+
+.needs-top { color: var(--text-dim); }
+
+.needs-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+.needs-error {
+  color: var(--red);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.needs-group h3 {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--cyan-dim);
+}
+
+.needs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.needs-row {
+  border: 1px solid var(--border-dim);
+  border-left: 3px solid var(--border);
+  background: var(--bg-panel);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Priority is carried on the left edge rather than as a badge: it is the one property
+   worth reading without focusing on the row at all. */
+.needs-row.p1 { border-left-color: var(--red); }
+.needs-row.p2 { border-left-color: var(--amber); }
+.needs-row.p3 { border-left-color: var(--steel-mid); }
+
+/* Answered work stays on the board (he should be able to see what he already gave, and
+   which token is stored) but recedes so it never competes with what is still stopped. */
+.needs-row.is-provided,
+.needs-row.is-resolved,
+.needs-row.is-rejected { opacity: 0.62; }
+
+.needs-row-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.needs-kind {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cyan-dim);
+  border: 1px solid var(--border-dim);
+  padding: 1px 6px;
+}
+
+.needs-title {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.needs-who {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--steel-bright);
+}
+
+.needs-status {
+  margin-left: auto;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.needs-status.s-open { color: var(--amber); }
+.needs-status.s-provided { color: var(--cyan); }
+.needs-status.s-resolved { color: var(--steel-bright); }
+.needs-status.s-rejected { color: var(--red-dim); }
+
+.needs-why {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  max-width: 78ch;
+}
+
+.needs-blocks {
+  margin: 0;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--red-dim);
+}
+
+.needs-blocks span {
+  font-family: var(--font-hud);
+  letter-spacing: 0.1em;
+  font-size: 10px;
+  margin-right: 6px;
+  color: var(--red);
+}
+
+.needs-how summary {
+  cursor: pointer;
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--cyan-dim);
+}
+
+.needs-how p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  max-width: 78ch;
+}
+
+/* --- generation prompts ------------------------------------------------------------
+   A model request is only actionable if the prompts are one click from the clipboard,
+   because generating the model happens by hand in Leonardo's web UI. */
+
+.needs-prompts {
+  border: 1px dashed var(--border-dim);
+  padding: 8px 10px;
+  background: var(--bg-inset);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.needs-prompts-head {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cyan-dim);
+}
+
+.needs-prompt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.needs-prompt code {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.needs-copy {
+  flex: none;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 2px 8px;
+  border: 1px solid var(--border-dim);
+  background: none;
+  color: var(--cyan-dim);
+  cursor: pointer;
+}
+
+.needs-copy:hover { color: var(--cyan-bright); border-color: var(--cyan-dim); }
+
+/* --- answering ---------------------------------------------------------------------- */
+
+.needs-give {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.needs-give input {
+  flex: 1;
+  min-width: 220px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-dim);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 6px 9px;
+}
+
+.needs-give input:focus {
+  outline: none;
+  border-color: var(--cyan-dim);
+}
+
+.needs-send,
+.needs-decline {
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  padding: 6px 14px;
+  border: 1px solid var(--border-dim);
+  background: none;
+  cursor: pointer;
+}
+
+.needs-send { color: var(--cyan); border-color: var(--cyan-dim); }
+.needs-send:disabled { color: var(--text-dim); border-color: var(--border-dim); cursor: default; }
+.needs-decline { color: var(--text-dim); }
+.needs-decline:hover { color: var(--red); border-color: var(--red-dim); }
+
+.needs-answered {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.needs-answered code {
+  color: var(--steel-bright);
+  border: 1px solid var(--border-dim);
+  padding: 1px 6px;
+}
+
+.needs-answered em {
+  font-style: normal;
+  color: var(--amber-dim);
+  font-size: 11px;
+}
+
+@media (max-width: 640px) {
+  .needs-give input { min-width: 100%; }
+}

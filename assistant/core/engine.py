@@ -1196,8 +1196,11 @@ TOOLS = [
 ]
 
 SYSTEM_PROMPT = (
-    "You are J.A.R.V.I.S., an advanced, highly efficient AI assistant. You speak with a "
-    "calm, understated British cadence and always address the user as 'sir'. However, "
+    "You are J.A.R.V.I.S., an advanced, highly efficient AI assistant. You serve exactly one "
+    "person -- your owner, Jack Swayze -- and always address him as 'sir'. His name is Jack. "
+    "Account emails or handles such as 'talk2dug' are NOT his name: never call him Doug or Dug, "
+    "and never infer his name from an email address. You speak with a "
+    "calm, understated British cadence. However, "
     "your helpfulness is matched by a layer of dry, deadpan sarcasm and subtle dark "
     "humor. Deliver witty observations and brief, understated jabs about the user's "
     "choices, questions, or lack of productivity, but remain ultimately loyal and "
@@ -1389,11 +1392,21 @@ KROGER_SYSTEM_NOTE = (
 )
 
 
+VOICE_BRIEF_NOTE = (
+    " IMPORTANT -- this turn is a spoken voice conversation: your reply is read aloud to him in "
+    "real time (a phone call or a room terminal), so keep it SHORT -- one or two sentences, a few "
+    "seconds of speech. Never read out long lists, full reports, or every item you found; give "
+    "the one-line headline and offer to send the details or go deeper only if he asks. Answer the "
+    "exact question asked, don't volunteer a status dump. A ten-second answer he can follow beats "
+    "a minute-long monologue he hangs up on."
+)
+
+
 def build_system_prompt(
     tz_name: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     now: str | None = None, web_search: bool = False, business=None, personal=None,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
-    recipe=None, cellular_ctx=None,
+    recipe=None, cellular_ctx=None, voice_brief: bool = False,
 ) -> str:
     """Builds Jarvis's system prompt with whichever integration notes apply.
 
@@ -1445,7 +1458,7 @@ def build_system_prompt(
         # Always on: the tables exist unconditionally and the tools report a stale
         # feed honestly when the radio worker is not running.
         radio_note=RADIO_SYSTEM_NOTE,
-    )
+    ) + (VOICE_BRIEF_NOTE if voice_brief else "")
 
 
 def select_tools(
@@ -2220,6 +2233,7 @@ def handle_message(
     cellular_ctx: "CellularContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
     local_llm=None, viewing_context: str | None = None, source: str | None = None,
+    voice_brief: bool = False,
 ) -> str:
     """Runs one user turn through the LLM (with tool-calling), persists the
     conversation, and returns the reply text. image_bytes (a JPEG snapshot from the
@@ -2285,7 +2299,7 @@ def handle_message(
             web_search=getattr(llm, "web_search", False), business=business, personal=personal,
             airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
             letterstream=letterstream, git_ops=git_ops, recipe=recipe,
-            cellular_ctx=cellular_ctx,
+            cellular_ctx=cellular_ctx, voice_brief=voice_brief,
         )
         try:
             reply = llm.converse(
@@ -2303,7 +2317,7 @@ def handle_message(
             tz_name, era, phone, mail, obsidian, home_assistant, now=now, business=business,
             personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
             letterstream=letterstream, git_ops=git_ops, recipe=recipe,
-            cellular_ctx=cellular_ctx)}
+            cellular_ctx=cellular_ctx, voice_brief=voice_brief)}
     ] + history
     if image_bytes is not None and messages[-1]["role"] == "user":
         messages[-1] = {**messages[-1], "images": [image_bytes]}

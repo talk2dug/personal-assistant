@@ -256,7 +256,7 @@ async def turn(device_id: str, request: Request, audio: UploadFile):
 
     call = functools.partial(
         handle_message, cfg.db_path, request.app.state.llm, user_id, transcript,
-        tz_name=cfg.timezone, **gated_contexts,
+        tz_name=cfg.timezone, voice_brief=True, **gated_contexts,
     )
     try:
         reply = await loop.run_in_executor(None, call)

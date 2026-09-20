@@ -20,6 +20,9 @@ export default function AroundHouse({ rf, error, onOpen }) {
   const toName = devices.filter((d) => d.seen_last_24h && !d.registered).length
   const visits24 = traffic.vehicle_visits_last_24h ?? 0
   const perDay = traffic.vehicle_visits_per_day
+  // Passing cars in the last 12h; falls back to the window class count until the Pi
+  // baseline has been redeployed + re-polled with the new passing_12h field.
+  const passing12 = traffic.passing_12h ?? (counts['vehicle-passing'] || 0)
 
   const meta = rf?.feed?.available
     ? (stale ? 'sensor stale' : `${devices.filter((d) => d.seen_last_24h).length} in 24h`)
@@ -70,7 +73,7 @@ export default function AroundHouse({ rf, error, onOpen }) {
             )}
             {watch === 0 && toName === 0 && (
               <p className="cc-empty is-inline">
-                {(counts['unknown-new'] || 0)} new · {(counts['vehicle-passing'] || 0)} passing · nothing to flag
+                {(counts['unknown-new'] || 0)} new · {passing12} passing 12h · nothing to flag
               </p>
             )}
           </div>

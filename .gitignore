@@ -34,3 +34,9 @@ web/dist/
 
 # Local DB snapshots — never commit (they are full copies of jarvis.db)
 jarvis.backup-*.db
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# baresip account file holds the SIP password -- keep it out of git
+voip_node/bare/accounts

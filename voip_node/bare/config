@@ -1,0 +1,38 @@
+# Jarvis VoIP bridge baresip config -- dedicated dir, leaves ~/.baresip untouched.
+poll_method		epoll
+module_path		/usr/lib/baresip/modules
+
+# --- audio codecs (telephone) ---
+module			g711.so
+
+# --- audio driver: ALSA snd-aloop loopback ONLY (never the physical card) ---
+module			alsa.so
+
+# --- SIP/NAT stack (mirrors the known-working registration) ---
+module			stun.so
+module			turn.so
+module			ice.so
+
+module_tmp		uuid.so
+module_tmp		account.so
+
+# --- app modules ---
+module_app		ctrl_tcp.so
+module_app		menu.so          # REQUIRED: implements answermode=auto (auto-answer)
+
+# --- route all call audio through the loopback (baresip owns device 0) ---
+audio_player		alsa,hw:Loopback,0,0
+audio_source		alsa,hw:Loopback,0,1
+audio_alert		alsa,hw:Loopback,0,0
+ausrc_srate		8000
+auplay_srate		8000
+ausrc_channels		1
+auplay_channels		1
+ausrc_format		s16
+auplay_format		s16
+auenc_format		s16
+audec_format		s16
+audio_buffer		20-160
+
+# --- control interface ---
+ctrl_tcp_listen		127.0.0.1:4444

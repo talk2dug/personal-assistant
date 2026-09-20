@@ -157,6 +157,19 @@
 .rf-name-buttons { display: flex; gap: 8px; }
 .rf-name-err { margin: 0; color: var(--amber); font-size: 12px; }
 
+/* the one-line "passing cars in the last 12h" summary that stands in for the per-car rows */
+.rf-passing-summary {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 10px; padding: 6px 12px;
+  background: var(--bg-inset); border-left: 2px solid var(--border-dim);
+}
+.rf-passing-count { font-family: var(--font-mono); font-size: 18px; color: var(--text); }
+.rf-passing-label {
+  font-family: var(--font-hud); font-size: 10px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-dim);
+}
+.rf-passing-hidden { font-size: 11px; color: var(--text-faint); margin-left: auto; }
+
 .rf-hint { margin: 12px 2px 0; font-size: 12px; color: var(--text-faint); font-style: italic; }
 
 .rf-toggle {

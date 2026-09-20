@@ -1,0 +1,3 @@
+# baresip account for VoIP.ms -- copy to ~/.baresip/bare/accounts (or the bridge's bare/ dir)
+# on the Pi and fill in the real sub-account password. NEVER commit the filled-in file.
+<sip:YOUR_SUBACCT@washington2.voip.ms>;auth_user=YOUR_SUBACCT;auth_pass=YOUR_SIP_PASSWORD;regint=300;answermode=auto;audio_codecs=PCMU,PCMA

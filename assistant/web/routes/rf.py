@@ -98,8 +98,18 @@ def _dashboard(cfg) -> dict:
     db_path = cfg.db_path
     st = radio.feed_status(db_path)
     rep = radio.rf_report(db_path)
+    traffic = rep.get("traffic", {}) if rep else {}
+    # One-off passing cars (class "vehicle-passing" == a single visit) clutter the table
+    # with a row each, so they are dropped here and represented instead by a single
+    # summary: the 12h passing total from the baseline plus how many single-pass rows we
+    # folded away. Recurring vehicles (vehicle-repeat/regular/watch) and every non-vehicle
+    # device stay as their own row.
     devices = []
+    hidden_passing = 0
     for d in (rep.get("devices", []) if rep else []):
+        if d.get("class") == "vehicle-passing":
+            hidden_passing += 1
+            continue
         entry = dict(d)
         entry["seen_last_24h"] = _seen_last_24h(d)
         devices.append(entry)
@@ -113,7 +123,15 @@ def _dashboard(cfg) -> dict:
             "window_days": rep.get("window_days") if rep else None,
         },
         "counts": rep.get("counts", {}) if rep else {},
-        "traffic": rep.get("traffic", {}) if rep else {},
+        "traffic": traffic,
+        # Summary of the passing cars folded out of the table above. passing_12h is the
+        # total cars that drove by in the last 12h (from the baseline; None until a Pi
+        # redeploy + re-poll lands the new field), hidden_passing is how many single-pass
+        # rows we removed from this response.
+        "passing_summary": {
+            "passing_12h": traffic.get("passing_12h"),
+            "hidden_passing": hidden_passing,
+        },
         "alerts": rep.get("alerts", []) if rep else [],
         "devices": devices,
         "device_types": list(VALID_DEVICE_TYPES),

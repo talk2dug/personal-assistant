@@ -189,7 +189,9 @@ class GPUBridge:
 
     def loaded_models(self) -> list[dict]:
         try:
-            resp = httpx.get(f"{self.host}/api/ps", timeout=10.0)
+            # Short: this runs on every status poll. A sleeping/racing GPU box must degrade
+            # to "unreachable" quickly, not hold a request open for ten seconds.
+            resp = httpx.get(f"{self.host}/api/ps", timeout=2.0)
             resp.raise_for_status()
             return [
                 {"model": m["name"], "vram_gb": round(m.get("size_vram", 0) / 1e9, 1)}
@@ -201,7 +203,7 @@ class GPUBridge:
 
     def installed_models(self) -> list[dict]:
         try:
-            resp = httpx.get(f"{self.host}/api/tags", timeout=15.0)
+            resp = httpx.get(f"{self.host}/api/tags", timeout=2.0)
             resp.raise_for_status()
             return [
                 {"model": m["name"], "size_gb": round(m.get("size", 0) / 1e9, 1)}
@@ -212,7 +214,7 @@ class GPUBridge:
 
     def reachable(self) -> bool:
         try:
-            return httpx.get(f"{self.host}/api/version", timeout=5.0).status_code == 200
+            return httpx.get(f"{self.host}/api/version", timeout=2.0).status_code == 200
         except Exception:
             return False
 

@@ -8,6 +8,7 @@ different moments produces a picture that was never actually true at any instant
 Everything here is read-only. The office is a window onto the agents, not a control
 panel — starting work still goes through chat, where the confirmation gate lives.
 """
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
@@ -127,10 +128,21 @@ async def status(request: Request):
         "loaded_models": [], "comfyui": False, "jobs": [],
     }
     if bridge is not None:
-        snapshot = bridge.status()
+        # bridge.status()/jobs() make BLOCKING http probes to the GPU box (Ollama + ComfyUI).
+        # They must NEVER run on the event loop: this endpoint is polled constantly by the
+        # board, so when that box is slow or away -- exactly when Jack is racing on it, or
+        # when Ollama is stopped -- each multi-second connect froze the ENTIRE web server and
+        # every other request queued behind it ("failed to fetch" on the board and the wall
+        # terminals, modals that never load). Offload to a worker thread so a sleeping GPU
+        # box degrades to "unreachable" instead of taking the whole UI down.
+        loop = asyncio.get_running_loop()
+        snapshot = await loop.run_in_executor(None, bridge.status)
         # Running first so the office can seat the active job at the machine and line the
         # rest up behind it in submission order.
-        gpu_jobs = bridge.jobs(status="running", limit=5) + bridge.jobs(status="queued", limit=15)
+        gpu_jobs = await loop.run_in_executor(
+            None,
+            lambda: bridge.jobs(status="running", limit=5) + bridge.jobs(status="queued", limit=15),
+        )
         gpu = {
             "configured": True,
             "reachable": snapshot["reachable"],

@@ -288,3 +288,18 @@ class TestSecretDetection:
         rid = orq.raise_request(db, 1, title="Public id", kind="text", name="public_key")
         orq.provide(db, 1, rid, "this-is-public", is_secret=False)
         assert orq.list_requests(db, 1)[0]["value"] == "this-is-public"
+
+
+def test_a_repeat_ask_corrects_its_headline_too(db):
+    """The title is the line he reads first. When an agent learns its ask was mis-framed --
+    'TikTok Shop seller approval' turning out to be 'TikTok ads API access', because the
+    listing side was already handled by a Shopify channel -- a corrected body under a stale
+    headline is worse than either, since the headline is what he decides from."""
+    rid = ask(db, title="TikTok Shop seller approval", name="tiktok_access_token",
+              kind="account", why="need to list products")
+    ask(db, title="TikTok ads API access (not the Shop listing)", name="tiktok_access_token",
+        kind="account", why="listings already covered by the Shopify channel")
+    item = orq.list_requests(db, 1)[0]
+    assert item["id"] == rid, "still one request, not two"
+    assert item["title"] == "TikTok ads API access (not the Shop listing)"
+    assert item["why"] == "listings already covered by the Shopify channel"

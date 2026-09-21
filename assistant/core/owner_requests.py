@@ -196,11 +196,12 @@ def raise_request(db_path: str, owner_user_id: int, title: str, kind: str, *,
             if row is not None:
                 conn.execute(
                     """UPDATE owner_requests
-                           SET why = COALESCE(?, why), instructions = COALESCE(?, instructions),
+                           SET title = ?,
+                               why = COALESCE(?, why), instructions = COALESCE(?, instructions),
                                blocks = COALESCE(?, blocks), priority = MIN(priority, ?),
                                prompts = COALESCE(?, prompts)
                          WHERE id = ?""",
-                    (why, instructions, blocks, priority,
+                    (title, why, instructions, blocks, priority,
                      json.dumps(prompts) if prompts else None, row["id"]))
                 conn.commit()
                 return int(row["id"])

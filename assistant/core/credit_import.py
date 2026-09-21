@@ -111,18 +111,71 @@ def detect_bureau(text: str) -> str | None:
     return min(hits)[1] if hits else None
 
 
+# Only labels that genuinely announce a score. The bare word "credit" was here once and
+# was catastrophic: in a CREDIT report that word sits beside every limit on every page, so
+# "Credit Limit: $750" was read as a credit score of 750 and stored as fact. A score is a
+# number the whole repair strategy is steered by -- a wrong one is far worse than none.
+_SCORE_LABEL = re.compile(
+    r"(?:FICO|VantageScore|Vantage|credit\s+score|score)", re.I)
+
+# If any of these sit between the label and the number, the number is money or a count,
+# not a score.
+_NOT_A_SCORE = ("limit", "balance", "payment", "due", "amount", "high", "credit line",
+                "utilization", "utilisation", "inquiries", "accounts")
+
+# FICO and VantageScore both top out at 850. Anything above it is a dollar figure, a year
+# or a reference number wearing a score's clothes.
+SCORE_MIN, SCORE_MAX = 300, 850
+
+
 def detect_score(text: str):
-    """A score if the report states one. Bounded to the real FICO/Vantage range so a
-    stray four-digit number or a year is not read as a credit score."""
-    # [^\n] rather than \D between the label and the number: a lazy non-digit
-    # scan stops dead on the "3" of "VantageScore 3.0: 642" and never reaches the score.
-    for pattern in (r"(?:FICO|VantageScore|Vantage|credit)[^\n]{0,30}?\b(\d{3})\b",
-                    r"\bscore\b[^\n]{0,20}?\b(\d{3})\b"):
-        for match in re.finditer(pattern, text or "", re.I):
-            value = int(match.group(1))
-            if 300 <= value <= 900:
+    """The credit score, but only when the report actually says so.
+
+    Deliberately conservative in every direction: an unfound score is a blank field he can
+    type in, while an invented one silently misdirects every dispute and payoff decision
+    made from it.
+    """
+    for label in _SCORE_LABEL.finditer(text or ""):
+        window = (text or "")[label.end():label.end() + 28]
+        if any(word in window.lower() for word in _NOT_A_SCORE):
+            continue
+        for number in re.finditer(r"(?<![\d.$])(\d{3})(?![\d.])", window):
+            # A "$" anywhere before the digits in this window means money, not a score.
+            if "$" in window[:number.start()]:
+                continue
+            value = int(number.group(1))
+            if SCORE_MIN <= value <= SCORE_MAX:
                 return value
     return None
+
+
+
+# Phrases that mean a block is report furniture -- a page header, a section title, a
+# summary band -- rather than an account. A real upload produced a tradeline whose creditor
+# was "Your TransUnion Credit Report Personal", with a limit and a status invented from
+# whatever numbers happened to be nearby. An imaginary account on a credit report is worse
+# than a missing one: it can be disputed, reasoned about, and paid.
+_NOT_A_CREDITOR = (
+    "credit report", "personal information", "account summary", "report summary",
+    "prepared for", "page ", "table of contents", "your report", "file number",
+    "consumer statement", "score factors", "inquiries", "public records",
+    "dispute", "contact us", "how to read", "glossary",
+)
+
+
+def looks_like_an_account(line: dict) -> bool:
+    """Whether a parsed block is really a tradeline.
+
+    Two rules, both learned from one bad import. The creditor must not read as report
+    furniture, and there must be at least one money figure -- an account with no balance,
+    no limit and nothing past due is not an account, it is a heading that happened to sit
+    near a number.
+    """
+    creditor = (line.get("creditor") or "").lower()
+    if not creditor or any(phrase in creditor for phrase in _NOT_A_CREDITOR):
+        return False
+    return any(line.get(field) is not None
+               for field in ("balance", "credit_limit", "past_due"))
 
 
 def parse_tradelines(text: str) -> dict:
@@ -178,7 +231,7 @@ def parse_tradelines(text: str) -> dict:
         opened = re.search(r"opened\D{0,16}(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})",
                            chunk, re.I)
 
-        tradelines.append({
+        candidate = {
             "creditor": creditor[:60],
             "account_last4": last4,
             "kind": kind,
@@ -187,21 +240,51 @@ def parse_tradelines(text: str) -> dict:
             "credit_limit": credit_limit,
             "past_due": past_due,
             "opened_on": opened.group(1) if opened else None,
-        })
+        }
+        # Rejected candidates are counted, never silently dropped: the count is what tells
+        # him the parse was imperfect rather than his credit being clean.
+        if looks_like_an_account(candidate):
+            tradelines.append(candidate)
+        else:
+            unparsed.append(redact(chunk[:110]))
 
     return {"tradelines": tradelines, "unparsed": unparsed}
+
+
+def diagnose(text: str, parsed: dict) -> str:
+    """Why an import found nothing, in language that points at the fix.
+
+    "0 accounts parsed" is useless on its own -- a scanned PDF and an unrecognised layout
+    produce the identical count and need completely different responses. The first needs a
+    different export; the second needs the parser taught. Saying which is the difference
+    between a dead end and a next step.
+    """
+    chars = len((text or "").strip())
+    found = len(parsed.get("tradelines") or [])
+    if chars == 0:
+        return ("No text at all could be extracted. This is almost certainly a SCANNED or "
+                "image-only PDF -- the pages are pictures, not text. Re-download it as a "
+                "text/HTML export, or print-to-PDF from the bureau's web view, and the "
+                "accounts will come through.")
+    if found == 0:
+        return (f"Read {chars:,} characters of text, but recognised no accounts in it. The "
+                f"text came through fine, so this is a LAYOUT this parser has not been "
+                f"taught yet -- it needs tuning against this bureau's format rather than a "
+                f"different file.")
+    return f"Read {chars:,} characters and recognised {found} account(s)."
 
 
 def parse_report(path: str) -> dict:
     """Everything readable about one report file, with nothing sensitive retained."""
     text = extract_text(path)
     if not (text or "").strip():
-        return {"bureau": None, "score": None, "tradelines": [], "file": os.path.basename(path),
-                "unparsed": ["no text could be extracted -- if this is a scanned PDF it "
-                             "needs an export with selectable text, or the accounts typed in"]}
+        empty = {"tradelines": [], "unparsed": ["no text could be extracted"]}
+        return {"bureau": None, "score": None, "file": os.path.basename(path),
+                "chars": 0, "diagnosis": diagnose("", empty), **empty}
     parsed = parse_tradelines(text)
     return {"bureau": detect_bureau(text), "score": detect_score(text),
-            "file": os.path.basename(path), "chars": len(text), **parsed}
+            "file": os.path.basename(path), "chars": len(text),
+            "diagnosis": diagnose(text, parsed), **parsed}
 
 
 # --- storage -----------------------------------------------------------------------------
@@ -225,9 +308,8 @@ def store_report(db_path: str, owner_user_id: int, parsed: dict, *, bureau: str 
     report_id = personal_db.add_credit_report(
         db_path, owner_user_id, bureau=chosen, pulled_on=pulled,
         score=parsed.get("score"), source=source or parsed.get("file"),
-        notes=(f"Imported from {parsed.get('file')}; "
-               f"{len(parsed.get('tradelines') or [])} accounts parsed, "
-               f"{len(parsed.get('unparsed') or [])} blocks unreadable."))
+        notes=(f"Imported from {parsed.get('file')}. "
+               f"{parsed.get('diagnosis') or ''}"))
 
     stored, rejected = 0, []
     for line in parsed.get("tradelines") or []:
@@ -240,6 +322,8 @@ def store_report(db_path: str, owner_user_id: int, parsed: dict, *, bureau: str 
 
     return {"report_id": report_id, "bureau": chosen, "pulled_on": pulled,
             "score": parsed.get("score"), "tradelines_stored": stored,
+            "chars_read": parsed.get("chars", 0),
+            "diagnosis": parsed.get("diagnosis"),
             "rejected": rejected, "unparsed": parsed.get("unparsed") or []}
 
 

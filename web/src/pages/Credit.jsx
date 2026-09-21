@@ -114,11 +114,15 @@ function ReportImport({ onImported }) {
             {result.score ? ` · score ${result.score}` : ''} ·{' '}
             <strong>{result.tradelines_stored}</strong> accounts stored
           </p>
-          {(result.unparsed?.length > 0 || result.rejected?.length > 0) && (
+          {result.diagnosis && (
+            <p className={result.tradelines_stored ? 'credit-hint' : 'credit-warn'}>
+              {result.diagnosis}
+            </p>
+          )}
+          {result.tradelines_stored > 0 && result.unparsed?.length > 0 && (
             <p className="credit-warn">
-              {result.unparsed?.length || 0} block(s) could not be read
-              {result.rejected?.length ? `, ${result.rejected.length} rejected` : ''} — check
-              those accounts by hand rather than assuming they are absent.
+              {result.unparsed.length} block(s) could not be read — check those accounts by
+              hand rather than assuming they are absent.
             </p>
           )}
         </div>

@@ -104,6 +104,34 @@ class TestParsing:
     def test_the_score_is_read_when_stated(self):
         assert ci.detect_score(REPORT) == 642
 
+    @pytest.mark.parametrize("text", [
+        "Credit Limit: $750",
+        "Credit Card ending 1234 Limit 750",
+        "High Balance 750",
+        "Revolving credit account 750 dollars",
+        "Total accounts 750",
+        "Payment amount 450",
+        "Score 999",
+    ])
+    def test_a_number_that_is_not_a_score_is_never_read_as_one(self, text):
+        """The bug this exists for: the bare word "credit" used to trigger detection, and
+        in a CREDIT report that word sits beside every limit on every page. A real upload
+        came back claiming a score of 750 that was actually a $750 credit limit -- stored
+        as fact, and every dispute and payoff decision would have been steered by it.
+
+        An unfound score is a blank field he can fill in. An invented one is silent and
+        wrong, so this errs toward None in every direction.
+        """
+        assert ci.detect_score(text) is None
+
+    @pytest.mark.parametrize("text,expected", [
+        ("Your FICO Score 8 is 712", 712),
+        ("VantageScore 3.0: 642", 642),
+        ("Credit Score: 688", 688),
+    ])
+    def test_a_real_score_is_still_read(self, text, expected):
+        assert ci.detect_score(text) == expected
+
     def test_a_year_is_not_mistaken_for_a_score(self):
         """A stray number in the right range would otherwise become his credit score."""
         assert ci.detect_score("Report generated 2026. No score included.") is None
@@ -121,6 +149,22 @@ class TestParsing:
         collection = next(t for t in lines if "MIDLAND" in t["creditor"].upper())
         assert collection["kind"] == "collections"
         assert collection["past_due"] == 842.5
+
+    def test_report_furniture_is_not_turned_into_an_account(self):
+        """A real upload produced a tradeline whose creditor was "Your TransUnion Credit
+        Report Personal", with a limit and a status invented from nearby numbers. An
+        imaginary account is worse than a missing one: it can be disputed, reasoned about
+        and paid."""
+        header = ("Your TransUnion Credit Report Personal Information "
+                  "Account number ending 4677 Credit Limit $608 Status open")
+        result = ci.parse_tradelines(header)
+        assert result["tradelines"] == []
+        assert result["unparsed"], "and it is counted, not silently dropped"
+
+    def test_a_block_with_no_money_at_all_is_not_an_account(self):
+        """A heading that happened to sit near a number is not a tradeline."""
+        block = "SOME BANK Account opened 01/01/2020"
+        assert ci.parse_tradelines(block)["tradelines"] == []
 
     def test_no_full_account_number_is_ever_stored(self):
         text = REPORT.replace("****5678", "4147202512345678")

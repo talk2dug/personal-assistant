@@ -15,10 +15,12 @@ recipe/confirm and Kroger's cart writes.
 """
 import asyncio
 import functools
+import os
+import tempfile
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
-from ...core import personal_db
+from ...core import credit_import, personal_db
 from ...core.personal_tools import BUREAU_ADDRESSES
 from ..auth import require_owner
 
@@ -293,3 +295,66 @@ async def track_letter(letter_id: int, request: Request):
     if cert and cert != letter.get("tracking_number"):
         personal_db.update_dispute_letter_tracking(cfg.db_path, user["id"], letter_id, cert)
     return {"ok": True, "tracking": result}
+
+
+# --- report import -----------------------------------------------------------------------
+#
+# The Credit Specialist has had nothing to work from since it was hired: credit.py's own
+# briefing reads "NO CREDIT REPORT UPLOADED YET". This is the way in, and it is a repeat
+# path on purpose -- he re-uploads after each pull and compare() shows what moved, which is
+# the only way anyone can tell whether the repair work is doing anything.
+#
+# Parsing is local and deterministic (see credit_import): no model reads the file, and only
+# creditor / last-4 / balance / limit / status / dates are stored. The upload is written to
+# a temp file and deleted in a finally, because the one copy of a credit report this system
+# should keep is the structured rows, not the PDF.
+
+# A credit report is tens of pages, not tens of megabytes. The cap is here so a mis-picked
+# file cannot fill the disk or hold a worker open reading it.
+MAX_REPORT_BYTES = 40 * 1024 * 1024
+
+
+@router.post("/reports/import")
+async def import_report(request: Request, file: UploadFile = File(...),
+                        bureau: str | None = Form(None), pulled_on: str | None = Form(None)):
+    """Take an uploaded report, parse it locally, store what it says.
+
+    Returns what was stored AND what could not be read. That second half is not optional:
+    a report whose accounts failed to parse must never look like a report with no accounts,
+    or a parse failure reads as "your credit is clean".
+    """
+    owner = require_owner(request)
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(400, "that file is empty")
+    if len(payload) > MAX_REPORT_BYTES:
+        raise HTTPException(413, "that file is larger than a credit report should ever be")
+
+    suffix = os.path.splitext(file.filename or "")[1].lower() or ".pdf"
+    handle, temp_path = tempfile.mkstemp(suffix=suffix, prefix="creditreport-")
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(payload)
+        loop = asyncio.get_running_loop()
+        # Parsing a large PDF is CPU-bound and would otherwise block the event loop --
+        # the same mistake that froze the whole web server once already (PR #33).
+        result = await loop.run_in_executor(
+            None, functools.partial(
+                credit_import.import_file, request.app.state.cfg.db_path, owner["id"],
+                temp_path, bureau=bureau, pulled_on=pulled_on))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+    result["file"] = file.filename
+    return result
+
+
+@router.get("/reports/progress")
+def report_progress(request: Request, bureau: str | None = None):
+    """What changed between the two most recent reports -- the monitoring view."""
+    owner = require_owner(request)
+    return credit_import.compare(request.app.state.cfg.db_path, owner["id"], bureau=bureau)

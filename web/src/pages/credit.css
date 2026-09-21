@@ -263,3 +263,67 @@
 .confirm-mail-cancel {
   opacity: 0.8;
 }
+
+/* --- report import ------------------------------------------------------------------
+   Placed at the top of the page on purpose: until a report is stored, every other figure
+   on this screen is derived from nothing. */
+
+.credit-card {
+  border: 1px solid var(--border-dim);
+  background: var(--bg-panel);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.credit-card h3 {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cyan-dim);
+}
+
+.credit-hint { margin: 0 0 10px; font-size: 12.5px; line-height: 1.5; color: var(--text-dim); max-width: 78ch; }
+.credit-err { color: var(--red); font-size: 12px; font-family: var(--font-mono); }
+
+/* The real input is hidden so the label can carry the whole target -- a bare file input
+   cannot be styled and reads as a foreign control in this UI. */
+.credit-upload input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
+.credit-upload span {
+  display: inline-block;
+  cursor: pointer;
+  border: 1px dashed var(--cyan-dim);
+  color: var(--cyan);
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  padding: 8px 16px;
+}
+
+.credit-upload span:hover { background: var(--bg-inset); color: var(--cyan-bright); }
+
+.credit-import-result { margin-top: 10px; font-size: 13px; color: var(--text); }
+.credit-import-result p { margin: 4px 0; }
+.credit-warn { color: var(--amber); font-size: 12px; line-height: 1.45; }
+
+.credit-progress { margin-top: 12px; border-top: 1px solid var(--divider); padding-top: 8px; }
+.credit-progress h4 {
+  margin: 0 0 6px;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.credit-progress ul { list-style: none; margin: 0; padding: 0; }
+.credit-progress li {
+  font-size: 13px;
+  padding: 3px 0 3px 10px;
+  border-left: 2px solid var(--steel-mid);
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+.credit-progress li.good { border-left-color: var(--cyan); color: var(--text); }
+.credit-progress li.bad { border-left-color: var(--amber); }

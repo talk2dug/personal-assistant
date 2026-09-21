@@ -57,6 +57,107 @@ function Deadline({ dispute }) {
   )
 }
 
+
+/**
+ * Uploading a credit report, and seeing what moved since the last one.
+ *
+ * Deliberately shows what could NOT be read alongside what was stored. A report whose
+ * accounts failed to parse must never look like a report with no accounts -- that reads
+ * as "your credit is clean", which is the most dangerous possible way to be wrong here.
+ */
+function ReportImport({ onImported }) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+  const [progress, setProgress] = useState(null)
+  const [err, setErr] = useState(null)
+
+  useEffect(() => {
+    api.creditProgress().then(setProgress).catch(() => setProgress(null))
+  }, [result])
+
+  async function pick(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setBusy(true); setErr(null); setResult(null)
+    try {
+      const out = await api.importCreditReport(file)
+      setResult(out)
+      onImported?.()
+    } catch (ex) {
+      setErr(ex.message || 'could not read that file')
+    } finally {
+      setBusy(false)
+      e.target.value = ''
+    }
+  }
+
+  const money = (n) => (n === null || n === undefined ? '—' : `$${Number(n).toFixed(2)}`)
+
+  return (
+    <section className="credit-card">
+      <h3>Credit reports</h3>
+      <p className="credit-hint">
+        Upload a report each time you pull one — that is how the team measures whether the
+        repair work is actually moving anything. Parsed on this machine only: your SSN and
+        full account numbers are never extracted or sent anywhere.
+      </p>
+      <label className="credit-upload">
+        <input type="file" accept=".pdf,.txt,.csv,.html,.htm,.json" onChange={pick} disabled={busy} />
+        <span>{busy ? 'Reading…' : 'Choose a report (PDF, CSV, HTML, TXT)'}</span>
+      </label>
+      {err && <p className="credit-err">{err}</p>}
+
+      {result && (
+        <div className="credit-import-result">
+          <p>
+            <strong>{result.bureau}</strong>
+            {result.score ? ` · score ${result.score}` : ''} ·{' '}
+            <strong>{result.tradelines_stored}</strong> accounts stored
+          </p>
+          {(result.unparsed?.length > 0 || result.rejected?.length > 0) && (
+            <p className="credit-warn">
+              {result.unparsed?.length || 0} block(s) could not be read
+              {result.rejected?.length ? `, ${result.rejected.length} rejected` : ''} — check
+              those accounts by hand rather than assuming they are absent.
+            </p>
+          )}
+        </div>
+      )}
+
+      {progress?.comparable && (
+        <div className="credit-progress">
+          <h4>Since {progress.from.pulled_on}</h4>
+          <ul>
+            {progress.score_delta !== null && (
+              <li className={progress.score_delta >= 0 ? 'good' : 'bad'}>
+                Score {progress.score_delta >= 0 ? '+' : ''}{progress.score_delta}
+              </li>
+            )}
+            <li className={progress.balance_delta <= 0 ? 'good' : 'bad'}>
+              Balances {progress.balance_delta <= 0 ? 'down' : 'up'} {money(Math.abs(progress.balance_delta))}
+            </li>
+            {progress.accounts_gone.map((a, i) => (
+              <li className="good" key={`g${i}`}>{a.creditor} no longer reporting</li>
+            ))}
+            {progress.accounts_appeared.map((a, i) => (
+              <li key={`n${i}`}>{a.creditor} appeared</li>
+            ))}
+            {progress.accounts_changed.slice(0, 6).map((c, i) => (
+              <li key={`c${i}`} className={c.balance_delta <= 0 ? 'good' : 'bad'}>
+                {c.creditor} {c.balance_delta <= 0 ? '−' : '+'}{money(Math.abs(c.balance_delta))}
+                {c.status_from !== c.status_to ? ` · ${c.status_from} → ${c.status_to}` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {progress && !progress.comparable && (
+        <p className="credit-hint">{progress.reason}</p>
+      )}
+    </section>
+  )
+}
+
 export default function Credit() {
   const [pic, setPic] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -83,6 +184,10 @@ export default function Credit() {
 
   return (
     <div className="cr-page">
+      {/* The way reports get in. Placed first: with no report stored, every other number
+          on this page is derived from nothing, so this is the thing to do first. */}
+      <ReportImport onImported={load} />
+
       {/* Where he stands, and the one number the whole section is aimed at. */}
       <header className="cr-head">
         <div className="cr-score">

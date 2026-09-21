@@ -329,6 +329,20 @@ export const api = {
   // The whole credit picture in one call: the answers are related -- a dispute deadline
   // changes what is worth doing this week -- and fetching them apart lets the page show
   // something that disagrees with itself mid-load.
+  // Report import is multipart, so it bypasses `request` (which sets a JSON content
+  // type). credentials: 'include' is what keeps the session cookie on the upload.
+  importCreditReport: async (file, { bureau, pulledOn } = {}) => {
+    const form = new FormData()
+    form.append('file', file)
+    if (bureau) form.append('bureau', bureau)
+    if (pulledOn) form.append('pulled_on', pulledOn)
+    const res = await fetch('/api/credit/reports/import', {
+      method: 'POST', credentials: 'include', body: form,
+    })
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'import failed')
+    return res.json()
+  },
+  creditProgress: () => request('/api/credit/reports/progress'),
   creditPicture: () => request('/api/credit/picture'),
   updateRecommendation: (id, patch) =>
     request(`/api/credit/recommendations/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),

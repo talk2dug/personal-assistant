@@ -119,3 +119,53 @@ def test_assign_gives_every_tier_the_request_capability_tool(db_path):
     request_tool_names = {t["function"]["name"] for t in universal}
     engineer_tool_names = {t["function"]["name"] for t in llm.engineer_kwargs["tools"]}
     assert request_tool_names <= engineer_tool_names
+
+
+def test_a_credit_employee_can_keep_its_own_dispute_ledger(db_path):
+    """Feed-gated, exactly like what an employee is SHOWN. Without it the Credit
+    Specialist describes a dispute queue nothing can fill, so "disputes in flight" reads
+    as "none" forever while it re-recommends the same items every run.
+
+    The exclusions are the real assertion: drafting or mailing a letter reaches
+    LetterStream, spends real postage and starts a legal clock, and that stays the
+    owner's to trigger.
+    """
+    from assistant.core.personal_tools import CREDIT_TRACKING_TOOLS
+
+    key = staff.hire(db_path, "Credit Specialist",
+                     "Repairs credit: disputes, utilisation, payoff order.")["key"]
+    feeds = staff.get_staff(db_path, key)["data_feeds"] or ""
+    assert "credit" in feeds, "a credit job must receive the credit feed"
+
+    class RecordingLLM:
+        def __init__(self):
+            self.tools = None
+
+        def research(self, prompt, system_prompt=None, timeout=None, tools=None,
+                     employee_key=None):
+            self.tools = tools
+            return "done"
+
+    llm = RecordingLLM()
+    staff.assign(db_path, llm, key, "review the credit picture")
+    offered = {t["function"]["name"] for t in llm.tools}
+    assert {t["function"]["name"] for t in CREDIT_TRACKING_TOOLS} <= offered
+    assert not {n for n in offered if "letter" in n or "mailed" in n}, (
+        "nothing that mails or buys postage may be offered to an unattended employee")
+
+
+def test_an_employee_without_the_credit_feed_gets_no_dispute_tools(db_path):
+    key = staff.hire(db_path, "Copywriter", "Writes marketing copy.")["key"]
+
+    class RecordingLLM:
+        def __init__(self):
+            self.tools = None
+
+        def research(self, prompt, system_prompt=None, timeout=None, tools=None,
+                     employee_key=None):
+            self.tools = tools
+            return "done"
+
+    llm = RecordingLLM()
+    staff.assign(db_path, llm, key, "write something")
+    assert not {t["function"]["name"] for t in llm.tools if "dispute" in t["function"]["name"]}

@@ -1043,9 +1043,20 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
                 employee_key=emp["key"])
         else:
             from .business_tools import OWNER_REQUEST_TOOLS, REQUEST_CAPABILITY_TOOLS
+            research_tools = REQUEST_CAPABILITY_TOOLS + OWNER_REQUEST_TOOLS
+            # Feed-gated, exactly like what an employee is SHOWN: an employee handed the
+            # credit feed can also keep the dispute ledger it is being asked to report on.
+            # Record-keeping only -- nothing here mails a letter or buys postage, which
+            # stays the owner's to trigger (see personal_tools.CREDIT_TRACKING_TOOLS).
+            # Without it the specialist describes a dispute queue it has no way to fill,
+            # so "disputes in flight" reads as "none" forever while it re-recommends the
+            # same items every run.
+            if "credit" in (emp.get("data_feeds") or ""):
+                from .personal_tools import CREDIT_TRACKING_TOOLS
+                research_tools = research_tools + CREDIT_TRACKING_TOOLS
             output = llm.research(
                 prompt, system_prompt=emp["system_prompt"], timeout=timeout,
-                tools=REQUEST_CAPABILITY_TOOLS + OWNER_REQUEST_TOOLS,
+                tools=research_tools,
                 employee_key=emp["key"])
         status, error = "delivered", None
 

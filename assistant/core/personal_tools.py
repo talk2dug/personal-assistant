@@ -820,6 +820,25 @@ PERSONAL_TOOLS = [
     }},
 ]
 
+
+# The dispute tools a credit employee may hold. Record-keeping only, and the exclusions
+# are the point: draft_dispute_letter, record_dispute_letter_mailed and track_dispute_letter
+# all reach LetterStream, which prices and queues real postage. Opening a tracking row is
+# bookkeeping; putting a letter in the mail is an outward act that spends the owner's money
+# and starts a legal clock, and that stays his to trigger.
+#
+# Without these the specialist can only ever describe a dispute queue it has no way to
+# fill, so "disputes in flight" would read as "none" forever while it kept recommending
+# the same items every run.
+CREDIT_TRACKING_TOOL_NAMES = (
+    "list_dispute_items", "create_dispute_item", "update_dispute_item",
+    "record_dispute_response", "get_credit_picture", "list_credit_scores",
+)
+
+CREDIT_TRACKING_TOOLS = [t for t in PERSONAL_TOOLS
+                         if t["function"]["name"] in CREDIT_TRACKING_TOOL_NAMES]
+
+
 PERSONAL_SYSTEM_NOTE = (
     " You also keep track of the owner's own personal life, separate from the business: his "
     "personal projects, his to-do list, and errands he's asked you to look into. Treat that as "

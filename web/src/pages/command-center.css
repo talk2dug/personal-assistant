@@ -1129,3 +1129,15 @@
   .cc-section-backdrop { padding: 0; }
   .cc-section, .cc-section.is-wide { width: 100vw; max-height: 100vh; height: 100vh; }
 }
+
+/* A pipeline stage that has somewhere to go. Matches .cc-readout's affordance so the
+   board has one vocabulary for "this number opens something" rather than two. */
+button.cc-stage {
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+button.cc-stage.is-open:hover {
+  background: var(--bg-inset);
+}

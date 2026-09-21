@@ -36,11 +36,11 @@ export const SECTIONS = [
     context: 'the Schedule section, showing upcoming reminders and the weather forecast' },
   { key: 'email', label: 'Email', element: Email, wide: true,
     context: 'the Email section, showing the inbox and flagged threads' },
-  { key: 'needs', label: 'Needs you', element: Needs, wide: true,
-    context: 'the Needs You board, showing everything the business team is blocked on and '
-      + 'waiting for him to supply -- API keys, accounts, files, purchases -- grouped by '
-      + 'pipeline, with what each one is blocking and any generation prompts they need '
-      + 'him to run' },
+  { key: 'needs', label: 'Projects', element: Needs, wide: true,
+    context: 'the Projects board, showing each business pipeline with two lanes: what the '
+      + 'team is blocked on and waiting for him to supply (API keys, accounts, files, '
+      + 'purchases, with what each one is blocking and any generation prompts they need '
+      + 'him to run), and the business tasks the team is currently working on' },
   { key: 'review', label: 'Review queue', element: Review, wide: true,
     context: 'the Review queue, showing work waiting on your approval' },
   { key: 'kitchen', label: 'Kitchen', element: Kitchen, wide: true,

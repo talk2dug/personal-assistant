@@ -68,6 +68,8 @@ export const api = {
     request(`/api/needs/${id}/provide`, { method: 'POST', body: JSON.stringify({ value }) }),
   setNeedStatus: (id, status, note) =>
     request(`/api/needs/${id}/status`, { method: 'POST', body: JSON.stringify({ status, note }) }),
+  setBusinessTaskStatus: (id, status) =>
+    request(`/api/needs/tasks/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
 
   cryptoDashboard: () => request('/api/crypto/dashboard'),
 

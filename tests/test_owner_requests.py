@@ -229,3 +229,62 @@ def test_the_unblock_notice_names_what_to_retry_and_delivers_once(db):
     notice = orq.unblock_notice(db, "store_manager")
     assert "printify_api_key" in notice and "all order fulfilment" in notice
     assert orq.unblock_notice(db, "store_manager") == "", "delivered once, not every run"
+
+
+class TestSecretDetection:
+    """Whether a supplied value is treated as a credential.
+
+    Keying this off `kind` alone got it wrong the first time it mattered: a real Printify
+    token, filed as an `account` ask ("go sign up for Printify"), was stored and rendered
+    in the clear. An `account` request is answered with a credential far more often than
+    not, so the decision has to look at the name and the value too -- and err toward
+    masking, because mis-masking a URL costs a glance while mis-revealing a token puts a
+    live credential in every response and screenshot of that screen.
+    """
+
+    def test_an_account_ask_answered_with_a_token_is_still_a_secret(self, db):
+        rid = orq.raise_request(db, 1, title="Printify account", kind="account",
+                                name="printify_api_key")
+        orq.provide(db, 1, rid, "eyJ0eXAiOiJKV1Qi.eyJhdWQiOiIzN2Q0.nN8X2LY3B_zB3Obb")
+        item = orq.list_requests(db, 1)[0]
+        assert item["is_secret"] is True
+        assert item["value"] == "...3Obb"
+
+    def test_a_jwt_is_recognised_whatever_it_was_filed_as(self, db):
+        rid = orq.raise_request(db, 1, title="Some value", kind="text", name="whatever")
+        orq.provide(db, 1, rid, "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP")
+        assert orq.list_requests(db, 1)[0]["is_secret"] is True
+
+    @pytest.mark.parametrize("value", [
+        "shpat_0123456789abcdef0123456789abcdef",   # Shopify admin token
+        "sk_live_0123456789abcdef",                  # Stripe-style
+        "ghp_0123456789abcdefghijklmnop",            # GitHub PAT
+        "r8_0123456789abcdefghijklmnop",             # Replicate
+    ])
+    def test_known_credential_prefixes_are_masked(self, db, value):
+        rid = orq.raise_request(db, 1, title="A value", kind="text", name="plain")
+        orq.provide(db, 1, rid, value)
+        assert orq.list_requests(db, 1)[0]["is_secret"] is True
+
+    @pytest.mark.parametrize("kind,name,value", [
+        ("text", "shopify_shop", "mystore.myshopify.com"),
+        ("url", "store_admin", "https://admin.shopify.com/store/x"),
+        ("file", "model_catalog_import", "D:/Vinyl Stuff/models"),
+        ("purchase", "bought_on", "Amex ending 1234"),
+    ])
+    def test_ordinary_answers_stay_readable(self, db, kind, name, value):
+        """He has to be able to see what the team is now working from."""
+        rid = orq.raise_request(db, 1, title="A value", kind=kind, name=name)
+        orq.provide(db, 1, rid, value)
+        item = orq.list_requests(db, 1)[0]
+        assert item["is_secret"] is False and item["value"] == value
+
+    def test_a_name_ending_in_key_is_enough_on_its_own(self, db):
+        rid = orq.raise_request(db, 1, title="Legacy key", kind="text", name="some_api_key")
+        orq.provide(db, 1, rid, "plainlookingvalue123")
+        assert orq.list_requests(db, 1)[0]["is_secret"] is True
+
+    def test_an_explicit_override_still_wins(self, db):
+        rid = orq.raise_request(db, 1, title="Public id", kind="text", name="public_key")
+        orq.provide(db, 1, rid, "this-is-public", is_secret=False)
+        assert orq.list_requests(db, 1)[0]["value"] == "this-is-public"

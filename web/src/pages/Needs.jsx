@@ -3,7 +3,12 @@ import { api } from '../api'
 import './needs.css'
 
 /**
- * "Needs you" — the things the team is stopped on, grouped by pipeline.
+ * The project board — per pipeline, what the team needs from him and what it is working on.
+ *
+ * Two lanes, blockers first. Business tasks previously existed only as two uncounted
+ * numbers on the Command Center ("Backlog", "Building") with nothing to click, while the
+ * section actually labelled "Tasks" showed personal_tasks — a different table entirely.
+ * So the team's own plan was invisible to the person it was being run for.
  *
  * The Review queue answers "which of these do you prefer"; this answers "we cannot go
  * any further without something only you can get". They are kept apart deliberately:
@@ -65,6 +70,49 @@ function Prompts({ prompts }) {
         </div>
       ))}
     </div>
+  )
+}
+
+const TASK_NEXT = { open: 'doing', doing: 'done', done: 'open' }
+
+function Task({ task, onChanged }) {
+  const [busy, setBusy] = useState(false)
+
+  async function advance(status) {
+    if (busy) return
+    setBusy(true)
+    try {
+      await api.setBusinessTaskStatus(task.id, status)
+      onChanged()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <li className={`needs-task t-${task.status}`}>
+      <button
+        type="button"
+        className="needs-task-tick"
+        title={`Mark ${TASK_NEXT[task.status] || 'done'}`}
+        disabled={busy}
+        onClick={() => advance(TASK_NEXT[task.status] || 'done')}
+      >
+        {task.status === 'done' ? '✓' : task.status === 'doing' ? '●' : '○'}
+      </button>
+      <span className="needs-task-text">{task.text}</span>
+      {task.priority === 'high' && <span className="needs-task-pri">HIGH</span>}
+      {task.status !== 'done' && (
+        <button
+          type="button"
+          className="needs-task-drop"
+          disabled={busy}
+          onClick={() => advance('dropped')}
+        >
+          DROP
+        </button>
+      )}
+    </li>
   )
 }
 
@@ -195,16 +243,46 @@ export default function Needs() {
         </p>
       )}
 
-      {groups.map((group) => (
-        <section className="needs-group" key={group.project_id ?? 'none'}>
-          <h3>{group.name}</h3>
-          <ul className="needs-list">
-            {group.items.map((item) => (
-              <Row key={item.id} item={item} onAnswered={load} />
-            ))}
-          </ul>
-        </section>
-      ))}
+      {groups.map((group) => {
+        const counts = group.task_counts || {}
+        const live = (counts.doing || 0) + (counts.open || 0)
+        const blocked = group.items.filter((i) => i.status === 'open').length
+        return (
+          <section className="needs-group" key={group.project_id ?? 'none'}>
+            <header className="needs-group-head">
+              <h3>{group.name}</h3>
+              <span className="needs-group-meta">
+                {blocked > 0 && <b>{blocked} blocked</b>}
+                {live > 0 && <span>{counts.doing || 0} in hand · {counts.open || 0} queued</span>}
+                {counts.done > 0 && <span>{counts.done} done</span>}
+              </span>
+            </header>
+            {group.goal && <p className="needs-goal">{group.goal}</p>}
+
+            {group.items.length > 0 && (
+              <>
+                <h4 className="needs-lane">They need you</h4>
+                <ul className="needs-list">
+                  {group.items.map((item) => (
+                    <Row key={item.id} item={item} onAnswered={load} />
+                  ))}
+                </ul>
+              </>
+            )}
+
+            {group.tasks.length > 0 && (
+              <>
+                <h4 className="needs-lane">They're working on</h4>
+                <ul className="needs-tasks">
+                  {group.tasks.map((task) => (
+                    <Task key={task.id} task={task} onChanged={load} />
+                  ))}
+                </ul>
+              </>
+            )}
+          </section>
+        )
+      })}
     </div>
   )
 }

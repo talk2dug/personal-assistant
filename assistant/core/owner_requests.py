@@ -30,6 +30,7 @@ So a request here is a first-class object with an owner, a reason, and a resolut
 Nothing here reaches outward or spends money; it is a ledger of asks and answers.
 """
 import json
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -136,6 +137,40 @@ def _mask(value: str | None) -> str | None:
     return f"...{value[-4:]}" if len(value) > 10 else "(set)"
 
 
+# Names whose value is a credential whatever the request was filed as. An `account` ask
+# ("go sign up for Printify") is answered with a token far more often than not, and a
+# `text` ask can still be a shop secret, so keying secrecy off `kind` alone is not enough.
+_SECRET_NAME = re.compile(r"(_key|_token|_secret|_password|_pat|_pass)$", re.I)
+
+# Shapes that are credentials no matter what they are called: a JWT, and the prefixes the
+# services in this pipeline actually issue.
+_SECRET_PREFIXES = ("sk_", "sk-", "shpat_", "shpss_", "shpca_", "ghp_", "github_pat_",
+                    "xoxb-", "xoxp-", "eyJ", "Bearer ", "pk_live", "rk_live", "r8_")
+
+
+def looks_secret(kind: str | None, name: str | None, value: str | None) -> bool:
+    """Whether a supplied value should be stored as a secret.
+
+    Erring toward masking on purpose: mis-masking a URL costs him the ability to read it
+    back off the board, while mis-revealing a token puts a live credential in every
+    response, screenshot and log of that screen. Those are not comparable mistakes.
+
+    This exists because keying off `kind` alone got it wrong the first time it mattered --
+    a real Printify token, filed as an `account` ask, was stored and rendered in the clear.
+    """
+    if kind == "secret":
+        return True
+    if name and _SECRET_NAME.search(name):
+        return True
+    if not value:
+        return False
+    stripped = value.strip()
+    if stripped.startswith(_SECRET_PREFIXES):
+        return True
+    # A JWT: three dot-separated base64url segments. Long, opaque, and never a URL.
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", stripped))
+
+
 def raise_request(db_path: str, owner_user_id: int, title: str, kind: str, *,
                   name: str | None = None, why: str | None = None,
                   instructions: str | None = None, blocks: str | None = None,
@@ -229,11 +264,13 @@ def provide(db_path: str, owner_user_id: int, request_id: int, value: str,
     works. A token that is present but wrong is the same outage as a token that is
     missing, and this is the distinction that print-station never drew."""
     with closing(_connect(db_path)) as conn:
-        row = conn.execute("SELECT kind FROM owner_requests WHERE id = ? AND owner_user_id = ?",
-                           (request_id, owner_user_id)).fetchone()
+        row = conn.execute(
+            "SELECT kind, name FROM owner_requests WHERE id = ? AND owner_user_id = ?",
+            (request_id, owner_user_id)).fetchone()
         if row is None:
             return False
-        secret_value = row["kind"] == "secret" if is_secret is None else bool(is_secret)
+        secret_value = (looks_secret(row["kind"], row["name"], value)
+                        if is_secret is None else bool(is_secret))
         now = _now()
         conn.execute("INSERT INTO owner_supplies (request_id, value, is_secret, at) VALUES (?,?,?,?)",
                      (request_id, value, 1 if secret_value else 0, now))

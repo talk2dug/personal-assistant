@@ -329,10 +329,51 @@ def render(pic: dict) -> str:
     return "\n".join(lines)
 
 
+def _cross_bureau_block(db_path: str, owner_user_id: int) -> str:
+    """The disagreements between bureaus, which no single report can show.
+
+    Included in the feed because it is where the disputes are: an account one bureau
+    reports and another does not, or the same account with different balances, are both
+    ordinary grounds for a letter. Confidence is passed through unedited -- a "token"
+    match is a guess about two similar names, and a dispute filed on a guess spends a real
+    30-day clock.
+    """
+    from . import credit_match
+
+    try:
+        data = credit_match.cross_bureau(db_path, owner_user_id)
+    except Exception:                                    # noqa: BLE001
+        return ""
+    if len(data["bureaus"]) < 2:
+        return ""
+
+    lines = [f"  ACROSS BUREAUS ({', '.join(data['bureaus'])}): "
+             f"{data['tradelines']} tradelines resolve to {data['accounts']} accounts."]
+    if data["balances_disagree"]:
+        lines.append("    balances disagree (dispute grounds):")
+        for group in data["balances_disagree"][:8]:
+            stated = "  ".join(
+                f"{b[:3]} ${v:,.0f}" if v is not None else f"{b[:3]} -"
+                for b, v in sorted(group["balances"].items()))
+            lines.append(f"      {group['creditor'][:34]} [{group['confidence']}] {stated}")
+    solid = [g for g in data["missing_from_some"] if g["confidence"] != "token"]
+    if solid:
+        lines.append("    reported by some bureaus and not others:")
+        for group in solid[:8]:
+            lines.append(f"      {group['creditor'][:34]} on {','.join(b[:3] for b in group['bureaus'])}"
+                         f" / absent from {','.join(b[:3] for b in group['missing_from'])}")
+    lines.append("    Name matching is graded: 'exact' is safe, 'prefix' is a truncated "
+                 "name, 'token' is a guess. Verify a 'token' match against the reports "
+                 "before disputing it.")
+    return "\n".join(lines)
+
+
 def briefing(db_path: str, owner_user_id: int, today=None) -> str:
     """The credit feed block, or an honest failure. Never raises into a staff run."""
     try:
-        return render(picture(db_path, owner_user_id, today))
+        block = render(picture(db_path, owner_user_id, today))
+        extra = _cross_bureau_block(db_path, owner_user_id)
+        return block + ("\n" + extra if extra else "")
     except Exception as e:
         logger.exception("credit brief failed")
         return (f"CREDIT: unavailable ({type(e).__name__}). Do not work from remembered "

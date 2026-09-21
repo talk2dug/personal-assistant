@@ -203,6 +203,7 @@ _NOT_A_CREDITOR = (
     "prepared for", "page ", "table of contents", "your report", "file number",
     "consumer statement", "score factors", "inquiries", "public records",
     "credit accounts", "account history", "revolving accounts", "installment accounts",
+    "lines of credit", "includes credit", "this information is reported",
     "dispute", "contact us", "how to read", "glossary",
 )
 

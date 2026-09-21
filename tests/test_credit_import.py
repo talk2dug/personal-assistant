@@ -217,6 +217,33 @@ class TestStoring:
         assert result["tradelines_stored"] == 0 and result["unparsed"]
 
 
+class TestAnEmptyImportIsNotStored:
+    """credit.latest_report picks the newest row, so an unreadable upload would silently
+    become "the current picture" and shadow every account already parsed from the other
+    bureaus -- the specialist would be told the file is clean. It happened with a scanned
+    Experian PDF while twenty-eight real accounts sat behind it."""
+
+    def test_a_report_with_no_accounts_is_not_written(self, db, owner, tmp_path):
+        result = write_and_import(db, owner, tmp_path, "   ", name="scanned.txt")
+        assert result["stored"] is False and result["report_id"] is None
+        assert result["diagnosis"]
+
+    def test_it_cannot_shadow_a_good_report(self, db, owner, tmp_path):
+        from assistant.core import credit
+
+        write_and_import(db, owner, tmp_path, REPORT, "good.txt", "2026-01-01")
+        write_and_import(db, owner, tmp_path, "   ", "scanned.txt", "2026-02-01")
+        latest = credit.latest_report(db, owner)
+        assert latest is not None and len(latest["tradelines"]) >= 2, (
+            "the unreadable upload must not become the current picture")
+
+    def test_it_can_be_forced_when_a_caller_really_wants_the_record(self, db, owner, tmp_path):
+        path = tmp_path / "empty.txt"
+        path.write_text("   ", encoding="utf-8")
+        result = ci.import_file(db, owner, str(path), store_empty=True)
+        assert result["stored"] is True and result["report_id"]
+
+
 class TestProgress:
     def test_one_report_cannot_be_compared_and_says_so(self, db, owner, tmp_path):
         write_and_import(db, owner, tmp_path, REPORT, "a.txt", "2026-01-01")

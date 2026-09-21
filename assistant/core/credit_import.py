@@ -415,11 +415,26 @@ def store_report(db_path: str, owner_user_id: int, parsed: dict, *, bureau: str 
 
 
 def import_file(db_path: str, owner_user_id: int, path: str, *, bureau: str | None = None,
-                pulled_on: str | None = None) -> dict:
-    """Parse one report file and store it. The whole path, for one file."""
+                pulled_on: str | None = None, store_empty: bool = False) -> dict:
+    """Parse one report file and store it. The whole path, for one file.
+
+    A report that yielded no accounts is NOT stored by default, and that default matters
+    more than it looks. credit.latest_report picks the newest row, so an unreadable
+    upload -- a scanned Experian PDF, say -- silently becomes "the current picture" and
+    shadows the twenty-eight accounts already parsed from the other two bureaus. The
+    specialist would then be told the file is clean. A failed import is news to report,
+    not a record to keep.
+    """
     parsed = parse_report(path)
+    if not parsed.get("tradelines") and not store_empty:
+        return {"stored": False, "report_id": None, "file": os.path.basename(path),
+                "bureau": bureau or parsed.get("bureau"), "score": parsed.get("score"),
+                "tradelines_stored": 0, "chars_read": parsed.get("chars", 0),
+                "diagnosis": parsed.get("diagnosis"), "rejected": [],
+                "unparsed": parsed.get("unparsed") or []}
     result = store_report(db_path, owner_user_id, parsed, bureau=bureau,
                           pulled_on=pulled_on, source=os.path.basename(path))
+    result["stored"] = True
     result["file"] = os.path.basename(path)
     return result
 

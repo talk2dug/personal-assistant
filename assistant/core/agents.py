@@ -98,7 +98,7 @@ def _profile_text(profile) -> str:
     return "\n".join(lines)
 
 
-def run_market_agent(db_path: str, llm, owner_user_id: int, profile) -> dict:
+def run_market_agent(db_path: str, llm, owner_user_id: int, profile, obsidian=None) -> dict:
     """Finds vendor markets, craft fairs and pop-ups near the business, scored for fit."""
     run_id = business_db.start_agent_run(db_path, "market_finder")
     try:
@@ -111,12 +111,12 @@ def run_market_agent(db_path: str, llm, owner_user_id: int, profile) -> dict:
             f"For each event, score fit 0-100 for this business's products. Score low for "
             f"events that would not accept or suit them: food-only, produce/farmers markets, "
             f"juried fine-art-only shows, MLM/direct-sales events, charity-only booths.\n\n"
-            f"Return ONLY a JSON array, no prose, of at most 12 objects with keys: "
+            f"First write REASONING: two to five sentences on what you looked at, what you ruled out and why, and how confident you are. This is read by the owner on his dashboard and by you on your next run, so write it for a person, not as a label. Then give the data as a fenced ```json block. The block is an array of at most 12 objects with keys: "
             f'"name", "event_date" (YYYY-MM-DD or null), "location", "url", "cost" '
             f'(vendor/booth fee as text, or null), "fit_score" (integer), "reasoning" '
             f"(one sentence). Use null for anything you could not verify."
         )
-        raw = llm.research(prompt, system_prompt=MARKET_SYSTEM, timeout=600)
+        raw = llm.research(prompt + agent_notes.read_journal(obsidian, "market_finder"), system_prompt=MARKET_SYSTEM, timeout=600)
         events = _extract_json(raw)
         if not isinstance(events, list):
             business_db.finish_agent_run(
@@ -141,6 +141,7 @@ def run_market_agent(db_path: str, llm, owner_user_id: int, profile) -> dict:
 
         summary = f"Market scan: {kept} relevant events, {new_count} new."
         business_db.finish_agent_run(db_path, run_id, "ok", summary, json.dumps(events)[:4000])
+        agent_notes.write_journal(obsidian, "market_finder", summary, reasoning=raw)
         return {"status": "ok", "new": new_count, "kept": kept, "summary": summary}
     except Exception as e:
         logger.exception("market agent failed")
@@ -148,7 +149,7 @@ def run_market_agent(db_path: str, llm, owner_user_id: int, profile) -> dict:
         return {"status": "error", "new": 0, "error": str(e)}
 
 
-def run_trend_agent(db_path: str, llm, owner_user_id: int, profile) -> dict:
+def run_trend_agent(db_path: str, llm, owner_user_id: int, profile, obsidian=None) -> dict:
     """Looks for trends this business could turn into products."""
     run_id = business_db.start_agent_run(db_path, "trend_scout")
     try:
@@ -162,11 +163,11 @@ def run_trend_agent(db_path: str, llm, owner_user_id: int, profile) -> dict:
             f"shirt, decal, metal print or 3D-printed product in the next few weeks.\n\n"
             f"Skip anything offensive, tragedy-related, or legally risky (no copyrighted "
             f"characters, team logos, or brand marks).{avoid}\n\n"
-            f"Return ONLY a JSON array, no prose, of at most 8 objects with keys: "
+            f"First write REASONING: two to five sentences on what you looked at, what you ruled out and why, and how confident you are. This is read by the owner on his dashboard and by you on your next run, so write it for a person, not as a label. Then give the data as a fenced ```json block. The block is an array of at most 8 objects with keys: "
             f'"topic", "source" (where you saw it), "score" (0-100 commercial potential), '
             f'"product_idea" (one concrete product), "reasoning" (one sentence).'
         )
-        raw = llm.research(prompt, system_prompt=TREND_SYSTEM, timeout=600)
+        raw = llm.research(prompt + agent_notes.read_journal(obsidian, "trend_scout"), system_prompt=TREND_SYSTEM, timeout=600)
         trends = _extract_json(raw)
         if not isinstance(trends, list):
             business_db.finish_agent_run(
@@ -187,6 +188,7 @@ def run_trend_agent(db_path: str, llm, owner_user_id: int, profile) -> dict:
 
         summary = f"Trend scan: {new_count} new ideas."
         business_db.finish_agent_run(db_path, run_id, "ok", summary, json.dumps(trends)[:4000])
+        agent_notes.write_journal(obsidian, "trend_scout", summary, reasoning=raw)
         return {"status": "ok", "new": new_count, "summary": summary}
     except Exception as e:
         logger.exception("trend agent failed")
@@ -348,7 +350,8 @@ def _concept_detail(concept: dict) -> str:
     return "\n".join(parts) or None
 
 
-def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: int = 4) -> dict:
+def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: int = 4,
+                        obsidian=None) -> dict:
     """Turns the best unworked trend leads into concrete, makeable product concepts."""
     run_id = business_db.start_agent_run(db_path, "product_creator")
     try:
@@ -373,13 +376,13 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
             f"Propose up to {limit} specific products this shop could actually make and sell. "
             f"Each must be one concrete item, not a category — 'RVA skyline die-cut vinyl "
             f"decal, 4in, matte white' not 'local pride stickers'.\n\n"
-            f"Return ONLY a JSON array, no prose, of objects with keys: \"name\", "
+            f"First write REASONING: two to five sentences on what you looked at, what you ruled out and why, and how confident you are. This is read by the owner on his dashboard and by you on your next run, so write it for a person, not as a label. Then give the data as a fenced ```json block. The block is an array of objects with keys: \"name\", "
             f'"product_type" (one of: sticker, apparel, metal, laser, 3d), "description", '
             f'"target_customer", "price_estimate" (number, USD retail), "production_notes" '
             f"(materials, size, and the steps to make it on the equipment listed above), "
             f'"trend_topic" (which signal above it came from).'
         )
-        raw = llm.research(prompt, system_prompt=PRODUCT_CREATOR_SYSTEM, timeout=600)
+        raw = llm.research(prompt + agent_notes.read_journal(obsidian, "product_creator"), system_prompt=PRODUCT_CREATOR_SYSTEM, timeout=600)
         concepts = _extract_json(raw)
         if not isinstance(concepts, list):
             business_db.finish_agent_run(
@@ -435,6 +438,7 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
 
         summary = f"Product creator: {new_count} new concepts proposed."
         business_db.finish_agent_run(db_path, run_id, "ok", summary, json.dumps(concepts)[:4000])
+        agent_notes.write_journal(obsidian, "product_creator", summary, reasoning=raw)
         return {"status": "ok", "new": new_count, "summary": summary}
     except Exception as e:
         logger.exception("product creator failed")
@@ -459,7 +463,7 @@ def _directions_from(brief: dict) -> list[dict]:
 
 
 def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int = 3,
-                     bridge=None) -> dict:
+                     bridge=None, obsidian=None) -> dict:
     """Art-directs approved concepts, renders the options, and files them to be picked.
 
     The render happens before the review card is written, not after it is approved. The
@@ -507,7 +511,7 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                 f"idea reworded. Each one will be rendered and the owner picks between the "
                 f"actual images, so a direction that only differs in wording wastes his "
                 f"time and a render.\n\n"
-                f"Return ONLY a JSON object, no prose, with keys: \"style_direction\" "
+                f"First write REASONING: two to five sentences on what you looked at, what you ruled out and why, and how confident you are. This is read by the owner on his dashboard and by you on your next run, so write it for a person, not as a label. Then give the data as a fenced ```json block. The block is an object with keys: \"style_direction\" "
                 f"(2-3 sentences on the overall visual approach and why it suits this "
                 f'audience and medium), "aspect" (e.g. "1:1", "4:5", "3:2"), "notes" '
                 f"(anything the maker needs to know — colour count, bleed, minimum stroke "
@@ -518,7 +522,7 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                 f"ready to paste into an image generator, incorporating the medium "
                 f"requirements)."
             )
-            raw = llm.research(prompt, system_prompt=ART_DIRECTOR_SYSTEM, timeout=600)
+            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "art_director"), system_prompt=ART_DIRECTOR_SYSTEM, timeout=600)
             brief = _extract_json(raw)
             if not isinstance(brief, dict):
                 continue
@@ -559,6 +563,7 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
         summary = (f"Art director: {new_count} briefs written, "
                    f"{rendered_count} images rendered to pick from.")
         business_db.finish_agent_run(db_path, run_id, "ok" if new_count else "error", summary)
+        agent_notes.write_journal(obsidian, "art_director", summary, reasoning=raw)
         return {"status": "ok" if new_count else "error", "new": new_count,
                 "rendered": rendered_count, "summary": summary}
     except Exception as e:
@@ -607,7 +612,8 @@ def backfill_art_renders(db_path: str, owner_user_id: int, bridge, limit: int = 
             "summary": f"Rendered {rendered} of {len(pending)} text-only art cards."}
 
 
-def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int = 3) -> dict:
+def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int = 3,
+                      obsidian=None) -> dict:
     """Writes listing copy for approved concepts, and flags listings that aren't selling."""
     run_id = business_db.start_agent_run(db_path, "store_manager")
     try:
@@ -625,13 +631,13 @@ def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int
                 f"Estimated retail: {concept.get('price_estimate')}\n"
                 f"Production notes: {concept.get('production_notes')}\n\n"
                 f"Do not invent dimensions, materials or specifications beyond what's above.\n\n"
-                f"Return ONLY a JSON object, no prose, with keys: \"title\" (under 70 chars, "
+                f"First write REASONING: two to five sentences on what you looked at, what you ruled out and why, and how confident you are. This is read by the owner on his dashboard and by you on your next run, so write it for a person, not as a label. Then give the data as a fenced ```json block. The block is an object with keys: \"title\" (under 70 chars, "
                 f'benefit-led, searchable), "description" (2-4 short paragraphs, plain '
                 f'language, no hype), "seo_tags" (comma-separated, terms people actually '
                 f'search), "price" (number, USD), "variants" (comma-separated sizes/colours '
                 f"or an empty string if there are none)."
             )
-            raw = llm.research(prompt, system_prompt=STORE_MANAGER_SYSTEM, timeout=600)
+            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "store_manager"), system_prompt=STORE_MANAGER_SYSTEM, timeout=600)
             listing = _extract_json(raw)
             if not isinstance(listing, dict) or not listing.get("title"):
                 continue
@@ -661,6 +667,7 @@ def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int
 
         summary = f"Store manager: {new_count} listings drafted."
         business_db.finish_agent_run(db_path, run_id, "ok" if new_count else "error", summary)
+        agent_notes.write_journal(obsidian, "store_manager", summary, reasoning=raw)
         return {"status": "ok" if new_count else "error", "new": new_count, "summary": summary}
     except Exception as e:
         logger.exception("store manager failed")
@@ -668,7 +675,8 @@ def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int
         return {"status": "error", "new": 0}
 
 
-def run_social_director(db_path: str, llm, owner_user_id: int, profile, limit: int = 3) -> dict:
+def run_social_director(db_path: str, llm, owner_user_id: int, profile, limit: int = 3,
+                        obsidian=None) -> dict:
     """Drafts launch posts for listings that don't have any yet."""
     run_id = business_db.start_agent_run(db_path, "social_director")
     try:
@@ -690,12 +698,12 @@ def run_social_director(db_path: str, llm, owner_user_id: int, profile, limit: i
                 f"different angle — do not rewrite one caption three ways. Write in the "
                 f"owner's voice: a real person who makes these by hand in "
                 f"{profile.location}. No invented reviews, sales numbers or customer quotes.\n\n"
-                f"Return ONLY a JSON array, no prose, of objects with keys: \"platform\" "
+                f"First write REASONING: two to five sentences on what you looked at, what you ruled out and why, and how confident you are. This is read by the owner on his dashboard and by you on your next run, so write it for a person, not as a label. Then give the data as a fenced ```json block. The block is an array of objects with keys: \"platform\" "
                 f'(instagram, facebook or tiktok), "hook" (the first line that stops the '
                 f'scroll), "caption" (the full post body), "hashtags" (space-separated, '
                 f'realistic in number for that platform), "call_to_action".'
             )
-            raw = llm.research(prompt, system_prompt=SOCIAL_DIRECTOR_SYSTEM, timeout=600)
+            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "social_director"), system_prompt=SOCIAL_DIRECTOR_SYSTEM, timeout=600)
             posts = _extract_json(raw)
             if not isinstance(posts, list):
                 continue
@@ -724,6 +732,7 @@ def run_social_director(db_path: str, llm, owner_user_id: int, profile, limit: i
 
         summary = f"Social director: {new_count} posts drafted."
         business_db.finish_agent_run(db_path, run_id, "ok" if new_count else "error", summary)
+        agent_notes.write_journal(obsidian, "social_director", summary, reasoning=raw)
         return {"status": "ok" if new_count else "error", "new": new_count, "summary": summary}
     except Exception as e:
         logger.exception("social director failed")

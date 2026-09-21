@@ -457,12 +457,14 @@ def start(
             market_hours = business_intervals["market_hours"]
             trend_hours = business_intervals["trend_hours"]
             scheduler.add_job(
-                _guarded("market", lambda: agents.run_market_agent(db_path, llm, owner["id"], profile)),
+                _guarded("market", lambda: agents.run_market_agent(db_path, llm, owner["id"], profile,
+                                              obsidian=obsidian.mcp_client if obsidian is not None else None)),
                 "interval", hours=market_hours, id="market_agent",
                 next_run_time=_first_run_at("market_finder", market_hours, 2),
             )
             scheduler.add_job(
-                _guarded("trend", lambda: agents.run_trend_agent(db_path, llm, owner["id"], profile)),
+                _guarded("trend", lambda: agents.run_trend_agent(db_path, llm, owner["id"], profile,
+                                             obsidian=obsidian.mcp_client if obsidian is not None else None)),
                 "interval", hours=trend_hours, id="trend_agent",
                 next_run_time=_first_run_at("trend_scout", trend_hours, 5),
             )
@@ -474,18 +476,18 @@ def start(
             pipeline_hours = business_intervals.get("pipeline_hours", 12)
 
             def _pipeline_tick():
-                agents.run_product_creator(db_path, llm, owner["id"], profile)
+                agents.run_product_creator(db_path, llm, owner["id"], profile, obsidian=obsidian.mcp_client if obsidian is not None else None)
                 # The art director renders its options before filing them, so this tick
                 # can now sit on the GPU queue for a few minutes. That is fine here -- it
                 # runs every 12 hours and the renders respect the same reservation
                 # everything else does -- but it is why the bridge has to reach it.
-                agents.run_art_director(db_path, llm, owner["id"], profile, bridge=bridge)
+                agents.run_art_director(db_path, llm, owner["id"], profile, bridge=bridge, obsidian=obsidian.mcp_client if obsidian is not None else None)
                 # The art cards written before the order was flipped are still in the
                 # queue as prose. Self-limiting: once a card has its picture it is never
                 # picked up again, so this costs one query a tick forever after.
                 agents.backfill_art_renders(db_path, owner["id"], bridge)
-                agents.run_store_manager(db_path, llm, owner["id"], profile)
-                agents.run_social_director(db_path, llm, owner["id"], profile)
+                agents.run_store_manager(db_path, llm, owner["id"], profile, obsidian=obsidian.mcp_client if obsidian is not None else None)
+                agents.run_social_director(db_path, llm, owner["id"], profile, obsidian=obsidian.mcp_client if obsidian is not None else None)
 
             scheduler.add_job(
                 _guarded("pipeline", _pipeline_tick), "interval", hours=pipeline_hours,

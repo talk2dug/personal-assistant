@@ -1172,22 +1172,22 @@ class BusinessClient:
 
         runners = {
             "market_finder": lambda: agents.run_market_agent(
-                self.db_path, self.llm, self.owner_user_id, self.profile),
+                self.db_path, self.llm, self.owner_user_id, self.profile, obsidian=self.obsidian),
             "trend_scout": lambda: agents.run_trend_agent(
-                self.db_path, self.llm, self.owner_user_id, self.profile),
+                self.db_path, self.llm, self.owner_user_id, self.profile, obsidian=self.obsidian),
             "research": lambda: agents.run_research_queue(
                 self.db_path, self.llm, self.profile, obsidian=self.obsidian),
             "product_creator": lambda: agents.run_product_creator(
-                self.db_path, self.llm, self.owner_user_id, self.profile),
+                self.db_path, self.llm, self.owner_user_id, self.profile, obsidian=self.obsidian),
             # bridge, so a run he triggers from chat renders its options the same way
             # the scheduled one does -- an art card with pictures from the timer and a
             # text-only one from "run the art director" would be a baffling difference.
             "art_director": lambda: agents.run_art_director(
-                self.db_path, self.llm, self.owner_user_id, self.profile, bridge=self.bridge),
+                self.db_path, self.llm, self.owner_user_id, self.profile, bridge=self.bridge, obsidian=self.obsidian),
             "store_manager": lambda: agents.run_store_manager(
-                self.db_path, self.llm, self.owner_user_id, self.profile),
+                self.db_path, self.llm, self.owner_user_id, self.profile, obsidian=self.obsidian),
             "social_director": lambda: agents.run_social_director(
-                self.db_path, self.llm, self.owner_user_id, self.profile),
+                self.db_path, self.llm, self.owner_user_id, self.profile, obsidian=self.obsidian),
         }
         runner = runners.get(agent)
         if runner is None:

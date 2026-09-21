@@ -117,11 +117,79 @@ def current(db_path: str) -> dict:
     """Everything the dashboard needs to explain the store's current pace."""
     rate = products_per_day(db_path)
     history = policy_history(db_path)
+    budget = marketing_budget_cents(db_path)
     return {
         "products_per_day": rate,
         "paused": rate == 0,
         "autopublish": autopublish(db_path),
         "max_per_day": MAX_PER_DAY,
+        "marketing_budget_cents": budget,
+        "marketing_is_free_only": budget <= 0,
         "last_change": history[0] if history else None,
         "history": history,
     }
+
+
+# --- marketing money -------------------------------------------------------------------
+#
+# Jack: "i dont want to use any of my own cash to fund marketing... Once we start
+# generating revenue then we can take a portion of the profits to use towards marketing
+# funds, if the marketing plan makes sense and can show we will receive an ROI of X."
+#
+# So the budget starts at zero and is not a number any agent can raise. This is a hard
+# guard rather than a line in a prompt, because a prompt is a request and a function that
+# returns False is a rule -- and the thing on the other side of it is his bank account.
+# The route to a budget is deliberately the same board he already reads: a `purchase`
+# request carrying the projected return, which he grants or refuses like anything else.
+
+BUDGET_KEY = "store.marketing_budget_cents"
+DEFAULT_BUDGET_CENTS = 0
+
+
+def marketing_budget_cents(db_path: str) -> int:
+    raw = core_db.get_setting(db_path, BUDGET_KEY)
+    if raw is None:
+        return DEFAULT_BUDGET_CENTS
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        # Unreadable budget means no budget. The failure has to fall toward not spending.
+        logger.warning("unreadable %s (%r); treating as zero", BUDGET_KEY, raw)
+        return DEFAULT_BUDGET_CENTS
+
+
+def set_marketing_budget(db_path: str, cents: int, *, changed_by: str = "owner",
+                         reason: str | None = None) -> dict:
+    """Grant a marketing budget. Owner-only by convention and by call site.
+
+    No agent tool reaches this; it is wired to the owner's own path, so a team that wants
+    money has to ask for it on the board and be told yes by a person.
+    """
+    try:
+        target = max(0, int(cents))
+    except (TypeError, ValueError):
+        raise ValueError(f"{cents!r} is not an amount in cents")
+    previous = marketing_budget_cents(db_path)
+    core_db.set_setting(db_path, BUDGET_KEY, str(target))
+    _record(db_path, {"at": _now(), "field": "marketing_budget_cents", "from": previous,
+                      "to": target, "by": changed_by, "reason": reason})
+    return {"previous_cents": previous, "budget_cents": target}
+
+
+def may_spend_on_marketing(db_path: str, cents: int) -> tuple:
+    """(allowed, reason). The reason is written to be read by an agent, and to tell it
+    what to do instead of spending -- a refusal that does not name the alternative just
+    gets worked around."""
+    budget = marketing_budget_cents(db_path)
+    if budget <= 0:
+        return False, (
+            "There is no marketing budget: the store runs on free distribution only until "
+            "it makes money. Do not spend, and do not ask a platform for paid placement. "
+            "If you believe paid promotion is worth it, put it on the owner's board as a "
+            "`purchase` request stating the amount, what it buys, and the return you "
+            "project with the reasoning behind that number -- he funds it from profit, and "
+            "only against a plan that shows an ROI worth having.")
+    if cents > budget:
+        return False, (f"${cents / 100:,.2f} is more than the ${budget / 100:,.2f} "
+                       f"approved marketing budget; ask for the increase on the board first.")
+    return True, f"within the ${budget / 100:,.2f} approved budget"

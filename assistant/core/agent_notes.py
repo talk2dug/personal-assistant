@@ -95,3 +95,113 @@ def write_research_brief(obsidian, topic: str, findings: str, question: str | No
         # Never fatal: the findings are in the database either way.
         logger.exception("could not write the research brief for %r to the vault", topic)
         return {"written": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+# --- the business agents' working journal ----------------------------------------------
+#
+# Jack: "all agents should be using obsidian", and separately, for the dashboard: "i want
+# to see their thoughts on the market research and how they are coming to the conclusions".
+# Those are the same requirement seen from two sides -- the reasoning has to be written
+# down somewhere durable, in prose, per agent, per run.
+#
+# The hired staff already journal (staff.infer_data_feeds gives everyone the `journal`
+# feed). The seven background agents in agents.py did not: only the research queue ever
+# touched the vault, so market_finder, trend_scout, product_creator, art_director,
+# store_manager and social_director each re-derived their conclusions from scratch on
+# every run and left no trace of why they chose anything.
+#
+# This module's own rule applies and is the reason read_journal exists at all: **anything
+# written must be read back into a later prompt, or it is a diary, not learning.** So a
+# journal entry is written after a run AND the last few are fed into the next one. That is
+# what turns "the agents use Obsidian" into agents that actually get better, which is the
+# thing Jack is paying attention to.
+
+# Tight, unlike a brief: this text goes into a prompt on every run, and an agent that
+# spends its context re-reading a fortnight of its own musings has no room left to think.
+JOURNAL_BODY_CHARS = 4000
+JOURNAL_PRIOR_CHARS = 2500
+JOURNAL_PRIOR_ENTRIES = 3
+
+
+def journal_title(agent: str, now: datetime | None = None) -> str:
+    """One note per agent per day, dated first so the folder sorts chronologically.
+
+    Per day rather than per run: several runs a day is normal, and a note each would bury
+    the folder the owner also reads. Same day appends into the same note.
+    """
+    return f"{_day(now)} Journal -- {agent}"
+
+
+def write_journal(obsidian, agent: str, summary: str, reasoning: str = "",
+                  decisions: list | None = None, now: datetime | None = None) -> dict:
+    """Record what this agent concluded and why. Never raises.
+
+    `summary` is the one-line outcome; `reasoning` is the prose that matters -- what it
+    looked at, what it ruled out, and on what grounds. An entry with a summary and no
+    reasoning is permitted but close to useless: it tells the next run what happened and
+    not one thing about why.
+    """
+    if obsidian is None:
+        return {"written": False, "reason": "no vault client wired"}
+    stamp = (now or datetime.now(timezone.utc))
+    lines = [f"### {stamp:%H:%M} UTC", "", (summary or "").strip() or "(no summary)"]
+    if (reasoning or "").strip():
+        lines += ["", "**Reasoning**", "", reasoning.strip()[:JOURNAL_BODY_CHARS]]
+    if decisions:
+        lines += ["", "**Decisions**", ""]
+        lines += [f"- {str(d).strip()}" for d in decisions if str(d).strip()]
+    lines.append("")
+
+    title = journal_title(agent, stamp)
+    try:
+        existing = ""
+        try:
+            previous = obsidian.read_note(AGENT_FOLDER, title)
+            existing = (previous.get("content") or "").rstrip() + "\n\n"
+        except Exception:
+            existing = ""          # first entry of the day; not an error
+        result = obsidian.write_note(
+            AGENT_FOLDER, title, existing + "\n".join(lines),
+            tags=["journal", "agent", agent])
+        return {"written": True, "path": result.get("path")}
+    except Exception as e:
+        # A vault on a disconnected drive costs the agent its note, never its work --
+        # everything real was committed to the database before this was reached.
+        logger.warning("could not journal %s to the vault: %s", agent, e)
+        return {"written": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+def read_journal(obsidian, agent: str, entries: int = JOURNAL_PRIOR_ENTRIES) -> str:
+    """The agent's own recent notes, as a block to prepend to its next prompt.
+
+    Returns "" when there is nothing to say, so a caller can concatenate unconditionally.
+    This is the half that makes the writing worth doing.
+    """
+    if obsidian is None:
+        return ""
+    try:
+        listing = obsidian.list_notes(AGENT_FOLDER)
+        names = listing.get("notes") if isinstance(listing, dict) else listing
+        titles = sorted(
+            (n if isinstance(n, str) else n.get("title", "")) for n in (names or []))
+        mine = [t for t in titles if t.endswith(f"Journal -- {agent}")][-entries:]
+        if not mine:
+            return ""
+        chunks = []
+        for title in reversed(mine):                # newest first
+            try:
+                note = obsidian.read_note(AGENT_FOLDER, title)
+                body = (note.get("content") or "").strip()
+                if body:
+                    chunks.append(f"--- {title} ---\n{body}")
+            except Exception:
+                continue
+        if not chunks:
+            return ""
+        joined = "\n\n".join(chunks)[:JOURNAL_PRIOR_CHARS]
+        return ("\n\nYOUR OWN RECENT NOTES (what you concluded on previous runs, and why). "
+                "Build on these rather than re-deriving them, and say so plainly if you are "
+                "now changing your mind about one:\n\n" + joined + "\n")
+    except Exception as e:
+        logger.warning("could not read %s journal from the vault: %s", agent, e)
+        return ""

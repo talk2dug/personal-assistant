@@ -208,6 +208,14 @@ _NOT_A_CREDITOR = (
 )
 
 
+# Whole-line section headings, never a lender.
+_SECTION_HEADINGS = {
+    "collections", "accounts", "inquiries", "public records", "personal information",
+    "credit accounts", "summary", "account information", "creditor contacts",
+    "payment history", "account history", "negative accounts",
+}
+
+
 def looks_like_an_account(line: dict) -> bool:
     """Whether a parsed block is really a tradeline.
 
@@ -219,6 +227,12 @@ def looks_like_an_account(line: dict) -> bool:
     creditor = (line.get("creditor") or "").lower()
     if not creditor or any(phrase in creditor for phrase in _NOT_A_CREDITOR):
         return False
+    # An account number is as good as a money figure, and sometimes better: a real
+    # collection can be listed with no balance my patterns recognise, while no page header
+    # or FCRA notice ever carries "Account Number: *1234". Requiring money alone dropped a
+    # live Duke Energy collection out of the Equifax file entirely.
+    if (line.get("account_last4") or "").strip():
+        return True
     return any(line.get(field) is not None
                for field in ("balance", "credit_limit", "past_due"))
 
@@ -242,7 +256,11 @@ _RECORD_MARKERS = (
 # Field labels, in both bureaus' wording. Most specific first: "High Credit" must be tried
 # before "Credit", and "Amount Past Due" before "Past Due".
 _FIELD_PATTERNS = {
-    "balance": (r"Balance(?:\s*Amount)?",),
+    # Equifax dates its collection balances ("Balance as of 07/18/2025: $1,404") and labels
+    # the original sum simply "Amount". The dated form uses [^$] so it can cross a date but
+    # never a different money field -- the tight gap on the plain form is what stopped a
+    # loose search collecting the next column, and that has to stay.
+    "balance": (r"Balance\s+as\s+of[^$]{0,24}", r"Balance(?:\s*Amount)?", r"Amount"),
     "credit_limit": (r"Credit\s*Limit",),
     "high_balance": (r"High\s*(?:Balance|Credit)",),
     "past_due": (r"Amount\s*Past\s*Due", r"Past\s*Due"),
@@ -311,7 +329,24 @@ def _creditor_from(record: str) -> str | None:
         line = re.sub(r"\s+-\s+(Closed|Open|Paid).*$", "", line, flags=re.I)
         line = re.sub(r"\s{2,}.*$", "", line)
         line = " ".join(line.split()).strip(" -:")
-        if len(line) < 3 or any(p in line.lower() for p in _NOT_A_CREDITOR):
+        low = line.lower()
+        if len(line) < 3 or any(p in low for p in _NOT_A_CREDITOR):
+            continue
+        # A bare section heading, checked as a WHOLE line rather than a substring:
+        # "Collections" alone is Equifax's heading, but "CREDIT COLLECTION SERVICES" is a
+        # real agency and a substring test would throw it away with the heading.
+        if low.strip(" .:") in _SECTION_HEADINGS:
+            continue
+        # Explanatory prose. A lender's name is a name, not a sentence -- the block for
+        # each Equifax section opens with a paragraph telling the consumer what the
+        # section means, and the first one became a creditor called "Collections".
+        if len(line.split()) > 8:
+            continue
+        # PDF extraction breaks those paragraphs across lines, so short fragments like
+        # "minimum payment." arrive looking like candidates. Every real lender name carries
+        # a capital -- "ONLINE COLLECTIONS GRVL", "Bridgecrest Credit Company" -- and a
+        # sentence fragment does not.
+        if line == line.lower():
             continue
         if re.fullmatch(r"[\d\W]+", line):
             continue

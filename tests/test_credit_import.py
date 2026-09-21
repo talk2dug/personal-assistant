@@ -333,3 +333,52 @@ class TestWebArchive:
         experian = ("Account Name\nCAPITAL ONE\nBalance\n$100\n"
                     "Account Name\nCHASE\nBalance\n$200\n")
         assert len(ci.split_records(experian)) == 2
+
+
+class TestEquifaxCollections:
+    """Equifax writes collections unlike anything else in the file, and getting it wrong
+    silently dropped live accounts -- which then read as "absent from Equifax", i.e. as a
+    dispute. A parser bug that manufactures dispute leads is worse than one that crashes.
+    """
+
+    BLOCK = ("ONLINE COLLECTIONS GRVL\n"
+             "PO Box 1234, Winterville, NC 28590-1234 | (252) 555-0100\n"
+             "Account Number: *3821 | Owner: Individual Account\n"
+             "Collection Reported: 04/02/2025 Amount: $1,404\n"
+             "Original Creditor: DUKE ENERGY FL PROGRESS ENERGY\n"
+             "Balance as of 07/18/2025: $1,404\n"
+             "Status as of 07/18/2025: Unpaid\n")
+
+    def test_a_dated_balance_label_is_read(self):
+        """"Balance as of 07/18/2025: $1,404" -- the tight label-to-value gap that stops a
+        loose search grabbing the next column also rejected this."""
+        assert ci._labelled_money(" ".join(self.BLOCK.split()),
+                                  ci._FIELD_PATTERNS["balance"]) == 1404.0
+
+    def test_the_collection_is_recognised_as_an_account(self):
+        lines = ci.parse_tradelines(self.BLOCK)["tradelines"]
+        assert len(lines) == 1
+        assert lines[0]["creditor"].startswith("ONLINE COLLECTIONS")
+        assert lines[0]["account_last4"] == "3821"
+
+    def test_an_account_number_alone_is_enough_to_be_an_account(self):
+        """A real collection can carry no balance this parser recognises, but no page
+        header or FCRA notice ever carries "Account Number: *1234"."""
+        assert ci.looks_like_an_account(
+            {"creditor": "SOME AGENCY", "account_last4": "3821",
+             "balance": None, "credit_limit": None, "past_due": None})
+        assert not ci.looks_like_an_account(
+            {"creditor": "SOME AGENCY", "account_last4": None,
+             "balance": None, "credit_limit": None, "past_due": None})
+
+    def test_a_section_heading_is_not_a_creditor(self):
+        """Checked as a whole line: "Collections" alone is Equifax's heading, but
+        "CREDIT COLLECTION SERVICES" is a real agency a substring test would discard."""
+        assert ci._creditor_from("Collections\nCREDIT COLLECTIONS\nBalance: $155\n") \
+            == "CREDIT COLLECTIONS"
+
+    def test_a_sentence_fragment_is_not_a_creditor(self):
+        """PDF extraction breaks the section blurb across lines, and "minimum payment."
+        arrived looking like a candidate. Every real lender name carries a capital."""
+        assert ci._creditor_from("minimum payment.\nONLINE COLLECTIONS GRVL\nAmount: $1,404\n") \
+            == "ONLINE COLLECTIONS GRVL"

@@ -24,6 +24,7 @@ import Pipelines from './pages/Pipelines'
 import Review from './pages/Review'
 import RfAround from './pages/RfAround'
 import Schedule from './pages/Schedule'
+import Spending from './pages/Spending'
 import Tasks from './pages/Tasks'
 
 export const SECTIONS = [
@@ -53,6 +54,11 @@ export const SECTIONS = [
     context: 'the Kitchen section, showing recipes, pantry inventory and the meal plan' },
   { key: 'grocery', label: 'Grocery', element: Grocery, wide: true,
     context: 'the Grocery section, showing the shopping list and the Kroger cart' },
+  { key: 'spending', label: 'Spending', element: Spending, wide: true,
+    context: 'the Spending screen, where every item on his checking account is sorted '
+      + 'into required or extra so a budget can be built from what he actually spends. '
+      + 'It leads with merchants ordered by cost, shows how much is still unsorted, and '
+      + 'lets a single transaction override its merchant rule' },
   { key: 'finance', label: 'Finance', element: Finance, wide: true,
     context: 'the Finance section, showing accounts, recurring charges, debts and projections' },
   { key: 'crypto', label: 'Crypto desk', element: Crypto, wide: true,

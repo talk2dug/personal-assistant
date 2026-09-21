@@ -1,0 +1,231 @@
+/* Sorting the checking account. Reuses the app's HUD tokens rather than a second palette,
+   same precedent as needs.css / company.css / credit.css.
+
+   The layout job is narrow: make the four choices one glance and one click, and keep the
+   unsorted total permanently visible. This screen is used by working down a list of 96
+   merchants, so anything costing an extra click costs 96 of them. */
+
+.sp { display: flex; flex-direction: column; gap: 14px; }
+.sp-dim { color: var(--text-dim); font-size: 12.5px; line-height: 1.5; }
+.sp-error { color: var(--red); font-family: var(--font-mono); font-size: 12px; }
+
+/* --- the split ---------------------------------------------------------------------- */
+
+.sp-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+
+.sp-stat {
+  border: 1px solid var(--border-dim);
+  background: var(--bg-panel);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.sp-stat .v { font-family: var(--font-display); font-size: 19px; color: var(--text); }
+.sp-stat .v.req { color: var(--cyan); }
+.sp-stat .v.ext { color: var(--amber); }
+.sp-stat .v.todo { color: var(--text-dim); }
+
+.sp-stat .l {
+  font-family: var(--font-hud);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.sp-meta {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sp-sync {
+  margin-left: auto;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 4px 12px;
+  border: 1px solid var(--cyan-dim);
+  background: none;
+  color: var(--cyan);
+  cursor: pointer;
+}
+
+.sp-sync:disabled {
+  color: var(--text-dim);
+  border-color: var(--border-dim);
+  cursor: default;
+}
+
+.sp-warn {
+  margin: 0;
+  padding: 8px 11px;
+  border-left: 3px solid var(--amber);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* --- the work list -------------------------------------------------------------------- */
+
+.sp-head { display: flex; align-items: baseline; gap: 10px; }
+
+.sp-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cyan-dim);
+}
+
+.sp-toggle {
+  margin-left: auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.sp-toggle:hover { color: var(--cyan); }
+
+.sp-merchants { list-style: none; margin: 0; padding: 0; }
+
+.sp-merchants > li {
+  border-bottom: 1px solid var(--divider);
+  border-left: 3px solid transparent;
+  padding: 6px 0 6px 8px;
+}
+
+/* The decision is carried on the left edge so a sorted list can be scanned without
+   reading it. */
+.sp-merchants > li.n-required { border-left-color: var(--cyan); }
+.sp-merchants > li.n-extra { border-left-color: var(--amber); }
+.sp-merchants > li.n-transfer,
+.sp-merchants > li.n-income { border-left-color: var(--steel-mid); opacity: 0.68; }
+
+.sp-m-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.sp-m-name {
+  flex: 1;
+  min-width: 180px;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13.5px;
+  padding: 0;
+}
+
+.sp-m-name em {
+  color: var(--text-dim);
+  font-style: normal;
+  font-size: 11px;
+  margin-left: 8px;
+}
+
+.sp-m-name:hover { color: var(--cyan-bright); }
+
+.sp-m-spent {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+  min-width: 92px;
+  text-align: right;
+}
+
+/* --- the four choices ----------------------------------------------------------------- */
+
+.sp-choice { display: flex; gap: 4px; flex: none; }
+
+.sp-pill {
+  font-family: var(--font-hud);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  padding: 3px 9px;
+  border: 1px solid var(--border-dim);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.sp-pill:hover { color: var(--text); }
+.sp-pill:disabled { opacity: 0.4; cursor: default; }
+
+.sp-pill.is-on.p-required {
+  background: var(--cyan-dim);
+  color: var(--bg);
+  border-color: var(--cyan);
+}
+
+.sp-pill.is-on.p-extra {
+  background: var(--amber);
+  color: var(--bg);
+  border-color: var(--amber);
+}
+
+.sp-pill.is-on.p-transfer,
+.sp-pill.is-on.p-income {
+  background: var(--steel-mid);
+  color: var(--bg);
+  border-color: var(--steel-bright);
+}
+
+/* --- per-item drill-down ---------------------------------------------------------------- */
+
+.sp-txns {
+  margin: 6px 0 4px 6px;
+  border-left: 1px solid var(--divider);
+  padding-left: 10px;
+}
+
+.sp-txns ul { list-style: none; margin: 6px 0 0; padding: 0; }
+
+.sp-txns li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+/* A hand-made decision is marked, because it is the one thing a merchant rule will not
+   change, and that is worth being able to see at a glance. */
+.sp-txns li.is-manual {
+  border-left: 2px solid var(--cyan);
+  padding-left: 6px;
+  margin-left: -8px;
+}
+
+.sp-date { font-family: var(--font-mono); color: var(--text-dim); min-width: 44px; }
+
+.sp-amt {
+  font-family: var(--font-mono);
+  color: var(--text);
+  min-width: 78px;
+  text-align: right;
+}
+
+.sp-desc { flex: 1; min-width: 160px; color: var(--text-dim); }
+.sp-desc em { font-style: normal; opacity: 0.7; }
+
+@media (max-width: 640px) {
+  .sp-m-spent { min-width: 0; }
+  .sp-choice { width: 100%; }
+}

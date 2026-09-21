@@ -63,6 +63,31 @@ export const api = {
 
   // The "needs you" board: what the business team is blocked on. Secrets travel one
   // way -- provideNeed sends a value up, and nothing ever sends one back down.
+  // Sorting the checking account into required vs extra.
+  spending: ({ since, unreviewed } = {}) => {
+    const qs = new URLSearchParams()
+    if (since) qs.set('since', since)
+    if (unreviewed) qs.set('unreviewed', 'true')
+    return request(`/api/spending${qs.toString() ? `?${qs}` : ''}`)
+  },
+  spendingTransactions: ({ merchant, since, necessity, limit } = {}) => {
+    const qs = new URLSearchParams()
+    if (merchant) qs.set('merchant', merchant)
+    if (since) qs.set('since', since)
+    if (necessity) qs.set('necessity', necessity)
+    if (limit) qs.set('limit', String(limit))
+    return request(`/api/spending/transactions${qs.toString() ? `?${qs}` : ''}`)
+  },
+  classifyMerchant: (merchant, necessity, note) =>
+    request('/api/spending/merchants/classify',
+      { method: 'POST', body: JSON.stringify({ merchant, necessity, note }) }),
+  classifyTransaction: (eraId, necessity, note) =>
+    request(`/api/spending/transactions/${encodeURIComponent(eraId)}/classify`,
+      { method: 'POST', body: JSON.stringify({ necessity, note }) }),
+  syncSpending: (accountKey) =>
+    request('/api/spending/sync',
+      { method: 'POST', body: JSON.stringify({ account_key: accountKey || null }) }),
+
   company: () => request('/api/company'),
   needs: () => request('/api/needs'),
   provideNeed: (id, value) =>

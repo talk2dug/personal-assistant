@@ -66,6 +66,7 @@ from .routes.pipelines import router as pipelines_router
 from .routes.review import router as review_router
 from .routes.rf import router as rf_router
 from .routes.schedule import router as schedule_router
+from .routes.spending import router as spending_router
 from .routes.tools import router as tools_router
 from .routes.vision import router as vision_router
 from .routes.weather import router as weather_router
@@ -113,6 +114,7 @@ def create_app(
     app.include_router(active_work_router)
     app.include_router(crypto_router)
     app.include_router(company_router)
+    app.include_router(spending_router)
     app.include_router(needs_router)
     app.include_router(review_router)
     app.include_router(devices_router)

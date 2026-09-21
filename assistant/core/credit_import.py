@@ -159,6 +159,7 @@ _NOT_A_CREDITOR = (
     "credit report", "personal information", "account summary", "report summary",
     "prepared for", "page ", "table of contents", "your report", "file number",
     "consumer statement", "score factors", "inquiries", "public records",
+    "credit accounts", "account history", "revolving accounts", "installment accounts",
     "dispute", "contact us", "how to read", "glossary",
 )
 
@@ -178,6 +179,97 @@ def looks_like_an_account(line: dict) -> bool:
                for field in ("balance", "credit_limit", "past_due"))
 
 
+# How a report divides itself into accounts. Neither real bureau uses blank lines -- the
+# first attempt split on them and got ONE block out of a 59,891-character TransUnion file,
+# which is how a page header ended up stored as a tradeline. Both formats instead repeat a
+# marker before every account, so that is what to anchor on.
+_RECORD_MARKERS = (
+    # TransUnion prints this header line above each account.
+    re.compile(r"Account Name\s+Account Number", re.I),
+    # Equifax repeats a "Confirmation # ..." page banner before each one.
+    re.compile(r"Confirmation\s*#\s*\d+", re.I),
+)
+
+# Field labels, in both bureaus' wording. Most specific first: "High Credit" must be tried
+# before "Credit", and "Amount Past Due" before "Past Due".
+_FIELD_PATTERNS = {
+    "balance": (r"Balance(?:\s*Amount)?",),
+    "credit_limit": (r"Credit\s*Limit",),
+    "high_balance": (r"High\s*(?:Balance|Credit)",),
+    "past_due": (r"Amount\s*Past\s*Due", r"Past\s*Due"),
+}
+
+_TYPE_LABEL = re.compile(
+    r"(?:Loan/Account\s*Type|Loan\s*Type|Account\s*Type)\s*:?\s*([A-Za-z /]{3,40})", re.I)
+_STATUS_LABEL = re.compile(
+    r"(?:Pay\s*Status|Account\s*Status|Status)\s*:?\s*([A-Za-z>,;'\- ]{3,48})", re.I)
+_OPENED_LABEL = re.compile(r"Date\s*Opened\s*:?\s*(\d{1,2}/\d{1,2}/\d{2,4})", re.I)
+
+# Equifax shows the last four (*1234); TransUnion shows the LEADING digits and masks the
+# tail (123456789012****). Those leading digits are more sensitive than the last four and
+# identify nothing useful, so they are never captured.
+_LAST4_TAIL = re.compile(r"\*+\s*(\d{4})\b")
+_MASKED_HEAD = re.compile(r"\b\d{6,}\*{2,}")
+
+
+def split_records(text: str) -> list:
+    """Cut the report into one string per account.
+
+    Falls back to blank-line blocks only when neither marker is present, which is the
+    hand-typed or CSV case rather than either real bureau export.
+    """
+    for marker in _RECORD_MARKERS:
+        parts = marker.split(text)
+        if len(parts) >= 3:                     # a header plus at least two accounts
+            return [p for p in parts[1:] if p.strip()]
+    return [b for b in re.split(r"\n\s*\n", text) if b.strip()]
+
+
+def _labelled_money(record: str, patterns) -> float | None:
+    """A money figure that belongs to its label.
+
+    The gap between label and number is held to a few characters on purpose. A looser
+    search walked past an empty field and collected the next number on the line: a dozen
+    Equifax accounts came back with "past due $60" picked up from a neighbouring column
+    while their balances were zero. An empty field must read as None, not as whatever
+    number happens to be nearby.
+    """
+    for pattern in patterns:
+        match = re.search(pattern + r"\s*:?\s{0,3}\$\s?([\d,]+(?:\.\d{2})?)", record, re.I)
+        if match:
+            return _money_to_float(match.group(1))
+    return None
+
+
+def _creditor_from(record: str) -> str | None:
+    """The lender's name, which both formats put first in the record.
+
+    Every run of digits is removed, not just masked ones. TransUnion prints the LEADING
+    digits of the account number on the same line as the name and masks the tail, so a
+    name-shaped capture was carrying real account digits into the database -- "CAPITAL ONE
+    5178058035". The lender's name never legitimately contains a long number, so stripping
+    them all costs nothing and closes that hole completely.
+    """
+    for raw in record.strip().splitlines():
+        line = " ".join(raw.split())
+        if not line or len(line) < 3:
+            continue
+        line = re.sub(r"\*+", " ", line)
+        line = re.sub(r"\b\d{3,}\b", " ", line)          # any long number, masked or not
+        # Chime prints a hex account id ("484D8DB018") beside the name. A lender name never
+        # contains a long mixed alphanumeric token, so it is an identifier, not a name.
+        line = re.sub(r"\b(?=[A-Za-z]*\d)[A-Za-z0-9]{6,}\b", " ", line)
+        line = re.sub(r"\s+-\s+(Closed|Open|Paid).*$", "", line, flags=re.I)
+        line = re.sub(r"\s{2,}.*$", "", line)
+        line = " ".join(line.split()).strip(" -:")
+        if len(line) < 3 or any(p in line.lower() for p in _NOT_A_CREDITOR):
+            continue
+        if re.fullmatch(r"[\d\W]+", line):
+            continue
+        return line[:60]
+    return None
+
+
 def parse_tradelines(text: str) -> dict:
     """Best-effort extraction of accounts from report text.
 
@@ -186,67 +278,62 @@ def parse_tradelines(text: str) -> dict:
     accounts, or a parse failure becomes "your credit is clean".
     """
     tradelines, unparsed = [], []
-    if not text:
+    if not (text or "").strip():
         return {"tradelines": [], "unparsed": ["no readable text in the file"]}
 
-    # Reports put one account per block, separated by blank lines or a creditor heading.
-    blocks = re.split(r"\n\s*\n", text)
-    for block in blocks:
-        chunk = " ".join(block.split())
-        if len(chunk) < 25:
-            continue
-        low = chunk.lower()
-        if not any(w in low for w in ("account", "balance", "creditor", "opened",
-                                      "credit limit", "high balance", "status")):
+    for record in split_records(text):
+        flat = " ".join(record.split())
+        if len(flat) < 40:
             continue
 
-        last4 = None
-        masked = _MASKED_TAIL.search(chunk)
-        if masked:
-            last4 = masked.group(1)
-        else:
-            tail = re.search(r"account\s*(?:#|number|no\.?)?\s*[:\-]?\s*[\dxX*#-]*?(\d{4})\b",
-                             chunk, re.I)
-            last4 = tail.group(1) if tail else None
-
-        creditor = None
-        name = re.search(r"^([A-Z][A-Za-z0-9 &'./-]{2,40})(?=\s|$)", chunk)
-        if name:
-            creditor = name.group(1).strip(" .-")
+        creditor = _creditor_from(record)
         if not creditor:
-            unparsed.append(redact(chunk[:110]))
+            unparsed.append(redact(flat[:110]))
             continue
 
-        balance = _money_to_float(
-            (re.search(rf"balance\D{{0,18}}{_MONEY}", chunk, re.I) or [None, None])[1]
-            if re.search(rf"balance\D{{0,18}}{_MONEY}", chunk, re.I) else None)
-        limit_match = re.search(rf"(?:credit limit|high balance|limit)\D{{0,18}}{_MONEY}",
-                                chunk, re.I)
-        credit_limit = _money_to_float(limit_match.group(1)) if limit_match else None
-        past_due_match = re.search(rf"past due\D{{0,18}}{_MONEY}", chunk, re.I)
-        past_due = _money_to_float(past_due_match.group(1)) if past_due_match else None
+        # Only ever the LAST four, and only where the bureau prints them. TransUnion masks
+        # the tail and shows leading digits instead; nothing is stored for those.
+        tail = _LAST4_TAIL.search(flat)
+        last4 = tail.group(1) if tail else None
 
-        kind = next((k for word, k in _ACCOUNT_KINDS if word in low), "other")
-        status = next((w for w in _STATUS_WORDS if w in low), None)
-        opened = re.search(r"opened\D{0,16}(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})",
-                           chunk, re.I)
+        # The account type comes from the type LABEL only. Scanning the whole record for
+        # keywords read Wells Fargo as a collection, because the dispute boilerplate every
+        # Equifax record carries mentions collections.
+        type_hit = _TYPE_LABEL.search(flat)
+        type_text = (type_hit.group(1) if type_hit else "").lower()
+        kind = next((k for word, k in _ACCOUNT_KINDS if word in type_text), None)
+        status_hit = _STATUS_LABEL.search(flat)
+        status = " ".join(status_hit.group(1).split())[:40] if status_hit else None
+        if kind is None and status:
+            # A charged-off or collection STATUS is a fact about the account, unlike a
+            # stray word in the page furniture.
+            kind = next((k for word, k in _ACCOUNT_KINDS if word in status.lower()), None)
+        kind = kind or "other"
+
+        limit = _labelled_money(flat, _FIELD_PATTERNS["credit_limit"])
+        high = _labelled_money(flat, _FIELD_PATTERNS["high_balance"])
+        # High balance is NOT a credit limit. Treating it as one made every collection
+        # look like a maxed-out card -- limit equal to balance -- and utilisation is about
+        # 30% of the score, so a wrong limit is a wrong strategy. Revolving accounts can
+        # fall back to it as an estimate; nothing else can.
+        if limit is None and kind == "credit_card":
+            limit = high
 
         candidate = {
-            "creditor": creditor[:60],
+            "creditor": creditor,
             "account_last4": last4,
             "kind": kind,
             "status": status,
-            "balance": balance,
-            "credit_limit": credit_limit,
-            "past_due": past_due,
-            "opened_on": opened.group(1) if opened else None,
+            "balance": _labelled_money(flat, _FIELD_PATTERNS["balance"]),
+            "credit_limit": limit,
+            "past_due": _labelled_money(flat, _FIELD_PATTERNS["past_due"]),
+            "opened_on": (_OPENED_LABEL.search(flat).group(1)
+                          if _OPENED_LABEL.search(flat) else None),
         }
-        # Rejected candidates are counted, never silently dropped: the count is what tells
-        # him the parse was imperfect rather than his credit being clean.
         if looks_like_an_account(candidate):
             tradelines.append(candidate)
         else:
-            unparsed.append(redact(chunk[:110]))
+            unparsed.append(redact(flat[:110]))
 
     return {"tradelines": tradelines, "unparsed": unparsed}
 

@@ -53,12 +53,31 @@ def redact(text: str) -> str:
 
 # --- text extraction --------------------------------------------------------------------
 
+def _html_to_text(html: str) -> str:
+    """Visible text from HTML, with block tags becoming line breaks.
+
+    Tags collapse to newlines rather than to nothing: a credit report's accounts are laid
+    out in table cells, and joining them with no separator runs "Balance" straight into
+    the next field's label, which is exactly the mush no label-based parser can read.
+    """
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", "\n", text)
+    text = (text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<")
+                .replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"'))
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
 def extract_text(path: str) -> str:
     """Pull readable text out of a report file.
 
     PDFs are read with pypdf. A scanned/image-only PDF yields nothing, which is a real and
     common case -- the caller must treat empty text as "could not read this", not as "this
     report has no accounts".
+
+    A Safari .webarchive is a binary plist wrapping the page: this is how Experian's report
+    actually arrived, because their PDF export is images and carries no text at all. The
+    HTML inside it is the same page the browser showed, so it reads perfectly.
     """
     lowered = path.lower()
     if lowered.endswith(".pdf"):
@@ -68,12 +87,36 @@ def extract_text(path: str) -> str:
             raise RuntimeError("pypdf is required to read PDF credit reports")
         reader = PdfReader(path)
         return "\n".join((page.extract_text() or "") for page in reader.pages)
+
+    if lowered.endswith(".webarchive"):
+        import plistlib
+
+        with open(path, "rb") as handle:
+            plist = plistlib.load(handle)
+        main = plist.get("WebMainResource") or {}
+        data = main.get("WebResourceData") or b""
+        encoding = main.get("WebResourceTextEncodingName") or "utf-8"
+        return _html_to_text(data.decode(encoding, errors="replace"))
+
+    if lowered.endswith((".mhtml", ".mht")):
+        import email as _email
+
+        with open(path, "rb") as handle:
+            message = _email.message_from_binary_file(handle)
+        for part in message.walk():
+            if part.get_content_type() == "text/html":
+                payload = part.get_payload(decode=True) or b""
+                return _html_to_text(payload.decode(
+                    part.get_content_charset() or "utf-8", errors="replace"))
+        return ""
+
     if lowered.endswith((".txt", ".csv", ".html", ".htm", ".json")):
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             text = handle.read()
         if lowered.endswith((".html", ".htm")):
-            text = re.sub(r"<[^>]+>", " ", text)
+            text = _html_to_text(text)
         return text
+
     raise ValueError(f"unsupported report format: {os.path.basename(path)}")
 
 
@@ -188,6 +231,11 @@ _RECORD_MARKERS = (
     re.compile(r"Account Name\s+Account Number", re.I),
     # Equifax repeats a "Confirmation # ..." page banner before each one.
     re.compile(r"Confirmation\s*#\s*\d+", re.I),
+    # Experian's web view puts every label on its own line, so a lone "Account Name" line
+    # is its record boundary and the creditor is the value immediately after it. This has
+    # to be tried AFTER TransUnion, whose header is "Account Name Account Number" on one
+    # line and would otherwise be cut in half by this pattern.
+    re.compile(r"^[ 	]*Account Name[ 	]*$", re.I | re.M),
 )
 
 # Field labels, in both bureaus' wording. Most specific first: "High Credit" must be tried

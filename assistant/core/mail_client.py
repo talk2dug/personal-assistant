@@ -242,6 +242,66 @@ class MailClient:
         finally:
             conn.logout()
 
+    def save_attachments(self, uid: str, out_dir: str, folder: str = "INBOX",
+                         max_bytes: int = 40 * 1024 * 1024,
+                         allowed_suffixes: tuple = (".pdf", ".csv", ".txt", ".html", ".htm",
+                                                    ".mhtml", ".mht", ".webarchive",
+                                                    ".json", ".png", ".jpg", ".jpeg")) -> dict:
+        """Write one message's attachments to disk and say what landed.
+
+        _extract_body deliberately skips attachments -- it is reading prose for triage --
+        so until now a file could reach the mailbox and never reach the machine. This is
+        the other half, and it exists for a specific situation: the useful documents here
+        (a credit report, a statement, a bill) arrive from a phone, at times when nobody is
+        sitting at the computer to use an upload form.
+
+        Deliberately narrow, because a mailbox is not a trusted source. Filenames in email
+        are attacker-controlled, so each is reduced to its basename and scrubbed to a safe
+        character set -- "../../.ssh/authorized_keys" becomes a harmless name rather than a
+        write outside out_dir. Only known document and image suffixes are written, and
+        anything past max_bytes is skipped rather than streamed to disk.
+        """
+        import os
+
+        os.makedirs(out_dir, exist_ok=True)
+        saved, skipped = [], []
+        conn = self._imap()
+        try:
+            conn.select('"%s"' % folder.replace("\\", "\\\\").replace('"', '\\"'), readonly=True)
+            _, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
+            if not data or data[0] is None:
+                return {"saved": [], "skipped": [], "error": f"no message with uid {uid}"}
+            msg = email.message_from_bytes(data[0][1])
+        finally:
+            conn.logout()
+
+        for part in msg.walk():
+            if part.get_content_disposition() != "attachment":
+                continue
+            raw_name = part.get_filename() or "attachment"
+            name = os.path.basename(raw_name.replace("\\", "/"))
+            name = re.sub(r"[^A-Za-z0-9._-]", "_", name).lstrip(".") or "attachment"
+            suffix = os.path.splitext(name)[1].lower()
+            if suffix not in allowed_suffixes:
+                skipped.append({"name": name, "reason": f"suffix {suffix or '(none)'} not allowed"})
+                continue
+            payload = part.get_payload(decode=True) or b""
+            if len(payload) > max_bytes:
+                skipped.append({"name": name, "reason": f"{len(payload):,} bytes is over the limit"})
+                continue
+            target = os.path.join(out_dir, name)
+            stem, ext = os.path.splitext(target)
+            counter = 1
+            while os.path.exists(target):
+                target = f"{stem}-{counter}{ext}"
+                counter += 1
+            with open(target, "wb") as handle:
+                handle.write(payload)
+            saved.append({"name": os.path.basename(target), "path": target, "bytes": len(payload)})
+
+        return {"saved": saved, "skipped": skipped}
+
+
     def send(self, to: str, subject: str, body: str) -> dict:
         message = EmailMessage()
         message["From"] = self.apple_id

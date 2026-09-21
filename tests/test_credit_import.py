@@ -287,3 +287,49 @@ class TestProgress:
         write_and_import(db, owner, tmp_path, later, "feb.txt", "2026-02-01")
         result = ci.compare(db, owner)
         assert result["accounts_appeared"] == [] and result["accounts_gone"] == []
+
+
+class TestWebArchive:
+    """Experian's PDF export is images with no text at all, so the report arrived as a
+    Safari .webarchive emailed from a phone. That is a binary plist wrapping the page --
+    the same HTML the browser showed, which reads perfectly."""
+
+    def _archive(self, tmp_path, html):
+        import plistlib
+
+        path = tmp_path / "report.webarchive"
+        with open(path, "wb") as handle:
+            plistlib.dump({"WebMainResource": {
+                "WebResourceData": html.encode("utf-8"),
+                "WebResourceMIMEType": "text/html",
+                "WebResourceTextEncodingName": "UTF-8"}}, handle)
+        return str(path)
+
+    def test_the_page_inside_is_read(self, tmp_path):
+        path = self._archive(tmp_path, "<html><body><p>Experian</p><p>Balance</p></body></html>")
+        text = ci.extract_text(path)
+        assert "Experian" in text and ci.detect_bureau(text) == "experian"
+
+    def test_scripts_and_styles_are_not_treated_as_content(self, tmp_path):
+        path = self._archive(
+            tmp_path, "<html><head><style>.x{color:red}</style>"
+                      "<script>var balance=999</script></head><body>CAPITAL ONE</body></html>")
+        text = ci.extract_text(path)
+        assert "color:red" not in text and "var balance" not in text
+        assert "CAPITAL ONE" in text
+
+    def test_tags_become_line_breaks_not_nothing(self, tmp_path):
+        """Accounts live in table cells. Joining cells with no separator runs a value
+        straight into the next label, which no label-based parser can read."""
+        path = self._archive(tmp_path, "<td>Balance</td><td>$1,240</td><td>Credit Limit</td>")
+        text = ci.extract_text(path)
+        assert "Balance" in text and "$1,240" in text
+        assert "Balance$1,240" not in text.replace(" ", "")
+
+    def test_a_lone_account_name_line_splits_experian_records(self):
+        """Experian puts every label on its own line, so that is its record boundary --
+        and it must not disturb TransUnion, whose header is "Account Name Account Number"
+        on a single line."""
+        experian = ("Account Name\nCAPITAL ONE\nBalance\n$100\n"
+                    "Account Name\nCHASE\nBalance\n$200\n")
+        assert len(ci.split_records(experian)) == 2

@@ -1,0 +1,179 @@
+/* The calendar. Reuses the app's HUD tokens, same precedent as the other sections.
+
+   Grouped as a list rather than a month grid on purpose: a grid gives every day equal
+   space, and his days are not equal -- the 15th carries rent, a phone bill and a paycheck
+   while most days carry nothing. A list weights the page by what is actually happening,
+   and it survives a phone screen, which is where this gets read. */
+
+.ag { display: flex; flex-direction: column; gap: 12px; }
+.ag-dim { color: var(--text-dim); font-size: 12.5px; }
+.ag-error { color: var(--red); font-family: var(--font-mono); font-size: 12px; }
+
+/* --- the header numbers ----------------------------------------------------------- */
+
+.ag-top {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+
+.ag-stat {
+  border: 1px solid var(--border-dim);
+  background: var(--bg-panel);
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-stat .v { font-family: var(--font-display); font-size: 18px; color: var(--text); }
+.ag-stat .v.in { color: var(--cyan); }
+.ag-stat .v.out { color: var(--amber); }
+
+.ag-stat .l {
+  font-family: var(--font-hud);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ag-range { display: flex; gap: 4px; align-items: center; }
+
+.ag-range button {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 4px 10px;
+  border: 1px solid var(--border-dim);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.ag-range button.is-on { color: var(--cyan); border-color: var(--cyan-dim); }
+
+.ag-warn {
+  margin: 0;
+  padding: 7px 10px;
+  border-left: 3px solid var(--amber);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* --- what is already past -------------------------------------------------------------
+   Kept at the top rather than in date order. Something missed does not get less important
+   by scrolling past it. */
+
+.ag-overdue {
+  border: 1px solid var(--red-dim);
+  background: var(--bg-inset);
+  padding: 8px 11px;
+}
+
+.ag-overdue h4 {
+  margin: 0 0 5px;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--red);
+}
+
+.ag-overdue ul { list-style: none; margin: 0; padding: 0; }
+
+.ag-overdue li {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding: 2px 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.ag-overdue b { color: var(--text); font-weight: 600; }
+
+/* --- the days ---------------------------------------------------------------------- */
+
+.ag-days { list-style: none; margin: 0; padding: 0; }
+
+.ag-days > li {
+  border-top: 1px solid var(--divider);
+  padding: 7px 0 7px 9px;
+  border-left: 3px solid transparent;
+}
+
+.ag-days > li.is-today { border-left-color: var(--cyan); background: var(--bg-inset); }
+.ag-days > li.is-past { opacity: 0.5; }
+
+.ag-day-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+
+.ag-day-label {
+  font-family: var(--font-hud);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cyan-dim);
+}
+
+.ag-days > li.is-today .ag-day-label { color: var(--cyan-bright); }
+
+.ag-day-money { font-family: var(--font-mono); font-size: 12px; }
+.ag-day-money.in { color: var(--cyan); }
+.ag-day-money.out { color: var(--amber); }
+
+/* The running figure is what turns a list of dates into a plan: rent three days before
+   payday reads very differently from rent three days after. */
+.ag-running {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ag-running.neg { color: var(--red); }
+
+.ag-entries { list-style: none; margin: 3px 0 0; padding: 0; }
+
+.ag-entries li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.ag-entries li.is-urgent .ag-title { color: var(--text); font-weight: 600; }
+
+.ag-tag {
+  font-family: var(--font-hud);
+  font-size: 8.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border: 1px solid var(--border-dim);
+  color: var(--text-dim);
+  flex: none;
+  min-width: 56px;
+  text-align: center;
+}
+
+.ag-tag.k-bill { color: var(--amber); border-color: var(--amber-dim); }
+.ag-tag.k-income { color: var(--cyan); border-color: var(--cyan-dim); }
+.ag-tag.k-deadline { color: var(--red); border-color: var(--red-dim); }
+.ag-tag.k-task { color: var(--steel-bright); }
+.ag-tag.k-event { color: var(--cyan-dim); }
+
+.ag-title { flex: 1; min-width: 180px; color: var(--text-dim); }
+.ag-detail { font-style: normal; font-size: 11px; color: var(--text-dim); opacity: 0.7; }
+
+.ag-amt { font-family: var(--font-mono); font-size: 12.5px; }
+.ag-amt.in { color: var(--cyan); }
+.ag-amt.out { color: var(--amber); }
+
+@media (max-width: 640px) {
+  .ag-title { min-width: 100%; }
+  .ag-running { margin-left: 0; }
+}

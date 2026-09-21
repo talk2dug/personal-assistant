@@ -9,6 +9,7 @@
 //
 // `wide` is for sections built around tables and charts (Finance, Media, Email);
 // everything else reads fine in the standard column.
+import Agenda from './pages/Agenda'
 import Agents from './pages/Agents'
 import Company from './pages/Company'
 import Credit from './pages/Credit'
@@ -34,6 +35,11 @@ export const SECTIONS = [
       + 'what, and which of his regular habits are slipping' },
   { key: 'tasks', label: 'Tasks', element: Tasks, wide: true,
     context: 'the Tasks section, showing open tasks, their due dates and priorities' },
+  { key: 'agenda', label: 'Calendar', element: Agenda, wide: true,
+    context: 'the Calendar, one timeline over everything with a date on it: bills and '
+      + 'paydays projected forward, tasks due, reminders, credit dispute deadlines and '
+      + 'his real calendar, with a running cash position and anything already overdue '
+      + 'pinned at the top' },
   { key: 'schedule', label: 'Schedule', element: Schedule, wide: true,
     context: 'the Schedule section, showing upcoming reminders and the weather forecast' },
   { key: 'email', label: 'Email', element: Email, wide: true,

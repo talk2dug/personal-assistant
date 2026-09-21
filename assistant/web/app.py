@@ -40,6 +40,7 @@ class SPAStaticFiles(StaticFiles):
 
 from .auth import router as auth_router
 from .routes.active_work import router as active_work_router
+from .routes.agenda import router as agenda_router
 from .routes.agents import router as agents_router
 from .routes.chat import router as chat_router
 from .routes.cameras import router as cameras_router
@@ -113,6 +114,7 @@ def create_app(
     app.include_router(agents_router)
     app.include_router(active_work_router)
     app.include_router(crypto_router)
+    app.include_router(agenda_router)
     app.include_router(company_router)
     app.include_router(spending_router)
     app.include_router(needs_router)

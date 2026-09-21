@@ -88,6 +88,13 @@ export const api = {
     request('/api/spending/sync',
       { method: 'POST', body: JSON.stringify({ account_key: accountKey || null }) }),
 
+  // One calendar over bills, paydays, tasks, reminders, deadlines and CalDAV.
+  agenda: ({ days, backDays } = {}) => {
+    const qs = new URLSearchParams()
+    if (days) qs.set('days', String(days))
+    if (backDays != null) qs.set('back_days', String(backDays))
+    return request(`/api/agenda${qs.toString() ? `?${qs}` : ''}`)
+  },
   company: () => request('/api/company'),
   needs: () => request('/api/needs'),
   provideNeed: (id, value) =>

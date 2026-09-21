@@ -313,10 +313,68 @@ def reconciliation(db_path: str, owner_user_id: int, today: date | None = None) 
     }
 
 
+def _spending_block(db_path: str) -> str:
+    """What he has sorted into required and extra, by hand, merchant by merchant.
+
+    This is the part no cached category total can supply. Era can say "$2,200 on shopping
+    and gear"; only he can say which of it he could stop tomorrow, and a budget is built
+    on exactly that distinction.
+
+    The unsorted remainder is always stated. A split covering a third of the account is
+    not a budget, and a planner told only the classified half would plan for a much
+    cheaper life than he has.
+    """
+    from . import spending
+
+    try:
+        summary = spending.summary(db_path)
+    except Exception:                                    # noqa: BLE001
+        return ""
+    if not summary.get("from"):
+        return ""
+
+    from datetime import date as _date
+    try:
+        start = _date.fromisoformat(summary["from"])
+        end = _date.fromisoformat(summary["to"])
+        months = max((end - start).days / 30.44, 0.5)
+    except (TypeError, ValueError):
+        months = 1.0
+
+    lines = [f"  sorted spending ({summary['from']} to {summary['to']}, "
+             f"{months:.1f} months, {summary['reviewed_share']:.0%} of outflow sorted):"
+             if summary.get("reviewed_share") is not None else "  sorted spending:"]
+    lines.append(f"    required ${summary['required']:,.2f} total | "
+                 f"${summary['required'] / months:,.2f} a month")
+    lines.append(f"    extra    ${summary['extra']:,.2f} total | "
+                 f"${summary['extra'] / months:,.2f} a month")
+    lines.append(f"    income   ${summary['income']:,.2f} total | "
+                 f"${summary['income'] / months:,.2f} a month")
+    surplus = (summary["income"] - summary["required"] - summary["extra"]) / months
+    lines.append(f"    surplus  ${surplus:,.2f} a month after everything he actually spent")
+    if summary.get("unreviewed"):
+        lines.append(f"    STILL UNSORTED ${summary['unreviewed']:,.2f} -- the split above "
+                     f"does not cover it, so treat these figures as a floor.")
+    lines.append(f"    transfers between his own accounts ${summary['transfers']:,.2f} "
+                 f"(not spending, do not budget against it)")
+
+    # Only merchants that actually cost him something: a cut cannot come from a merchant
+    # he never paid, and an employer mis-ruled as "extra" would otherwise head this list.
+    top = [m for m in spending.merchants(db_path)
+           if m.get("necessity") == "extra" and (m.get("spent") or 0) > 0][:8]
+    if top:
+        lines.append("    biggest discretionary merchants (where a cut would come from):")
+        for m in top:
+            lines.append(f"      {m['merchant'][:34]}: ${m['spent']:,.2f} over {m['txns']} items")
+    return "\n".join(lines)
+
+
 def briefing(db_path: str, owner_user_id: int, today: date | None = None) -> str:
     """The finance feed block, or an honest failure. Never raises into a staff run."""
     try:
-        return render(build(db_path, owner_user_id, today))
+        block = render(build(db_path, owner_user_id, today))
+        extra = _spending_block(db_path)
+        return block + ("\n" + extra if extra else "")
     except Exception as e:
         logger.exception("finance brief failed")
         return (f"PERSONAL FINANCES: unavailable ({type(e).__name__}). Do not plan from "

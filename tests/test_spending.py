@@ -201,3 +201,54 @@ class TestSummary:
     def test_an_empty_account_does_not_divide_by_zero(self, db):
         s = spending.summary(db)
         assert s["required"] == 0 and s["extra_share"] is None
+
+
+class TestIncomeIsNotSpending:
+    """The bug this class exists for: marking a merchant "extra" swept seven payroll
+    deposits -- $23,470 of real income -- into extra spending, because the rule engine
+    applied a spending judgement to money coming IN. A budget built on that would have
+    reported no income at all.
+    """
+
+    def test_a_spending_rule_never_touches_money_coming_in(self, db):
+        spending.sync_from_era(db, feed([
+            txn("t1", "Hyper Sol Payroll", 4182.89, outflow=False),
+            txn("t2", "Hyper Sol Payroll", -12.00),
+        ]), "uagr_1")
+        spending.set_merchant_rule(db, "Hyper Sol Payroll", "extra")
+        by_id = {t["era_id"]: t for t in spending.transactions(db)}
+        assert by_id["t1"]["necessity"] == "income", "the deposit must stay income"
+        assert by_id["t2"]["necessity"] == "extra", "the outflow still follows the rule"
+
+    def test_transfer_and_income_rules_still_apply_both_ways(self, db):
+        """Those two describe DIRECTION, not necessity, so they are legitimate on an
+        inflow -- a transfer in from savings really is a transfer."""
+        spending.sync_from_era(db, feed([
+            txn("t1", "Chime", 8755.66, outflow=False), txn("t2", "Chime", -500.00),
+        ]), "uagr_1")
+        spending.set_merchant_rule(db, "Chime", "transfer")
+        assert all(t["necessity"] == "transfer" for t in spending.transactions(db))
+
+    def test_income_survives_a_later_sync(self, db):
+        spending.sync_from_era(db, feed([txn("t1", "Payroll", 4182.89, outflow=False)]), "uagr_1")
+        spending.set_merchant_rule(db, "Payroll", "required")
+        spending.sync_from_era(db, feed([txn("t1", "Payroll", 4182.89, outflow=False)]), "uagr_1")
+        assert spending.transactions(db)[0]["necessity"] == "income"
+
+    def test_he_can_still_override_an_inflow_by_hand(self, db):
+        """A refund is an inflow he may legitimately want counted differently."""
+        spending.sync_from_era(db, feed([txn("t1", "Store", 30, outflow=False)]), "uagr_1")
+        spending.classify_transaction(db, "t1", "extra")
+        spending.set_merchant_rule(db, "Store", "required")
+        assert spending.transactions(db)[0]["necessity"] == "extra"
+
+    def test_an_income_only_merchant_is_not_buried(self, db):
+        """Ranked on outflow alone, an employer shows $0.00 spent and sorts to the bottom
+        -- which is how the most important row on the screen got mis-clicked."""
+        spending.sync_from_era(db, feed([
+            txn("t1", "Hyper Sol Payroll", 4182.89, outflow=False),
+            txn("t2", "DoorDash", -60.00),
+        ]), "uagr_1")
+        rows = spending.merchants(db)
+        assert rows[0]["merchant"] == "Hyper Sol Payroll"
+        assert rows[0]["received"] == 4182.89

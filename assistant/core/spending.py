@@ -239,11 +239,19 @@ def apply_rules(db_path: str) -> int:
         if not rules:
             return 0
         rows = conn.execute(
-            """SELECT id, merchant, necessity, necessity_source FROM spend_transactions
+            """SELECT id, merchant, necessity, necessity_source, is_outflow
+                 FROM spend_transactions
                 WHERE necessity_source IS NULL OR necessity_source != 'manual'""").fetchall()
         now = _now()
         for row in rows:
             wanted = rules.get(merchant_key(row["merchant"]))
+            # 'required' and 'extra' describe SPENDING. A rule carrying one of them must
+            # never touch money coming in: marking a merchant "extra" swept seven payroll
+            # deposits -- $23,470 of real income -- into extra spending, and a budget built
+            # on that would have had no income at all. 'income' and 'transfer' are about
+            # direction rather than necessity, so those still apply to both.
+            if wanted in ("required", "extra") and not row["is_outflow"]:
+                continue
             if wanted and row["necessity"] != wanted:
                 conn.execute(
                     "UPDATE spend_transactions SET necessity = ?, necessity_source = 'rule', "
@@ -283,6 +291,7 @@ def merchants(db_path: str, since: str | None = None, only_unreviewed: bool = Fa
     sql = f"""SELECT merchant,
                      COUNT(*) AS txns,
                      SUM(CASE WHEN is_outflow = 1 THEN ABS(amount) ELSE 0 END) AS spent,
+                     SUM(CASE WHEN is_outflow = 0 THEN amount ELSE 0 END) AS received,
                      MIN(txn_date) AS first_seen,
                      MAX(txn_date) AS last_seen,
                      SUM(CASE WHEN necessity = 'unreviewed' THEN 1 ELSE 0 END) AS unreviewed
@@ -300,7 +309,10 @@ def merchants(db_path: str, since: str | None = None, only_unreviewed: bool = Fa
         row["note"] = rule["note"] if rule else None
     if only_unreviewed:
         rows = [r for r in rows if r["necessity"] == "unreviewed"]
-    return sorted(rows, key=lambda r: -(r["spent"] or 0))
+    # Ranked by the larger of what it took and what it gave: an employer that spends
+    # nothing is the most important row on the screen, and ordering on outflow alone put
+    # payroll at the bottom looking like a rounding error.
+    return sorted(rows, key=lambda r: -max(r["spent"] or 0, r["received"] or 0))
 
 
 def transactions(db_path: str, merchant: str | None = None, since: str | None = None,

@@ -1,0 +1,188 @@
+/* The company dashboard. Reuses the app's HUD tokens throughout rather than introducing a
+   second palette -- same precedent as needs.css/review.css/credit.css.
+
+   The layout job: four different questions must stay visibly different. A single scrolling
+   feed would blur "what we made" into "what we think", and the second one is the part he
+   actually asked for and cannot get anywhere else. */
+
+.co { display: flex; flex-direction: column; gap: 16px; }
+
+.co-empty, .co-note {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+  max-width: 78ch;
+  margin: 8px 0 0;
+}
+
+.co-note strong { color: var(--cyan-dim); font-weight: 600; }
+.co-error { color: var(--red); font-family: var(--font-mono); font-size: 12px; }
+
+/* --- the headline numbers ----------------------------------------------------------- */
+
+.co-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
+}
+
+.co-stat {
+  border: 1px solid var(--border-dim);
+  border-top: 2px solid var(--steel-mid);
+  background: var(--bg-panel);
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.co-stat.t-ok { border-top-color: var(--cyan-dim); }
+.co-stat.t-warn { border-top-color: var(--amber); }
+
+.co-stat-value {
+  font-family: var(--font-display);
+  font-size: 21px;
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.co-stat.t-warn .co-stat-value { color: var(--amber); }
+
+.co-stat-label {
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.co-stat-note { font-size: 10.5px; color: var(--text-dim); opacity: 0.8; }
+
+/* --- panels -------------------------------------------------------------------------- */
+
+.co-panel {
+  border: 1px solid var(--border-dim);
+  background: var(--bg-panel);
+  padding: 12px 14px;
+}
+
+.co-panel header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  border-bottom: 1px solid var(--divider);
+  padding-bottom: 6px;
+  margin-bottom: 10px;
+}
+
+.co-panel h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cyan-dim);
+}
+
+.co-panel-meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.co-sub {
+  margin: 14px 0 6px;
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* --- lists --------------------------------------------------------------------------- */
+
+.co-list, .co-runs, .co-blockers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.co-list li, .co-runs li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--divider);
+  font-size: 13px;
+}
+
+.co-list li:last-child, .co-runs li:last-child { border-bottom: none; }
+
+.co-item-title { color: var(--text); flex: 1; }
+.co-item-meta, .co-run-summary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.co-run-summary { flex: 1; }
+.co-run-agent { font-family: var(--font-mono); font-size: 11px; color: var(--steel-bright); min-width: 12ch; }
+.co-item-why { flex: 2; font-size: 12px; color: var(--text-dim); }
+
+.co-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--steel-mid); flex: none; }
+.co-dot.s-ok, .co-dot.s-approved, .co-dot.s-live, .co-dot.s-published { background: var(--cyan); }
+.co-dot.s-error, .co-dot.s-failed { background: var(--red); }
+.co-dot.s-skipped, .co-dot.s-draft { background: var(--steel-mid); }
+
+.co-blockers li {
+  padding: 5px 0 5px 9px;
+  border-left: 3px solid var(--steel-mid);
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.co-blockers li.p1 { border-left-color: var(--red); }
+.co-blockers li.p2 { border-left-color: var(--amber); }
+.co-blockers strong { color: var(--text); font-weight: 600; }
+
+/* --- the journals -------------------------------------------------------------------
+   Collapsed by default: this is prose, several paragraphs per agent, and six of them
+   expanded at once would bury every other panel on the page. */
+
+.co-journal { border-bottom: 1px solid var(--divider); }
+
+.co-journal-head {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 7px 0;
+  font-family: var(--font-hud);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cyan-dim);
+}
+
+.co-journal-head:hover { color: var(--cyan-bright); }
+.co-journal-toggle { font-family: var(--font-mono); color: var(--text-dim); }
+
+.co-journal-body {
+  margin: 0 0 10px;
+  padding: 9px 11px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-dim);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 340px;
+  overflow-y: auto;
+}

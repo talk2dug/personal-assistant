@@ -29,6 +29,7 @@ const KIND_LABEL = {
   file: 'File to import',
   account: 'Account to create',
   purchase: 'Purchase',
+  hire: 'New specialist',
 }
 
 // What the input should look like for each kind. A secret gets a password field so it
@@ -40,6 +41,7 @@ const PLACEHOLDER = {
   file: 'Full path to the file or folder',
   account: 'Account name / id once created',
   purchase: 'What you bought, or the account it is on',
+  hire: 'Approve by naming the role, or decline',
 }
 
 function Prompts({ prompts }) {

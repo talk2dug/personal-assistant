@@ -43,7 +43,11 @@ from datetime import datetime, timezone
 #   file     -- something on his disk to import (the model catalogue images).
 #   account  -- "go sign up for this", where the deliverable is usually a secret after.
 #   purchase -- costs money and needs a human to agree to the spend.
-KINDS = ("secret", "url", "text", "file", "account", "purchase")
+#   hire     -- "we need a specialist we do not have". Jarvis CAN hire (staff.hire), so
+#               this is an approval rather than a capability gap: Jack asked to be the one
+#               who decides who joins the team. "If they need a specialist that has certain
+#               skill sets, then give me a task to hire them (aka new agent)."
+KINDS = ("secret", "url", "text", "file", "account", "purchase", "hire")
 
 # open      -- the team is waiting.
 # provided  -- Jack answered; the value is stored and the agent has not consumed it yet.
@@ -65,7 +69,7 @@ CREATE TABLE IF NOT EXISTS owner_requests (
     -- Stable machine name (printify_api_key). The dedupe key, and what secret() looks up.
     -- NULL is allowed for one-off asks that no agent will read back programmatically.
     name TEXT,
-    kind TEXT NOT NULL CHECK (kind IN ('secret','url','text','file','account','purchase')),
+    kind TEXT NOT NULL CHECK (kind IN ('secret','url','text','file','account','purchase','hire')),
     -- In the agent's own words: what becomes possible once this exists. This is the field
     -- that makes the board worth reading -- "Printify API key" is a chore, "without this
     -- no order can ever be fulfilled" is a priority.
@@ -116,6 +120,26 @@ def init_owner_requests(db_path: str) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(owner_requests)")}
         if "prompts" not in cols:
             conn.execute("ALTER TABLE owner_requests ADD COLUMN prompts TEXT")
+        # A CHECK constraint lives in the table definition, so adding a kind to an
+        # already-created table means rebuilding it. SQLite has no ALTER for this, and the
+        # alternative -- dropping the constraint entirely -- would let a typo'd kind become
+        # a row the UI cannot render.
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='owner_requests'"
+        ).fetchone()
+        if sql and "'hire'" not in (sql[0] or ""):
+            conn.executescript("""
+                PRAGMA foreign_keys=off;
+                ALTER TABLE owner_requests RENAME TO owner_requests_old;
+            """)
+            conn.executescript(SCHEMA)
+            shared = [c for c in cols if c != "prompts"] + ["prompts"]
+            names = ", ".join(shared)
+            conn.execute(f"INSERT INTO owner_requests ({names}) SELECT {names} FROM owner_requests_old")
+            conn.executescript("""
+                DROP TABLE owner_requests_old;
+                PRAGMA foreign_keys=on;
+            """)
         conn.commit()
 
 

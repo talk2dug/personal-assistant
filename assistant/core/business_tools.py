@@ -189,11 +189,15 @@ OWNER_REQUEST_TOOLS = [
             "title": {"type": "string", "description": "Short label, e.g. 'Printify API token'."},
             "kind": {
                 "type": "string",
-                "enum": ["secret", "url", "text", "file", "account", "purchase"],
+                "enum": ["secret", "url", "text", "file", "account", "purchase", "hire"],
                 "description": (
                     "secret = API key/password (stored, never shown back). url = a link. "
                     "text = a plain value like an account id. file = something on his "
-                    "disk to import. account = go sign up for this. purchase = costs money."
+                    "disk to import. account = go sign up for this. purchase = costs money "
+                    "(state the projected return -- there is no marketing budget until the "
+                    "store earns one). hire = you need a specialist the team does not have; "
+                    "say what skills, what they would own, and what is going undone without "
+                    "them. Jarvis can create the role once he approves."
                 ),
             },
             "name": {

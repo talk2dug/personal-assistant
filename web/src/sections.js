@@ -10,6 +10,7 @@
 // `wide` is for sections built around tables and charts (Finance, Media, Email);
 // everything else reads fine in the standard column.
 import Agents from './pages/Agents'
+import Company from './pages/Company'
 import Credit from './pages/Credit'
 import Day from './pages/Day'
 import Crypto from './pages/Crypto'
@@ -36,6 +37,11 @@ export const SECTIONS = [
     context: 'the Schedule section, showing upcoming reminders and the weather forecast' },
   { key: 'email', label: 'Email', element: Email, wide: true,
     context: 'the Email section, showing the inbox and flagged threads' },
+  { key: 'company', label: 'The Company', element: Company, wide: true,
+    context: 'the Company dashboard for the store: how many products a day the team is '
+      + 'launching and whether it is paused, what they have listed, what they are planning '
+      + 'to make next, what is blocking them, and the written reasoning each agent files '
+      + 'in its Obsidian journal explaining how it reached its conclusions' },
   { key: 'needs', label: 'Projects', element: Needs, wide: true,
     context: 'the Projects board, showing each business pipeline with two lanes: what the '
       + 'team is blocked on and waiting for him to supply (API keys, accounts, files, '

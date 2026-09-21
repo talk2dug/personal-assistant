@@ -45,6 +45,7 @@ from .routes.chat import router as chat_router
 from .routes.cameras import router as cameras_router
 from .routes.cellular import router as cellular_router
 from .routes.command_center import router as command_center_router
+from .routes.company import router as company_router
 from .routes.credit import router as credit_router
 from .routes.debts import router as debts_router
 from .routes.crypto import router as crypto_router
@@ -111,6 +112,7 @@ def create_app(
     app.include_router(agents_router)
     app.include_router(active_work_router)
     app.include_router(crypto_router)
+    app.include_router(company_router)
     app.include_router(needs_router)
     app.include_router(review_router)
     app.include_router(devices_router)

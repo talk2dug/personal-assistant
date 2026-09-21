@@ -63,6 +63,7 @@ export const api = {
 
   // The "needs you" board: what the business team is blocked on. Secrets travel one
   // way -- provideNeed sends a value up, and nothing ever sends one back down.
+  company: () => request('/api/company'),
   needs: () => request('/api/needs'),
   provideNeed: (id, value) =>
     request(`/api/needs/${id}/provide`, { method: 'POST', body: JSON.stringify({ value }) }),

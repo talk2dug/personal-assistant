@@ -16,6 +16,7 @@ from .letterstream_client import MAIL_TYPES as LETTERSTREAM_MAIL_TYPES
 from .location_tools import LOCATION_SYSTEM_NOTE, LOCATION_TOOL_NAMES, LOCATION_TOOLS
 from . import location_tools
 from .business_tools import (
+    STORE_POLICY_TOOLS,
     AGENTS_ON_DEMAND_NOTE, AGENTS_SCHEDULED_NOTE, BUSINESS_SYSTEM_NOTE, BUSINESS_TOOLS,
     GPU_BRIDGE_NOTE,
 )
@@ -1494,7 +1495,7 @@ def select_tools(
             + (MAIL_TOOLS if mail is not None else [])
             + (OBSIDIAN_TOOLS if obsidian is not None else [])
             + (HOME_ASSISTANT_TOOLS + LOCATION_TOOLS if home_assistant is not None else [])
-            + (BUSINESS_TOOLS if business is not None else [])
+            + (BUSINESS_TOOLS + STORE_POLICY_TOOLS if business is not None else [])
             + (PERSONAL_TOOLS if personal is not None else [])
             + (KITCHEN_TOOLS if personal is not None else [])
             + (airbnb.airbnb_tools if airbnb is not None else [])
@@ -1529,6 +1530,10 @@ def select_tools(
         # capturing what the owner says he's going to do only works if the tools are
         # there on every turn, not just ones that happen to say "project" or "task".
         + (BUSINESS_TOOLS if business is not None else [])
+        # The store's rate dial is always offered for the same reason: "make it three a
+        # day" contains no keyword that would gate it in, and a dial he cannot reach by
+        # talking is not the dial he asked for.
+        + (STORE_POLICY_TOOLS if business is not None else [])
         # Personal tools aren't keyword-gated either — proactively capturing a personal
         # to-do or project only works if the tools are there on every turn.
         + (PERSONAL_TOOLS if personal is not None else [])
@@ -1635,6 +1640,22 @@ def _dispatch_tool_call(
         except ValueError as e:
             return json.dumps({"error": str(e)})
         return json.dumps({"ok": True, "camera": camera["name"], "location": camera["location"]})
+    if name == "set_store_rate":
+        # His dial, changed by talking. See store_policy for why it is a setting rather
+        # than config: "make it three a day" cannot require an editor and a restart.
+        from . import store_policy
+        try:
+            result = store_policy.set_products_per_day(
+                db_path, arguments.get("products_per_day"),
+                changed_by="owner", reason=arguments.get("reason"))
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+        return json.dumps({"ok": True, **result})
+
+    if name == "get_store_rate":
+        from . import store_policy
+        return json.dumps(store_policy.current(db_path))
+
     if name == "request_from_owner":
         # The supply-side sibling of request_capability. That one asks for PERMISSION the
         # owner can grant with a click; this asks for a THING only he can obtain -- a

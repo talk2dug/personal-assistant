@@ -137,6 +137,39 @@ REQUEST_CAPABILITY_TOOLS = [
     }},
 ]
 
+STORE_POLICY_TOOLS = [
+    {"type": "function", "function": {
+        "name": "set_store_rate",
+        "description": (
+            "Change how many products the store launches per day, when Jack says so in "
+            "conversation -- 'make it three a day', 'slow down to one', 'pause the store'. "
+            "Use 0 to pause. Report the old and new numbers back to him plainly. Do not "
+            "call this on your own initiative or because a day went well; the rate is his "
+            "dial, not the team's."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "products_per_day": {
+                "type": "integer",
+                "description": "New daily rate. 0 pauses the store entirely.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "What he said, in a few words -- this is shown on the dashboard "
+                               "so a change in pace is never unexplained.",
+            },
+        }, "required": ["products_per_day"]},
+    }},
+    {"type": "function", "function": {
+        "name": "get_store_rate",
+        "description": (
+            "What the store's current launch rate is, whether it is paused, whether "
+            "products go up without his approval, and when any of that last changed. "
+            "Use this before answering questions about how fast the store is running."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    }},
+]
+
 OWNER_REQUEST_TOOLS = [
     {"type": "function", "function": {
         "name": "request_from_owner",

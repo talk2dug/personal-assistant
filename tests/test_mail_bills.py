@@ -311,7 +311,7 @@ def test_a_message_that_was_not_a_bill_is_never_re_asked_about_either(db_path):
     mail_bills.run_mail_bill_scan_once(path, llm, mail, owner_id, today=date(2026, 9, 13))
     second = mail_bills.run_mail_bill_scan_once(path, llm, mail, owner_id, today=date(2026, 9, 13))
 
-    assert second == {"scanned": 0, "detected": 0, "reminders": 0}
+    assert second == {"scanned": 0, "detected": 0, "reminders": 0, "duplicates": 0}
     assert mail_db.has_scanned_for_bill(path, owner_id, "INBOX", "2") is True
 
 
@@ -327,7 +327,7 @@ def test_messages_the_junk_scan_already_flagged_are_skipped(db_path):
     llm = FakeLLM([])  # must never be reached
 
     result = mail_bills.run_mail_bill_scan_once(path, llm, mail, owner_id, today=date(2026, 9, 13))
-    assert result == {"scanned": 0, "detected": 0, "reminders": 0}
+    assert result == {"scanned": 0, "detected": 0, "reminders": 0, "duplicates": 0}
     assert mail_db.list_bills(path, owner_id) == []
 
 
@@ -340,7 +340,7 @@ def test_scan_skips_unreadable_messages_and_retries_them_next_pass(db_path):
     llm = FakeLLM([])  # must never be reached
 
     result = mail_bills.run_mail_bill_scan_once(path, llm, mail, owner_id, today=date(2026, 9, 13))
-    assert result == {"scanned": 1, "detected": 0, "reminders": 0}
+    assert result == {"scanned": 1, "detected": 0, "reminders": 0, "duplicates": 0}
     assert mail_db.has_scanned_for_bill(path, owner_id, "INBOX", "1") is False
 
 
@@ -353,7 +353,7 @@ def test_scan_survives_a_classification_error_and_retries_that_uid_later(db_path
             raise RuntimeError("boom")
 
     result = mail_bills.run_mail_bill_scan_once(path, BrokenLLM(), mail, owner_id, today=date(2026, 9, 13))
-    assert result == {"scanned": 1, "detected": 0, "reminders": 0}
+    assert result == {"scanned": 1, "detected": 0, "reminders": 0, "duplicates": 0}
     assert mail_db.has_scanned_for_bill(path, owner_id, "INBOX", "1") is False
 
 
@@ -466,3 +466,87 @@ def test_no_bill_scan_without_an_llm(tmp_path):
         assert started.get_job("mail_bills_agent") is None
     finally:
         started.shutdown(wait=False)
+
+
+class TestRepeatNotices:
+    """Shopify sent the same "a bill payment failed" email every two days. Keyed on the
+    email uid alone -- right for "one row per message", wrong for "one row per bill" -- one
+    $39 charge became four bills, four reminders nagging him, and $156 on the calendar.
+    """
+
+    def test_a_repeat_notice_matches_the_open_bill(self, tmp_path):
+        from assistant.core import db as core_db, mail_db
+
+        path = str(tmp_path / "bills.db")
+        core_db.init_db(path)
+        mail_db.init_mail_db(path)
+        core_db.upsert_user(path, "111", "Dug", "owner")
+        uid = core_db.get_user_by_chat_id(path, "111")["id"]
+
+        first = mail_db.create_bill(
+            path, uid, folder="INBOX", uid="101", from_address="billing@shopify.com",
+            subject="A bill payment failed", received_at="2026-09-14", payee="Shopify",
+            amount_text="$39.00", amount=39.0, due_date="2026-09-16", due_date_text="",
+            is_recurring=True, cadence="monthly", confidence="high", reasoning="")
+        found = mail_db.find_open_duplicate(path, uid, "Shopify", 39.0)
+        assert found is not None and found["id"] == first
+
+    def test_a_different_amount_is_a_different_bill(self, tmp_path):
+        from assistant.core import db as core_db, mail_db
+
+        path = str(tmp_path / "bills.db")
+        core_db.init_db(path); mail_db.init_mail_db(path)
+        core_db.upsert_user(path, "111", "Dug", "owner")
+        uid = core_db.get_user_by_chat_id(path, "111")["id"]
+        mail_db.create_bill(path, uid, folder="INBOX", uid="101", from_address="a@b.c",
+                            subject="s", received_at="2026-09-14", payee="Shopify",
+                            amount_text="$39.00", amount=39.0, due_date=None,
+                            due_date_text="", is_recurring=True, cadence="monthly",
+                            confidence="high", reasoning="")
+        assert mail_db.find_open_duplicate(path, uid, "Shopify", 79.0) is None
+
+    def test_a_bill_with_no_amount_is_never_matched_this_way(self, tmp_path):
+        """"Payee with no amount" is too broad to be evidence of anything."""
+        from assistant.core import db as core_db, mail_db
+
+        path = str(tmp_path / "bills.db")
+        core_db.init_db(path); mail_db.init_mail_db(path)
+        core_db.upsert_user(path, "111", "Dug", "owner")
+        uid = core_db.get_user_by_chat_id(path, "111")["id"]
+        assert mail_db.find_open_duplicate(path, uid, "DreamHost", None) is None
+
+    def test_a_paid_bill_does_not_suppress_the_next_one(self, tmp_path):
+        """Next month's genuine invoice is a new bill. Suppressing it would be a worse
+        failure than the duplicate this exists to stop."""
+        from assistant.core import db as core_db, mail_db
+
+        path = str(tmp_path / "bills.db")
+        core_db.init_db(path); mail_db.init_mail_db(path)
+        core_db.upsert_user(path, "111", "Dug", "owner")
+        uid = core_db.get_user_by_chat_id(path, "111")["id"]
+        bill = mail_db.create_bill(path, uid, folder="INBOX", uid="101", from_address="a@b.c",
+                                   subject="s", received_at="2026-09-14", payee="Shopify",
+                                   amount_text="$39.00", amount=39.0, due_date=None,
+                                   due_date_text="", is_recurring=True, cadence="monthly",
+                                   confidence="high", reasoning="")
+        mail_db.update_bill_status(path, uid, bill, "paid")
+        assert mail_db.find_open_duplicate(path, uid, "Shopify", 39.0) is None
+
+    def test_a_due_date_only_moves_forward(self, tmp_path):
+        """A dunning notice restates a later date. Taking the newest blindly would let a
+        bill walk its own deadline into the future forever."""
+        from assistant.core import db as core_db, mail_db
+
+        path = str(tmp_path / "bills.db")
+        core_db.init_db(path); mail_db.init_mail_db(path)
+        core_db.upsert_user(path, "111", "Dug", "owner")
+        uid = core_db.get_user_by_chat_id(path, "111")["id"]
+        bill = mail_db.create_bill(path, uid, folder="INBOX", uid="101", from_address="a@b.c",
+                                   subject="s", received_at="2026-09-14", payee="Shopify",
+                                   amount_text="$39.00", amount=39.0, due_date="2026-09-20",
+                                   due_date_text="", is_recurring=True, cadence="monthly",
+                                   confidence="high", reasoning="")
+        mail_db.note_duplicate_notice(path, bill, "2026-09-18")
+        assert mail_db.get_bill(path, uid, bill)["due_date"] == "2026-09-20"
+        mail_db.note_duplicate_notice(path, bill, "2026-09-24")
+        assert mail_db.get_bill(path, uid, bill)["due_date"] == "2026-09-24"

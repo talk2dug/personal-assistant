@@ -14,7 +14,7 @@ gate untouched by any of this.
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS email_drafts (
@@ -469,6 +469,55 @@ def create_bill(
             (owner_user_id, folder, uid),
         ).fetchone()
         return row["id"]
+
+
+def find_open_duplicate(db_path: str, owner_user_id: int, payee: str | None,
+                        amount: float | None, within_days: int = 35) -> dict | None:
+    """An open bill this email is just another copy of, or None.
+
+    create_bill is keyed on the EMAIL uid, which is right for "one row per message" and
+    wrong for "one row per bill". Shopify sent the same "a bill payment failed" notice
+    every two days, so one $39 charge became four bills, four reminders and $156 on the
+    calendar. A dunning notice is not a new debt.
+
+    Matching is deliberately narrow -- same payee, same amount, still open, and recent.
+    The window matters as much as the match: next month's genuine Shopify invoice IS a new
+    bill, and suppressing it would be a worse failure than the duplicate. A bill with no
+    amount is never matched this way, because "payee with no amount" is too broad to be
+    evidence of anything.
+    """
+    if not payee or amount is None:
+        return None
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=within_days)).isoformat()
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            """SELECT * FROM email_bills
+                WHERE owner_user_id = ?
+                  AND LOWER(TRIM(payee)) = LOWER(TRIM(?))
+                  AND amount IS NOT NULL
+                  AND ABS(amount - ?) < 0.005
+                  AND COALESCE(status, '') NOT IN ('paid', 'dismissed', 'ignored')
+                  AND created_at >= ?
+                ORDER BY id LIMIT 1""",
+            (owner_user_id, payee, float(amount), cutoff)).fetchone()
+        return _bill_row(dict(row)) if row else None
+
+
+def note_duplicate_notice(db_path: str, bill_id: int, due_date: str | None) -> None:
+    """Record that a repeat notice arrived for a bill already tracked.
+
+    The due date is allowed to move FORWARD only. A dunning notice usually restates a
+    later date, and taking the newest blindly would let a bill walk its own deadline into
+    the future indefinitely; taking the earliest would ignore a genuine extension.
+    """
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute("SELECT due_date FROM email_bills WHERE id = ?",
+                           (bill_id,)).fetchone()
+        current = row["due_date"] if row else None
+        if due_date and (not current or due_date > current):
+            conn.execute("UPDATE email_bills SET due_date = ?, updated_at = ? WHERE id = ?",
+                         (due_date, _now(), bill_id))
+            conn.commit()
 
 
 def _bill_row(row: dict) -> dict:

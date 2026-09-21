@@ -245,7 +245,7 @@ def run_mail_bill_scan_once(
     mail_db.init_mail_db(db_path)
     today = today or date.today()
     listing = mail_client.list_recent(folder=folder, limit=limit)
-    scanned = detected = reminders = 0
+    scanned = detected = reminders = duplicates = 0
 
     for header in listing.get("emails", []):
         uid = header["uid"]
@@ -267,6 +267,17 @@ def run_mail_bill_scan_once(
 
         if result is None:
             mail_db.mark_bill_scanned(db_path, owner_user_id, folder, uid, is_bill=False)
+            continue
+
+        # A repeat notice for a bill already tracked is not a new bill. Shopify sends the
+        # same "payment failed" email every two days, and keyed on the email uid alone one
+        # $39 charge became four bills, four reminders and $156 on the calendar.
+        duplicate = mail_db.find_open_duplicate(
+            db_path, owner_user_id, result["payee"], result["amount"])
+        if duplicate is not None:
+            mail_db.note_duplicate_notice(db_path, duplicate["id"], result["due_date"])
+            mail_db.mark_bill_scanned(db_path, owner_user_id, folder, uid, is_bill=True)
+            duplicates += 1
             continue
 
         bill_id = mail_db.create_bill(
@@ -323,4 +334,5 @@ def run_mail_bill_scan_once(
         except Exception:
             logger.exception("mail bills: failed to create review item for bill %s", bill_id)
 
-    return {"scanned": scanned, "detected": detected, "reminders": reminders}
+    return {"scanned": scanned, "detected": detected, "reminders": reminders,
+            "duplicates": duplicates}

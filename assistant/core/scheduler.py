@@ -494,6 +494,52 @@ def start(
                 id="creative_pipeline", next_run_time=_first_run_at("product_creator", pipeline_hours, 8),
             )
 
+            # The executive tick: the only job here that owns an OUTCOME rather than a
+            # step. Every other agent above is defined by the work it does, so a week of
+            # correct no-ops reads as a week of success -- which is precisely what
+            # happened while the store produced nothing and nobody was told. This one
+            # holds the number, notices when it stops moving, works out which stage
+            # actually stopped, and runs that stage itself rather than waiting up to
+            # twelve hours for the next pipeline tick. See executive.py.
+            #
+            # Hourly, not on the pipeline's cadence: the whole point is to be the thing
+            # that notices between ticks. It is cheap when nothing is wrong -- two
+            # counting queries and a read of agent_runs.
+            def _executive_tick():
+                from . import executive
+
+                def run_agent(name: str):
+                    """Reversible work only, which is everything in this chain -- each
+                    stage produces a draft the owner can delete. Nothing here publishes,
+                    spends or sends."""
+                    mcp = obsidian.mcp_client if obsidian is not None else None
+                    if name == "trend_scout":
+                        return agents.run_trend_agent(db_path, llm, owner["id"], profile,
+                                                      obsidian=mcp)
+                    if name == "product_creator":
+                        return agents.run_product_creator(db_path, llm, owner["id"],
+                                                          profile, obsidian=mcp)
+                    if name == "art_director":
+                        return agents.run_art_director(db_path, llm, owner["id"], profile,
+                                                       bridge=bridge, obsidian=mcp)
+                    if name == "store_manager":
+                        return agents.run_store_manager(db_path, llm, owner["id"], profile,
+                                                        obsidian=mcp)
+                    if name == "social_director":
+                        return agents.run_social_director(db_path, llm, owner["id"],
+                                                          profile, obsidian=mcp)
+                    raise ValueError(f"executive may not run {name!r}")
+
+                executive.seed_missions(db_path)
+                executive.run_once(
+                    db_path, owner["id"], run_agent=run_agent,
+                    say=lambda topic, body, priority: notify(owner["telegram_chat_id"], body))
+
+            scheduler.add_job(
+                _guarded_simple("executive", _executive_tick), "interval", hours=1,
+                id="executive", next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
+            )
+
             def _digest_tick():
                 text = agents.build_digest(db_path, owner["id"], hours=24)
                 if text:

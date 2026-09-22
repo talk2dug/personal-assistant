@@ -67,18 +67,56 @@ _VALUE = re.compile(
 # even alongside a status question, the model must handle the whole turn.
 _HAS_INTENT = re.compile(
     r"\b(make|create|build|publish|post|launch|add|remove|delete|change|set|fix|start|stop"
-    r"|pause|resume|buy|sell|send|write|draft|approve|reject|run|turn)\b", re.I)
+    r"|pause|resume|buy|sell|send|write|draft|approve|reject|run|turn"
+    # Calendar verbs. "schedule" is guarded rather than banned outright, because "what's
+    # my schedule today" is the commonest way he asks and is a pure question -- only
+    # "schedule a/the/me something" is a request to change the diary.
+    r"|book|reschedule|cancel|schedule\s+(?:a|an|the|me|us|it)"
+    r"|move\s+(?:the|my))\b", re.I)
 
 # "what is blocked", "what are you waiting on me for", "what do you need"
+# Deliberately NOT "on my plate": that means "what do I have to do", which is
+# plan_my_day's job and has its own test, not "which mission is stuck".
 _BLOCKED = re.compile(
     r"\b(blocked|blocking|stuck|stalled|waiting on me|need from me|needs? me"
-    r"|what do you need|on my plate|waiting for me)\b", re.I)
+    r"|what do you need|waiting for me)\b", re.I)
 
 # Asking about everything at once, with no subject named. Whole phrases only.
 _WHOLE_BOARD = re.compile(
     r"(status|sitrep|update|where are we|how are we(?: doing)?|how are things"
     r"|how'?s everything|what'?s the status|what'?s going on|how'?s it (?:all )?going)",
     re.I)
+
+# "what's on my agenda today", "what do I have tomorrow", "am I free Thursday"
+#
+# This one earns its place twice over. It is a pure read of a table that is already
+# correct, so it has no business costing an agentic loop -- and it is the question that
+# exposed the whole gap: the work calendar synced fine, the agenda merged it fine, the
+# Agenda screen showed it fine, and chat had no tool that could see any of it. He asked
+# what was on today and was told about a concert.
+# A DAY must be named. This is the guard, not a nicety: an earlier version keyed on
+# "what's on" and answered "what's on the shopping list" with "Nothing on today, sir."
+# and "what's on my plate today" with an empty calendar. "What's on X" is a question
+# about X, and only a time word makes it a question about his diary.
+_WHEN = (r"(?:today|tonight|tomorrow|this (?:morning|afternoon|evening|week|weekend)"
+         r"|the week|my week|my day|the day|this month"
+         r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday)")
+
+_AGENDA = re.compile(
+    # "my agenda today", "any meetings tomorrow", "what's my schedule on Friday"
+    rf"\b(?:agenda|schedule|calendar|meetings?|appointments?)\b(?=.*\b{_WHEN}\b)"
+    # "what's on tomorrow" -- the word after "on" must be the day itself
+    rf"|\bwhat(?:'?s| is)?\s+(?:on|up)\s+{_WHEN}\b"
+    # "what do I have today", "what have I got on Thursday"
+    rf"|\bwhat (?:do i have|have i got)\s+(?:on\s+)?{_WHEN}\b"
+    rf"|\banything (?:on|planned)\s+(?:for\s+)?{_WHEN}\b"
+    rf"|\bam i (?:free|busy)\b"
+    rf"|\b(?:how|what) does (?:my|the) (?:day|week) look\b", re.I)
+
+_TOMORROW = re.compile(r"\btomorrow\b", re.I)
+# Any mention of the week at all. An earlier version wanted "this week"/"the week" and
+# so answered "what does MY week look like" with today alone.
+_WEEK = re.compile(r"\bweek\b", re.I)
 
 # "what are you working on", "what have you done"
 _WORKING = re.compile(
@@ -160,6 +198,87 @@ def _subject_in(text: str) -> str | None:
     return None
 
 
+def _day_label(day_date: str, today: str) -> str:
+    from datetime import date, timedelta
+    try:
+        d = date.fromisoformat(day_date)
+        t = date.fromisoformat(today)
+    except ValueError:
+        return day_date
+    if d == t:
+        return "Today"
+    if d == t + timedelta(days=1):
+        return "Tomorrow"
+    return d.strftime("%A")
+
+
+def _agenda_answer(db_path: str, text: str) -> str | None:
+    """His day, read straight out of the merged agenda. None if it cannot be read."""
+    try:
+        from . import agenda
+    except Exception:
+        return None
+
+    from datetime import date, timedelta
+
+    if _WEEK.search(text):
+        span, window = 7, "this week"
+    elif _TOMORROW.search(text):
+        span, window = 2, "tomorrow"
+    else:
+        span, window = 1, "today"
+
+    try:
+        data = agenda.upcoming(db_path, 1, days=span, back_days=0)
+    except Exception:
+        logger.debug("direct answer: agenda read failed, falling back", exc_info=True)
+        return None
+
+    today = data.get("today") or date.today().isoformat()
+    # Pick the dates explicitly rather than trusting the window the call came back with.
+    # Asking about today and being handed tomorrow's meetings too is its own small lie.
+    try:
+        start = date.fromisoformat(today)
+    except ValueError:
+        return None
+    if window == "tomorrow":
+        wanted_dates = {(start + timedelta(days=1)).isoformat()}
+    elif window == "this week":
+        wanted_dates = {(start + timedelta(days=i)).isoformat() for i in range(7)}
+    else:
+        wanted_dates = {today}
+
+    lines = []
+    for day in (data.get("days") or []):
+        if day.get("date") not in wanted_dates:
+            continue
+        entries = day.get("entries") or []
+        if not entries:
+            continue
+
+        def at(entry):
+            """Sort by the clock. The agenda groups by kind, which puts a 16:00 meetup
+            above an 08:00 standup -- fine on a screen with columns, wrong when it is
+            read aloud or arrives as a text."""
+            found = re.match(r"^(\d{1,2}):(\d{2})", (entry.get("detail") or "").strip())
+            return (0, int(found.group(1)), int(found.group(2))) if found else (1, 0, 0)
+
+        lines.append(f"{_day_label(day.get('date', ''), today)}:")
+        for e in sorted(entries, key=at):
+            when = (e.get("detail") or "").split("·")[0].strip()
+            head = f"{when} " if re.match(r"^\d{1,2}:\d{2}", when) else ""
+            kind = "" if e.get("kind") == "event" else f"{e.get('kind')}: "
+            # Task titles here are whole paragraphs of reasoning. Useful on the task
+            # itself, unreadable in a list of what his day holds.
+            title = (e.get("title") or "").strip()
+            if len(title) > 72:
+                title = title[:69].rstrip(" ,.-") + "..."
+            lines.append(f"- {head}{kind}{title}")
+    if not lines:
+        return f"Nothing on {window}, sir."
+    return "\n".join(lines)
+
+
 def try_direct_answer(db_path: str, user_text: str) -> str | None:
     """A finished reply, or None to let the normal path handle the turn untouched."""
     text = (user_text or "").strip()
@@ -168,6 +287,11 @@ def try_direct_answer(db_path: str, user_text: str) -> str | None:
         return None
     if _HAS_INTENT.search(text):
         return None
+
+    if _AGENDA.search(text):
+        answer = _agenda_answer(db_path, text)
+        if answer is not None:
+            return answer
 
     try:
         from . import missions

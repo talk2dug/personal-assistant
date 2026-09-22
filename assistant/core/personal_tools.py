@@ -466,6 +466,25 @@ PERSONAL_TOOLS = [
         }, "required": ["charge_id"]},
     }},
     {"type": "function", "function": {
+        "name": "get_agenda",
+        "description": (
+            "Everything with a DATE on it, merged into days: his work calendar (the "
+            "subscribed Outlook feed), bills and paydays, task due dates, deadlines and "
+            "reminders. This is the only tool that can see his meetings — plan_my_day "
+            "covers routine and tasks and has no calendar in it at all, and list_reminders "
+            "sees only reminders. Call this whenever he asks what is on his agenda, what "
+            "he has today or tomorrow, what his week looks like, or whether he is free."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "days": {"type": "integer",
+                     "description": "How many days forward, including today. 1 = today "
+                                    "only, 2 = today and tomorrow. Defaults to 7."},
+            "back_days": {"type": "integer",
+                          "description": "Days of history to include. Defaults to 0 — "
+                                         "only pass this if he asks what he missed."},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "plan_my_day",
         "description": (
             "The whole shape of his day: the routine anchors due today and whether each is "
@@ -853,7 +872,11 @@ PERSONAL_SYSTEM_NOTE = (
     "print business, these are for him."
     " You also run his day, and this is the part he leans on most -- he has ADHD, and the "
     "whole point is that he should not have to hold the shape of a day in his head. When he "
-    "asks what to do, what is on today, or to plan his day, call plan_my_day: it returns his "
+    "asks what is ON his agenda -- today, tomorrow, this week, or whether he is free -- "
+    "call get_agenda. It is the only tool that can see his work calendar; plan_my_day has no "
+    "calendar in it and list_reminders sees only reminders, so answering from either of those "
+    "tells him he has nothing on a day with two meetings in it. When he "
+    "asks what to do, or to plan his day, call plan_my_day: it returns his "
     "routine anchors, what he already chose, a short weighted shortlist, what is blocked and "
     "on what, and which habits are slipping -- one exact call, so never assemble that from "
     "list_personal_tasks and guesswork. When he settles on something, pick_task_for_today, "
@@ -1102,6 +1125,17 @@ class PersonalClient:
             ok = db.delete_manual_recurring_charge(db_path, arguments["charge_id"])
             return {"ok": ok}
 
+        if name == "get_agenda":
+            # The same call the Agenda screen makes, so chat and the screen can never
+            # disagree about what day he is having. It was already merging the work
+            # calendar correctly; there was simply no tool to reach it from a
+            # conversation, so "what's on my agenda today" could only ever find the
+            # reminder about a concert.
+            from . import agenda
+            return agenda.upcoming(
+                db_path, owner,
+                days=max(1, int(arguments.get("days") or 7)),
+                back_days=max(0, int(arguments.get("back_days") or 0)))
         if name == "plan_my_day":
             from . import routine
             return routine.plan_day(db_path, owner, tz_name=self.tz_name,

@@ -113,6 +113,83 @@ class TestItAnswers:
         assert "Jarvis Store" in out and "Crypto desk" in out
 
 
+class TestTheAgenda:
+    """The bug that started this: the work calendar synced fine, agenda.upcoming merged
+    it fine, the Agenda screen showed it fine -- and chat had NO tool that could see any
+    of it. Jack asked what was on his agenda today and was told about a concert.
+    """
+
+    def _feed(self, path, rows):
+        import sqlite3
+        with sqlite3.connect(path) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS calendar_feeds (
+                id INTEGER PRIMARY KEY, owner_user_id INTEGER, name TEXT, url TEXT,
+                enabled INTEGER DEFAULT 1, last_synced_at TEXT, last_status TEXT,
+                last_error TEXT, event_count INTEGER, created_at TEXT)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS calendar_feed_events (
+                id INTEGER PRIMARY KEY, feed_id INTEGER, uid TEXT, starts_at TEXT,
+                ends_at TEXT, local_date TEXT, local_time TEXT, summary TEXT,
+                location TEXT, all_day INTEGER, status TEXT, updated_at TEXT)""")
+            conn.execute("INSERT OR REPLACE INTO calendar_feeds (id,owner_user_id,name,url,enabled)"
+                         " VALUES (1,1,'Work','https://x.test/c.ics',1)")
+            for local_date, local_time, summary in rows:
+                conn.execute(
+                    """INSERT INTO calendar_feed_events
+                       (feed_id,uid,starts_at,ends_at,local_date,local_time,summary,
+                        location,all_day,status,updated_at)
+                       VALUES (1,?,?,?,?,?,?,'Teams',0,'CONFIRMED',?)""",
+                    (summary, local_date, local_date, local_date, local_time, summary,
+                     local_date))
+
+    def test_todays_meetings_are_answered_from_the_table(self, path):
+        today = datetime.now(timezone.utc).date().isoformat()
+        self._feed(path, [(today, "08:00", "Weekly Standup"), (today, "16:00", "Local Meetup")])
+        out = direct_answers.try_direct_answer(path, "what do i have on the agenda today")
+        assert "Weekly Standup" in out and "Local Meetup" in out
+
+    def test_the_day_reads_in_clock_order(self, path):
+        """The agenda groups by kind, which put a 16:00 meetup above an 08:00 standup --
+        fine in a column, wrong when it is read aloud or arrives as a text."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        self._feed(path, [(today, "16:00", "Late thing"), (today, "08:00", "Early thing")])
+        out = direct_answers.try_direct_answer(path, "whats on my agenda today")
+        assert out.index("Early thing") < out.index("Late thing")
+
+    def test_asking_about_today_does_not_return_tomorrow(self, path):
+        from datetime import timedelta
+        today = datetime.now(timezone.utc).date()
+        self._feed(path, [(today.isoformat(), "09:00", "Today thing"),
+                          ((today + timedelta(days=1)).isoformat(), "09:00", "Tomorrow thing")])
+        out = direct_answers.try_direct_answer(path, "what do i have today")
+        assert "Today thing" in out and "Tomorrow thing" not in out
+
+    def test_tomorrow_returns_tomorrow_only(self, path):
+        from datetime import timedelta
+        today = datetime.now(timezone.utc).date()
+        self._feed(path, [(today.isoformat(), "09:00", "Today thing"),
+                          ((today + timedelta(days=1)).isoformat(), "09:00", "Tomorrow thing")])
+        out = direct_answers.try_direct_answer(path, "whats on tomorrow")
+        assert "Tomorrow thing" in out and "Today thing" not in out
+
+    def test_a_week_question_covers_the_week(self, path):
+        """'what does MY week look like' once answered with today alone."""
+        from datetime import timedelta
+        today = datetime.now(timezone.utc).date()
+        self._feed(path, [((today + timedelta(days=3)).isoformat(), "10:00", "Thursday thing")])
+        assert "Thursday thing" in direct_answers.try_direct_answer(
+            path, "what does my week look like")
+
+    def test_an_empty_day_says_so_rather_than_going_quiet(self, path):
+        self._feed(path, [])
+        assert "Nothing on today" in direct_answers.try_direct_answer(path, "whats on today")
+
+    def test_asking_to_ADD_something_still_reaches_the_model(self, path):
+        today = datetime.now(timezone.utc).date().isoformat()
+        self._feed(path, [(today, "08:00", "Standup")])
+        assert direct_answers.try_direct_answer(
+            path, "add a meeting to my calendar tomorrow at 3") is None
+
+
 class TestItRefuses:
     """Every one of these must reach the real model untouched."""
 

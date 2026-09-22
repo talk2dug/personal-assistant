@@ -13,13 +13,23 @@ agents write their reasoning to the vault on every run (agent_notes.write_journa
 summary row cannot carry "what I ruled out and why". Answering "how are they coming to the
 conclusions" from a status column would mean inventing the answer.
 
-Everything here is read-only. The dashboard is a window onto the business, not a control
-panel: the rate dial is changed by talking to Jarvis and the blockers are cleared on the
-Projects board, both of which already have their own places.
+It is a window onto the business with exactly ONE control on it, and the shape of that
+control is the point. Jack, 2026-09-22: *"this is the automated store, i should NOT be
+approving anything. This is 100% AI driven... I dont need to aprove but I can retract
+something meaning remove it from being sold, but i need to give a reason why so it
+continues to learn."* So nothing here asks him to let something through; the only button
+takes something down, and it will not work without a reason, because the reason is what
+the team learns from. The rate dial is still changed by talking to Jarvis and blockers
+are still cleared on the Projects board.
 """
 import logging
+import mimetypes
+import pathlib
+import sqlite3
+from contextlib import closing
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from ...core import agent_notes, business_db, model_catalog, owner_requests, store_policy
 from ..auth import require_user
@@ -73,7 +83,63 @@ def dashboard(request: Request):
         "thinking": _thinking(db_path, _vault(request)),
         "blocked": _blocked(db_path, uid),
         "catalog": _catalog(db_path),
+        "pulled": _pulled(db_path, uid),
     }
+
+
+def _pulled(db_path: str, uid: int) -> list:
+    """What he has taken off the store, and why he said he did.
+
+    On the dashboard rather than buried, because it is the only instruction the team ever
+    gets from him about this store -- and seeing it listed is how he can tell whether
+    saying it changed anything.
+    """
+    try:
+        from assistant.core import store_retract
+
+        return store_retract.recent(db_path, uid, limit=10)
+    except Exception:                                    # noqa: BLE001
+        return []
+
+
+def _art_for(db_path: str, concept_id) -> dict | None:
+    """The rendered image behind a listing, as {brief_id, path}."""
+    if not concept_id:
+        return None
+    try:
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """SELECT id, media_path FROM art_briefs
+                    WHERE concept_id = ? AND media_path IS NOT NULL
+                      AND trim(media_path) <> '' ORDER BY id DESC LIMIT 1""",
+                (concept_id,)).fetchone()
+    except Exception:                                    # noqa: BLE001
+        return None
+    return {"brief_id": row["id"], "path": row["media_path"]} if row else None
+
+
+def _posts_for(db_path: str, uid: int, listing_id: int, concept_id) -> list:
+    """The campaign written to sell this one product.
+
+    There is no campaign table and there should not be one yet: the campaign IS these
+    posts, and an empty object called "campaign" would be a promise the system does not
+    keep. Matched on the listing, falling back to the concept, because the social
+    director writes against whichever it had.
+    """
+    try:
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT id, platform, hook, caption, status, scheduled_for, external_id
+                     FROM social_posts
+                    WHERE owner_user_id = ?
+                      AND (listing_id = ? OR (listing_id IS NULL AND concept_id = ?))
+                    ORDER BY id""",
+                (uid, listing_id, concept_id)).fetchall()
+    except Exception:                                    # noqa: BLE001
+        return []
+    return [dict(r) for r in rows]
 
 
 def _catalog(db_path: str) -> dict:
@@ -101,11 +167,32 @@ def _made(db_path: str, uid: int) -> dict:
         listings = business_db.list_store_listings(db_path, uid)
     except Exception:
         listings = []
-    live = [x for x in listings if (x.get("status") or "") in ("approved", "published", "live")]
+    # LIVE MEANS A STOREFRONT AGREES. 'approved' used to count, and it means only that
+    # our own pipeline finished with it -- the same lie the store mission told until it
+    # was fixed the same day. A number he reads as "products people can buy" must not be
+    # satisfiable by a status this system sets on itself.
+    live = [x for x in listings
+            if (x.get("status") or "") in ("published", "on_sale")
+            and (x.get("external_id") or "").strip()]
+    waiting = [x for x in listings if (x.get("status") or "") in ("draft", "approved")]
+
+    cards = []
+    for listing in listings[:12]:
+        art = _art_for(db_path, listing.get("concept_id"))
+        posts = _posts_for(db_path, uid, listing["id"], listing.get("concept_id"))
+        cards.append({
+            **listing,
+            "art_brief_id": (art or {}).get("brief_id"),
+            "is_live": bool((listing.get("external_id") or "").strip()
+                            and (listing.get("status") or "") in ("published", "on_sale")),
+            "posts": posts,
+        })
+
     return {
         "listings_total": len(listings),
         "listings_live": len(live),
-        "recent": listings[:12],
+        "listings_waiting": len(waiting),
+        "recent": cards,
         "engagement": None,
         "engagement_source": (
             "Not wired yet: reach and sales need TikTok and Meta insights, and both are "
@@ -182,3 +269,71 @@ def _blocked(db_path: str, uid: int) -> dict:
     return {"open": summary.get("open", 0),
             "items": [{"id": r["id"], "title": r["title"], "blocks": r["blocks"],
                        "priority": r["priority"], "kind": r["kind"]} for r in items[:6]]}
+
+
+@router.get("/art/{brief_id}")
+async def art(brief_id: int, request: Request):
+    """The rendered image for one art brief.
+
+    Served through the app for the same reason as routes/review.py's media endpoint:
+    generated art lives outside the web root, and the path comes from a database row, so
+    it is resolved and then checked to be inside generated_media_path before anything is
+    opened.
+    """
+    uid = _owner_id(request)
+    cfg = request.app.state.cfg
+
+    with closing(sqlite3.connect(cfg.db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT b.media_path FROM art_briefs b
+                 LEFT JOIN product_concepts c ON c.id = b.concept_id
+                WHERE b.id = ? AND (b.owner_user_id = ? OR c.owner_user_id = ?)""",
+            (brief_id, uid, uid)).fetchone()
+    if row is None or not row["media_path"]:
+        raise HTTPException(404, "no art for that brief")
+
+    root = pathlib.Path(cfg.generated_media_path).resolve()
+    path = pathlib.Path(row["media_path"]).resolve()
+    if not path.is_file():
+        raise HTTPException(404, "the file is no longer on disk")
+    if root not in path.parents:
+        raise HTTPException(403, "that file is outside the generated media directory")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+@router.post("/retract")
+async def retract(request: Request):
+    """Pull a product off the store. The reason is required, and it teaches the team.
+
+    His only control over this store, by his own instruction -- he approves nothing going
+    up and pulls what he does not want. The reason is not bookkeeping: it goes straight
+    into the prompts of the four agents that could have prevented it, so the same thing is
+    not made again next week.
+    """
+    from assistant.core import store_retract
+
+    uid = _owner_id(request)
+    cfg = request.app.state.cfg
+    body = await request.json()
+    reason = (body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(400, "a reason is required — without one nothing is learned")
+
+    printify = shopify = None
+    try:
+        from assistant.core.printify_client import PrintifyClient
+
+        printify = PrintifyClient(cfg.db_path)
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        from assistant.core.shopify_client import ShopifyClient
+
+        shopify = ShopifyClient(cfg.db_path)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+    return store_retract.retract(cfg.db_path, uid, int(body["listing_id"]), reason,
+                                 printify=printify, shopify=shopify)

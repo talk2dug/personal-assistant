@@ -23,7 +23,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from . import agent_notes, art_render, business_db, review_examples
+from . import agent_notes, art_render, business_db, review_examples, store_retract
 
 logger = logging.getLogger(__name__)
 
@@ -382,7 +382,8 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
             f"(materials, size, and the steps to make it on the equipment listed above), "
             f'"trend_topic" (which signal above it came from).'
         )
-        raw = llm.research(prompt + agent_notes.read_journal(obsidian, "product_creator"), system_prompt=PRODUCT_CREATOR_SYSTEM, timeout=600)
+        raw = llm.research(prompt + agent_notes.read_journal(obsidian, "product_creator")
+                             + store_retract.lessons(db_path, owner_user_id), system_prompt=PRODUCT_CREATOR_SYSTEM, timeout=600)
         concepts = _extract_json(raw)
         if not isinstance(concepts, list):
             business_db.finish_agent_run(
@@ -522,7 +523,8 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                 f"ready to paste into an image generator, incorporating the medium "
                 f"requirements)."
             )
-            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "art_director"), system_prompt=ART_DIRECTOR_SYSTEM, timeout=600)
+            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "art_director")
+                             + store_retract.lessons(db_path, owner_user_id), system_prompt=ART_DIRECTOR_SYSTEM, timeout=600)
             brief = _extract_json(raw)
             if not isinstance(brief, dict):
                 continue
@@ -643,7 +645,8 @@ def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int
                 f'search), "price" (number, USD), "variants" (comma-separated sizes/colours '
                 f"or an empty string if there are none)."
             )
-            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "store_manager"), system_prompt=STORE_MANAGER_SYSTEM, timeout=600)
+            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "store_manager")
+                             + store_retract.lessons(db_path, owner_user_id), system_prompt=STORE_MANAGER_SYSTEM, timeout=600)
             listing = _extract_json(raw)
             if not isinstance(listing, dict) or not listing.get("title"):
                 continue
@@ -709,7 +712,8 @@ def run_social_director(db_path: str, llm, owner_user_id: int, profile, limit: i
                 f'scroll), "caption" (the full post body), "hashtags" (space-separated, '
                 f'realistic in number for that platform), "call_to_action".'
             )
-            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "social_director"), system_prompt=SOCIAL_DIRECTOR_SYSTEM, timeout=600)
+            raw = llm.research(prompt + agent_notes.read_journal(obsidian, "social_director")
+                             + store_retract.lessons(db_path, owner_user_id), system_prompt=SOCIAL_DIRECTOR_SYSTEM, timeout=600)
             posts = _extract_json(raw)
             if not isinstance(posts, list):
                 continue

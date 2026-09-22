@@ -186,3 +186,119 @@
   max-height: 340px;
   overflow-y: auto;
 }
+
+/* --- the shop floor ------------------------------------------------------------------
+   One card per product, because the unit he judges is a product and not a pipeline
+   stage. The picture leads: he asked to see what art has been made, and he cannot tell
+   whether a design is wrong by reading its title. */
+
+.co-products {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.co-product {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* A live product is the one state worth seeing from across the room: it is the only one
+   a stranger can buy, and it is the only one he might want to stop. */
+.co-product.live { border-color: var(--cyan-dim); }
+
+.co-product-art {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  background: var(--bg-panel);
+  display: block;
+}
+
+.co-product-noart {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.co-product-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.co-product-body h4 { margin: 0; font-size: 13px; font-weight: 500; line-height: 1.35; }
+
+.co-product-meta { margin: 0; display: flex; align-items: center; gap: 8px; }
+.co-price { font-family: var(--font-mono); font-size: 14px; color: var(--cyan-bright); }
+.co-state {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.co-state.s-live { color: var(--cyan); }
+.co-state.s-delisted { color: var(--amber); }
+
+.co-campaign summary {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--steel-bright);
+  cursor: pointer;
+}
+.co-campaign ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.co-campaign li {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 11px;
+  border-bottom: 1px solid var(--divider);
+}
+.co-campaign li:last-child { border-bottom: none; }
+.co-platform { font-family: var(--font-mono); color: var(--steel-mid); min-width: 8ch; }
+.co-hook { flex: 1; color: var(--text-dim); }
+.co-post-state { font-family: var(--font-mono); font-size: 10px; color: var(--steel-mid); }
+
+/* The only control on this screen, and it only ever takes something DOWN. Styled quietly
+   on purpose -- it should be findable, not inviting. */
+.co-pull-open {
+  align-self: flex-start;
+  background: none;
+  border: 1px solid var(--border-dim);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.co-pull-open:hover { border-color: var(--amber); color: var(--amber); }
+
+.co-pull { display: flex; flex-direction: column; gap: 6px; }
+.co-pull label { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+.co-pull input {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.co-pull input:focus { outline: none; border-color: var(--cyan-dim); }
+.co-pull-actions { display: flex; gap: 6px; }
+.co-pull-actions button {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 3px;
+  border: 1px solid var(--amber);
+  background: none;
+  color: var(--amber);
+  cursor: pointer;
+}
+.co-pull-actions button:disabled { opacity: 0.4; cursor: default; }
+.co-pull-actions button.ghost { border-color: var(--border-dim); color: var(--text-dim); }

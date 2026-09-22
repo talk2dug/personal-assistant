@@ -110,6 +110,10 @@ export const api = {
     return request(`/api/agenda${qs.toString() ? `?${qs}` : ''}`)
   },
   company: () => request('/api/company'),
+  // The only write on the company dashboard. Jack approves nothing going UP;
+  // this is how something comes down, and the reason is what the team learns from.
+  retractProduct: (listing_id, reason) =>
+    request('/api/company/retract', { method: 'POST', body: JSON.stringify({ listing_id, reason }) }),
   needs: () => request('/api/needs'),
   provideNeed: (id, value) =>
     request(`/api/needs/${id}/provide`, { method: 'POST', body: JSON.stringify({ value }) }),

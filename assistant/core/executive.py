@@ -339,13 +339,13 @@ def watch_workers(db_path: str, owner_user_id: int, say=None,
 
 def stage_store_products(db_path: str, owner_user_id: int, printify=None,
                          limit: int = 5) -> dict:
-    """Turn approved listings into real products, ready to go on sale.
+    """Turn approved listings into products that are actually on sale.
 
-    The last mile the pipeline never had. Staging is reversible -- a Printify product
-    that has not been published is a draft nobody can buy, and deleting it is one call --
-    so this runs unattended like every other stage. Whether any of it actually goes ON
-    SALE is a separate switch (store_policy.go_live), because that step is the one that
-    cannot be taken back.
+    The last mile the pipeline never had. It goes all the way: his instruction for this
+    store is that it runs without him, so stopping at a staged draft nobody can buy would
+    just be the old approval queue relocated. `store_policy.go_live` is a brake he can
+    pull, not a gate he has to open, and what he pulls teaches the team
+    (store_publish.retract).
     """
     from . import store_policy, store_publish
 

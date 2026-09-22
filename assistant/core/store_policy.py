@@ -98,22 +98,29 @@ def set_autopublish(db_path: str, enabled: bool, *, changed_by: str = "owner",
 
 
 def go_live(db_path: str) -> bool:
-    """Whether a staged product may be put ON SALE without asking him first.
+    """Whether the automated store may put its own products on sale. Defaults TRUE.
 
-    Distinct from `autopublish`, and deliberately not the same switch. Autopublish means
-    "do not make me approve every stage of your own pipeline" -- his words: *"I dont need
-    to approve what they make or sell."* This one governs the single step where a thing
-    stops being a draft in a tool he owns and becomes something a stranger can buy under
-    his brand name. Creating a Printify product is reversible with one call; the listing
-    going live is not, and overloading one flag to mean both would hide that difference.
+    A BRAKE, NOT A GATE, and the difference is the whole point. Jack, 2026-09-22: *"this
+    is the automated store, i should NOT be approving anything. This is 100% AI driven...
+    I dont need to aprove but I can retract something."* A switch defaulted off is an
+    approval queue with extra steps -- which is what this was when it shipped a few hours
+    earlier, and it was wrong.
 
-    Defaults OFF. Turning it on is one sentence to Jarvis.
+    So it is on unless he turns it off, and the real control is the other end: he pulls
+    anything he does not want and says why, and the reason teaches the team
+    (store_retract.retract / lessons). Judgement after the fact, on real products, beats
+    judgement beforehand on descriptions of products.
+
+    This only ever governs the AUTOMATED market -- print-on-demand, which costs him
+    nothing to make. Anything local is made on his own equipment and never reaches here.
     """
     try:
         raw = core_db.get_setting(db_path, GO_LIVE_KEY)
     except sqlite3.OperationalError:
-        return False
-    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+        return True
+    if raw is None:
+        return True
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
 def set_go_live(db_path: str, enabled: bool, *, changed_by: str = "owner",

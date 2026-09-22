@@ -466,6 +466,24 @@ PERSONAL_TOOLS = [
         }, "required": ["charge_id"]},
     }},
     {"type": "function", "function": {
+        "name": "get_mail",
+        "description": (
+            "The physical post he has photographed and emailed in: who sent it, what it "
+            "says, what it wants, how much and by when. Use this whenever he asks about "
+            "a letter, a bill, a collection notice, 'what came in the post', or wants to "
+            "talk through something he has been sent. Each piece keeps the model's own "
+            "confidence and a list of anything it could not read, so say so rather than "
+            "presenting a shaky reading as fact. The photo path is included -- the "
+            "picture is the record, the reading is a guess."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "How many, newest first. Default 25."},
+            "kind": {"type": "string",
+                     "description": "Narrow to one sort: bill, tax, legal, collection, "
+                                    "government, medical, insurance, bank, statement."},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "get_agenda",
         "description": (
             "Everything with a DATE on it, merged into days: his work calendar (the "
@@ -872,6 +890,11 @@ PERSONAL_SYSTEM_NOTE = (
     "print business, these are for him."
     " You also run his day, and this is the part he leans on most -- he has ADHD, and the "
     "whole point is that he should not have to hold the shape of a day in his head. When he "
+    "When he asks about a letter, a bill, a collection notice or what came in the "
+    "post, call get_mail -- he photographs his post and emails it in, and that tool is "
+    "the only thing that can see it. Respect the confidence on each piece: a reading "
+    "off a phone photo is a guess, and a wrong figure in his finances is worse than "
+    "saying you are unsure. "
     "asks what is ON his agenda -- today, tomorrow, this week, or whether he is free -- "
     "call get_agenda. It is the only tool that can see his work calendar; plan_my_day has no "
     "calendar in it and list_reminders sees only reminders, so answering from either of those "
@@ -1125,6 +1148,24 @@ class PersonalClient:
             ok = db.delete_manual_recurring_charge(db_path, arguments["charge_id"])
             return {"ok": ok}
 
+        if name == "get_mail":
+            # The picture is the record and the reading is a guess -- both go to the
+            # model, so it can hedge where the reading hedged instead of repeating a
+            # number off a phone photo as though it came from a bank.
+            from . import mail_photo
+
+            pieces = mail_photo.recent(db_path, owner, limit=int(arguments.get("limit") or 25))
+            wanted = (arguments.get("kind") or "").strip().lower()
+            if wanted:
+                pieces = [p for p in pieces if (p.get("kind") or "") == wanted]
+            return {"mail": [{
+                "id": p["id"], "received": p["at"], "sender": p["sender"],
+                "kind": p["kind"], "summary": p["summary"], "amount": p["amount"],
+                "due_date": p["due_date"], "account_ref": p["account_ref"],
+                "action": p["action"], "confidence": p["confidence"],
+                "could_not_read": p["unreadable"], "photo": p["photo_path"],
+                "task_id": p["task_id"], "status": p["status"],
+            } for p in pieces]}
         if name == "get_agenda":
             # The same call the Agenda screen makes, so chat and the screen can never
             # disagree about what day he is having. It was already merging the work

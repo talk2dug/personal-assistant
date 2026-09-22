@@ -255,11 +255,15 @@ class TestSecretDetection:
         orq.provide(db, 1, rid, "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP")
         assert orq.list_requests(db, 1)[0]["is_secret"] is True
 
+    # Deliberately not shaped like the real thing. Detection keys on the PREFIX alone
+    # (_SECRET_PREFIXES), so the body proves nothing -- and a fixture that does look
+    # real gets the whole branch rejected by GitHub's push protection, which is how
+    # this one was found.
     @pytest.mark.parametrize("value", [
-        "shpat_0123456789abcdef0123456789abcdef",   # Shopify admin token
-        "sk_live_0123456789abcdef",                  # Stripe-style
-        "ghp_0123456789abcdefghijklmnop",            # GitHub PAT
-        "r8_0123456789abcdefghijklmnop",             # Replicate
+        "shpat_EXAMPLE_NOT_A_REAL_TOKEN",   # Shopify admin token
+        "sk_live_EXAMPLE_NOT_A_REAL_KEY",   # Stripe-style
+        "ghp_EXAMPLE_NOT_A_REAL_TOKEN",     # GitHub PAT
+        "r8_EXAMPLE_NOT_A_REAL_TOKEN",      # Replicate
     ])
     def test_known_credential_prefixes_are_masked(self, db, value):
         rid = orq.raise_request(db, 1, title="A value", kind="text", name="plain")

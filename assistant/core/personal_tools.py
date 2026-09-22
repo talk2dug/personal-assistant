@@ -466,6 +466,25 @@ PERSONAL_TOOLS = [
         }, "required": ["charge_id"]},
     }},
     {"type": "function", "function": {
+        "name": "import_leonardo_art",
+        "description": (
+            "Pull the images he has already made in Leonardo.Ai into his design "
+            "catalogue, so he does not have to download hundreds of them by hand. Run "
+            "with check_only first: that asks his account whether the API key can even "
+            "see his web-app work, which Leonardo does not document, and costs nothing. "
+            "Importing spends no Leonardo credits either -- credits go on generating, "
+            "not on listing or downloading. Safe to run again; anything already in the "
+            "catalogue is skipped by its Leonardo id."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "check_only": {"type": "boolean",
+                           "description": "Just report what the key can see. Do this "
+                                          "first, and tell him the numbers."},
+            "max_images": {"type": "integer",
+                           "description": "Cap for one run. Default 500."},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "get_mail",
         "description": (
             "The physical post he has photographed and emailed in: who sent it, what it "
@@ -998,7 +1017,8 @@ class PersonalClient:
     """
 
     def __init__(self, db_path: str, owner_user_id: int, letterstream=None, kroger=None,
-                 tz_name: str = "America/New_York"):
+                 tz_name: str = "America/New_York", leonardo_api_key: str | None = None,
+                 generated_media_path: str = "generated"):
         self.db_path = db_path
         self.owner_user_id = owner_user_id
         # A routine is lived in local time. Without this, "log that I fed Ghost" at 8pm
@@ -1008,6 +1028,10 @@ class PersonalClient:
         # Raw kroger.mcp_client, same loose-coupling convention as letterstream above --
         # only kitchen_tools.sync_kroger_purchases actually calls it (see dispatch below).
         self.kroger = kroger
+        # For importing the images he has already made in Leonardo rather than
+        # downloading hundreds of them by hand.
+        self.leonardo_api_key = leonardo_api_key
+        self.generated_media_path = generated_media_path
 
     def _today(self) -> str:
         from . import routine
@@ -1169,6 +1193,22 @@ class PersonalClient:
         if name == "delete_manual_recurring_charge":
             ok = db.delete_manual_recurring_charge(db_path, arguments["charge_id"])
             return {"ok": ok}
+
+        if name == "import_leonardo_art":
+            from . import leonardo
+
+            key = getattr(self, "leonardo_api_key", None)
+            if not key:
+                return {"error": "No Leonardo API key is configured. He needs to make "
+                                 "one on Leonardo's API Access page and put it in "
+                                 "config.json as leonardo_api_key. Note the API is "
+                                 "billed separately from his web subscription."}
+            client = leonardo.LeonardoClient(key)
+            if arguments.get("check_only"):
+                return leonardo.probe(client)
+            return leonardo.import_generations(
+                db_path, owner, client, self.generated_media_path,
+                max_images=int(arguments.get("max_images") or 500))
 
         if name == "get_mail":
             # The picture is the record and the reading is a guess -- both go to the

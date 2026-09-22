@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS design_assets (
     width INTEGER,
     height INTEGER,
     bytes INTEGER,
+    -- Whatever the source calls it -- a Leonardo image id, say. The reason an import
+    -- of several hundred can be run twice without producing several hundred duplicates.
+    external_id TEXT,
     -- available | used | retired. 'used' is not deleted: a design he has already sold
     -- something from is exactly the one he may want again.
     status TEXT NOT NULL DEFAULT 'available',
@@ -55,10 +58,25 @@ CREATE INDEX IF NOT EXISTS idx_design_assets_status
     ON design_assets(status, id DESC);
 """
 
+# Kept out of SCHEMA deliberately: on a database created before external_id existed,
+# CREATE TABLE IF NOT EXISTS is a no-op and this index would then be built against a
+# column that is not there yet. It goes up after the migration below, never before.
+EXTERNAL_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_design_assets_external
+    ON design_assets(owner_user_id, external_id) WHERE external_id IS NOT NULL;
+"""
+
 
 def init_design_assets(db_path: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         conn.executescript(SCHEMA)
+        # The table shipped a few hours before external_id did, so an older database
+        # gets the column added rather than recreated -- the designs already in it are
+        # the entire point of the table.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(design_assets)")}
+        if "external_id" not in cols:
+            conn.execute("ALTER TABLE design_assets ADD COLUMN external_id TEXT")
+        conn.executescript(EXTERNAL_INDEX)
         conn.commit()
 
 
@@ -91,7 +109,8 @@ def _measure(path: str) -> tuple:
 
 
 def add(db_path: str, owner_user_id: int, path: str, title: str | None = None,
-        source: str = "emailed", note: str | None = None) -> int:
+        source: str = "emailed", note: str | None = None,
+        external_id: str | None = None) -> int:
     """Catalogue one design. Returns its id."""
     init_design_assets(db_path)
     width, height, size = _measure(path)
@@ -99,12 +118,24 @@ def add(db_path: str, owner_user_id: int, path: str, title: str | None = None,
         cur = conn.execute(
             """INSERT INTO design_assets
                    (owner_user_id, title, path, source, note, width, height, bytes,
-                    added_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                    external_id, added_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (owner_user_id, (title or "").strip() or os.path.basename(path),
-             path, source, note, width, height, size, _now()))
+             path, source, note, width, height, size, external_id, _now()))
         conn.commit()
         return int(cur.lastrowid)
+
+
+def has_external(db_path: str, owner_user_id: int, external_id: str) -> bool:
+    """Whether this design is already in the catalogue under the source's own id.
+
+    What makes an import of several hundred images safe to run twice.
+    """
+    init_design_assets(db_path)
+    with closing(_connect(db_path)) as conn:
+        return conn.execute(
+            "SELECT 1 FROM design_assets WHERE owner_user_id = ? AND external_id = ?",
+            (owner_user_id, str(external_id))).fetchone() is not None
 
 
 def already_have(db_path: str, owner_user_id: int, path: str) -> bool:

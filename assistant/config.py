@@ -324,6 +324,11 @@ class Config:
     # this codebase (CCXT, git_ops), never a tool argument the model could leak or forge.
     ssh_hosts: dict = field(default_factory=dict)
     piper_voice_path: str | None = None
+    # Leonardo.Ai, for importing the images he has already made there. Billed on its
+    # own track -- an API key is not the web subscription -- but listing and downloading
+    # spend nothing, because credits go on GENERATING.
+    leonardo_api_key: str | None = None
+
     # The natural voice. Orpheus runs on this same box (127.0.0.1) -- there is no network
     # in this path, so its cost is compute, not the link. Unset falls back to Piper
     # everywhere, which is exactly what every surface did before this existed.
@@ -554,6 +559,7 @@ def load_config(path: str = "config.json") -> Config:
         scan_subnet=data.get("scan_subnet", "192.168.0"),
         ssh_hosts=data.get("ssh_hosts", {}),
         piper_voice_path=data.get("piper_voice_path"),
+        leonardo_api_key=data.get("leonardo_api_key"),
         orpheus_url=data.get("orpheus_url"),
         orpheus_voice=data.get("orpheus_voice", "dan"),
         orpheus_timeout_seconds=data.get("orpheus_timeout_seconds", 30.0),

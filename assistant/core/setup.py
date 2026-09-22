@@ -267,7 +267,11 @@ def build_personal_context(
         cfg.db_path, owner_user_id, letterstream=letterstream_tools, kroger=kroger_tools,
         # A routine is lived in local time: without this, logging "fed Ghost" at 8pm would
         # file against tomorrow's date for most of the evening.
-        tz_name=cfg.timezone))
+        tz_name=cfg.timezone,
+        # So he can say "import my Leonardo art" to Jarvis rather than downloading
+        # several hundred images by hand.
+        leonardo_api_key=cfg.leonardo_api_key,
+        generated_media_path=cfg.generated_media_path))
 
 
 def build_era_context(cfg) -> EraContext | None:

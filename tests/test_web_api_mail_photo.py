@@ -103,13 +103,24 @@ class TestTheDoor:
 
 
 class TestPostingALetter:
-    def test_a_letter_is_read_filed_and_raises_a_task(self, client):
+    def test_the_upload_returns_before_the_model_has_read_anything(self, client):
+        """The phone must not hold the connection for a twenty-second GPU call on top of
+        a cellular upload -- that is what timed out the first real photo."""
         c, db_path = client
         out = _post(c).json()
-        assert out["parsed"] is True
-        assert out["sender"] == "Internal Revenue Service"
-        assert out["task_id"], "a tax notice with a deadline should raise a task"
-        assert mail_photo.recent(db_path, 1)[0]["id"] == out["id"]
+        assert out["status"] == "received" and out["id"]
+        assert "sender" not in out, "nothing is known yet at this point"
+
+    def test_a_letter_is_read_filed_and_raises_a_task(self, client):
+        """TestClient runs background tasks once the response is sent, so by here the
+        reading has happened -- exactly as it will on the server a moment later."""
+        c, db_path = client
+        out = _post(c).json()
+        piece = mail_photo.recent(db_path, 1)[0]
+        assert piece["id"] == out["id"]
+        assert piece["sender"] == "Internal Revenue Service"
+        assert piece["status"] == "new", "no longer pending once read"
+        assert piece["task_id"], "a tax notice with a deadline should raise a task"
 
     def test_the_photo_is_kept_on_disk(self, client):
         import pathlib
@@ -117,6 +128,20 @@ class TestPostingALetter:
         c, _ = client
         out = _post(c).json()
         assert pathlib.Path(out["photo_path"]).read_bytes() == b"jpegbytes"
+
+    def test_a_reading_that_explodes_does_not_lose_the_letter(self, client):
+        """The background task runs with nobody listening. If it raised, the photo would
+        vanish silently -- the exact failure this feature exists to prevent."""
+        c, db_path = client
+
+        class Exploding:
+            def run_sync(self, *a, **k):
+                raise RuntimeError("gpu on fire")
+
+        c.app.state.bridge = Exploding()
+        out = _post(c).json()
+        assert out["status"] == "received"
+        assert mail_photo.recent(db_path, 1)[0]["id"] == out["id"]
 
     def test_an_empty_photo_is_refused(self, client):
         c, _ = client
@@ -134,14 +159,16 @@ class TestPostingALetter:
         c, db_path = client
         c.app.state.bridge = FakeBridge(result="I cannot read this")
         out = _post(c).json()
-        assert out["parsed"] is False and out["task_id"]
-        assert len(mail_photo.recent(db_path, 1)) == 1
+        piece = mail_photo.recent(db_path, 1)[0]
+        assert piece["id"] == out["id"] and piece["task_id"], "a task saying so"
+        assert piece["photo_path"], "and the photo is still kept"
 
     def test_junk_mail_is_filed_without_cluttering_his_task_list(self, client):
         c, db_path = client
         c.app.state.bridge = FakeBridge(result=json.dumps({
             "sender": "Local Pizza", "kind": "junk", "summary": "Coupons",
             "action": "Recycle it", "confidence": "high"}))
-        out = _post(c).json()
-        assert out["parsed"] is True and out["task_id"] is None
+        _post(c)
+        piece = mail_photo.recent(db_path, 1)[0]
+        assert piece["kind"] == "junk" and piece["task_id"] is None
         assert len(mail_photo.recent(db_path, 1)) == 1, "still filed, just not a task"

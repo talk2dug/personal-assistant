@@ -264,6 +264,45 @@ def task_text(reading: dict) -> str:
     return line
 
 
+def record_pending(db_path: str, owner_user_id: int, photo_path: str) -> int:
+    """File the photograph the instant it lands, before anything reads it.
+
+    The phone must not wait on a GPU. Reading a letter takes ~20 seconds on simrig, and
+    a cellular upload takes its own time on top; together that is past what iOS will hold
+    a Shortcut open for, so the first real photo Jack sent timed out on his phone while
+    the server was still working. The upload now ends as soon as the bytes are on disk.
+
+    A pending row is also the honest state: the photo IS here, nothing has read it yet.
+    """
+    init_mail_photo_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            """INSERT INTO mail_pieces
+                   (owner_user_id, at, photo_path, status, created_at)
+               VALUES (?,?,?,'pending',?)""",
+            (owner_user_id, _now(), photo_path, _now()))
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def apply_reading(db_path: str, piece_id: int, reading: dict) -> None:
+    """Fill in a pending piece once the model has read it."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            """UPDATE mail_pieces
+                  SET sender = ?, kind = ?, summary = ?, amount = ?, due_date = ?,
+                      account_ref = ?, action = ?, deadline_risk = ?, confidence = ?,
+                      unreadable = ?, raw = ?, status = 'new'
+                WHERE id = ?""",
+            (reading.get("sender"), reading.get("kind"), reading.get("summary"),
+             reading.get("amount"), reading.get("due_date"), reading.get("account_ref"),
+             reading.get("action"), 1 if reading.get("deadline_risk") else 0,
+             reading.get("confidence"),
+             json.dumps(reading.get("unreadable") or []),
+             (reading.get("raw") or "")[:8000], piece_id))
+        conn.commit()
+
+
 def attach_task(db_path: str, piece_id: int, task_id: int) -> None:
     with closing(_connect(db_path)) as conn:
         conn.execute("UPDATE mail_pieces SET task_id = ? WHERE id = ?", (task_id, piece_id))

@@ -4,19 +4,20 @@ Device-key auth rather than a session cookie, because the caller is an iOS Short
 the Share Sheet and a Shortcut cannot hold a login. Same Bearer key the voice terminals
 use -- see devices.py's own note on why that key is the boundary here.
 
-The upload half deliberately mirrors kitchen.py's receipt endpoint: read the bytes, keep
-the original on disk, run the model off the event loop, hand back a draft. The one
-difference is that this also files the result, because the point is that he photographs
-the post as it arrives and does not have to come back to a screen afterwards.
+The upload half mirrors kitchen.py's receipt endpoint -- read the bytes, keep the
+original on disk -- but the response does NOT wait for the model. Reading a letter takes
+about twenty seconds on simrig, and a cellular upload takes its own time before that; the
+first real photo Jack sent timed out on his phone while the server was still working
+happily. So the request ends as soon as the bytes are safe on disk, and the reading
+happens afterwards. He photographs the post as it arrives and never waits on a screen.
 """
-import asyncio
-import functools
 import logging
 import pathlib
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import (APIRouter, BackgroundTasks, Depends, HTTPException, Request,
+                     UploadFile)
 
 from ...core import mail_photo, personal_db
 
@@ -80,7 +81,8 @@ def _owner_user_id(request: Request) -> int:
 # shape to anyone probing, and, more practically, means a Shortcut with the wrong field
 # name and a Shortcut with the wrong key look identical while he is setting it up.
 @router.post("", dependencies=[Depends(_require_device_key)])
-async def post_mail_photo(request: Request, photo: UploadFile):
+async def post_mail_photo(request: Request, background: BackgroundTasks,
+                          photo: UploadFile):
     """Read one photographed letter, file it, and raise a task if it needs one."""
     cfg = request.app.state.cfg
     owner_id = _owner_user_id(request)
@@ -109,52 +111,69 @@ async def post_mail_photo(request: Request, photo: UploadFile):
     saved = out_dir / f"mail_{owner_id}_{int(time.time() * 1000)}{suffix or '.jpg'}"
     saved.write_bytes(image_bytes)
 
-    loop = asyncio.get_running_loop()
-    call = functools.partial(mail_photo.read_photo, request.app.state.bridge, image_bytes)
-    reading = await loop.run_in_executor(None, call)
+    piece_id = mail_photo.record_pending(cfg.db_path, owner_id, str(saved))
+    logger.info("mail-photo: piece %s saved (%d bytes), reading it in the background",
+                piece_id, len(image_bytes))
 
-    piece_id = mail_photo.record(cfg.db_path, owner_id, reading, photo_path=str(saved))
+    # The response ends HERE, as soon as the bytes are safe on disk. Reading a letter
+    # takes about twenty seconds on simrig and a cellular upload takes its own time on
+    # top; making the phone hold the connection for both is what timed out the first
+    # real photo Jack sent. The reading happens after the response has gone.
+    background.add_task(_read_and_file, cfg.db_path, owner_id, piece_id,
+                        request.app.state.bridge, image_bytes, str(saved))
+    return {"id": piece_id, "status": "received", "photo_path": str(saved),
+            "note": "reading it now - it will appear in your mail list shortly"}
 
-    # An unreadable photo is still filed -- with the photo attached and a task saying so.
-    # Silently dropping it is how a letter gets lost between the doormat and the desk.
-    if not reading.get("parsed"):
-        task_id = personal_db.create_task(
-            cfg.db_path, owner_id,
-            "Unreadable mail photo - open the envelope and check it yourself",
-            priority="normal", track="personal")
-        personal_db.add_task_detail(cfg.db_path, task_id, "note",
-                                    reading.get("error") or "the model returned nothing",
-                                    label="Why it could not be read")
-        personal_db.add_task_detail(cfg.db_path, task_id, "note", str(saved),
-                                    label="The photo")
-        mail_photo.attach_task(cfg.db_path, piece_id, task_id)
-        return {"id": piece_id, "parsed": False, "task_id": task_id,
-                "error": reading.get("error"), "photo_path": str(saved)}
 
-    task_id = None
-    if mail_photo.should_raise_task(reading):
-        task_id = personal_db.create_task(
-            cfg.db_path, owner_id, mail_photo.task_text(reading),
-            priority="high" if reading.get("deadline_risk") else "normal",
-            due_at=reading.get("due_date"), track="personal")
-        if reading.get("summary"):
-            personal_db.add_task_detail(cfg.db_path, task_id, "note",
-                                        reading["summary"], label="What the letter says")
-        personal_db.add_task_detail(cfg.db_path, task_id, "note", str(saved),
-                                    label="The photo")
-        if reading.get("unreadable"):
+def _read_and_file(db_path: str, owner_id: int, piece_id: int, bridge,
+                   image_bytes: bytes, saved: str) -> None:
+    """Runs after the response. Must never raise: nothing is listening any more, and an
+    exception here would lose the letter silently, which is the failure this whole
+    feature exists to prevent."""
+    try:
+        reading = mail_photo.read_photo(bridge, image_bytes)
+        mail_photo.apply_reading(db_path, piece_id, reading)
+
+        if not reading.get("parsed"):
+            task_id = personal_db.create_task(
+                db_path, owner_id,
+                "Unreadable mail photo - open the envelope and check it yourself",
+                priority="normal", track="personal")
             personal_db.add_task_detail(
-                cfg.db_path, task_id, "note",
-                "Could not read: " + ", ".join(reading["unreadable"]),
-                label="Check these against the letter")
-        mail_photo.attach_task(cfg.db_path, piece_id, task_id)
+                db_path, task_id, "note",
+                reading.get("error") or "the model returned nothing",
+                label="Why it could not be read")
+            personal_db.add_task_detail(db_path, task_id, "note", saved,
+                                        label="The photo")
+            mail_photo.attach_task(db_path, piece_id, task_id)
+            logger.warning("mail-photo: piece %s could not be read: %s",
+                           piece_id, reading.get("error"))
+            return
 
-    return {"id": piece_id, "parsed": True, "task_id": task_id,
-            "sender": reading.get("sender"), "kind": reading.get("kind"),
-            "summary": reading.get("summary"), "amount": reading.get("amount"),
-            "due_date": reading.get("due_date"), "action": reading.get("action"),
-            "confidence": reading.get("confidence"),
-            "unreadable": reading.get("unreadable"), "photo_path": str(saved)}
+        logger.info("mail-photo: piece %s read as %s from %r (confidence %s)",
+                    piece_id, reading.get("kind"), reading.get("sender"),
+                    reading.get("confidence"))
+
+        if mail_photo.should_raise_task(reading):
+            task_id = personal_db.create_task(
+                db_path, owner_id, mail_photo.task_text(reading),
+                priority="high" if reading.get("deadline_risk") else "normal",
+                due_at=reading.get("due_date"), track="personal")
+            if reading.get("summary"):
+                personal_db.add_task_detail(db_path, task_id, "note",
+                                            reading["summary"],
+                                            label="What the letter says")
+            personal_db.add_task_detail(db_path, task_id, "note", saved,
+                                        label="The photo")
+            if reading.get("unreadable"):
+                personal_db.add_task_detail(
+                    db_path, task_id, "note",
+                    "Could not read: " + ", ".join(reading["unreadable"]),
+                    label="Check these against the letter")
+            mail_photo.attach_task(db_path, piece_id, task_id)
+    except Exception:                                               # noqa: BLE001
+        logger.exception("mail-photo: reading piece %s failed after the response",
+                         piece_id)
 
 
 @router.get("")

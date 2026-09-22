@@ -158,3 +158,47 @@ def test_scan_survives_a_classification_error(db_path):
 
     result = mail_triage.run_mail_triage_once(path, BrokenLLM(), mail, owner_id)
     assert result == {"scanned": 1, "drafted": 0}
+
+
+class TestHisOwnMailIsLeftAlone:
+    """He emails photographs of post to his own address -- that is the mail-photo
+    intake, and those messages have no body at all. Triaged as correspondence they
+    became a stream of drafted replies to himself, and the notifications about THOSE are
+    what he noticed: "I'm getting a lot of notifications that my email was blank.
+    Jarvis is trying to reply to them."
+    """
+
+    def test_a_photo_he_sent_himself_is_not_drafted_a_reply(self, db_path):
+        path, owner_id = db_path
+        client = FakeMailClient(
+            [{"uid": "1", "from": "Jack Swayze <swayzej@me.com>", "subject": "Bill",
+              "date": ""}],
+            {"1": {"uid": "1", "from": "Jack Swayze <swayzej@me.com>",
+                   "subject": "Bill", "body": ""}})
+        client.apple_id = "swayzej@me.com"
+        out = mail_triage.run_mail_triage_once(path, FakeLLM([]), client, owner_id)
+        assert out["drafted"] == 0 and out["scanned"] == 0
+
+    def test_mail_from_anyone_else_is_still_triaged(self, db_path):
+        """The guard must be his own address, not 'skip everything quiet'."""
+        path, owner_id = db_path
+        client = FakeMailClient(
+            [{"uid": "2", "from": "A Customer <them@example.com>",
+              "subject": "Where's my order?", "date": ""}],
+            {"2": {"uid": "2", "from": "A Customer <them@example.com>",
+                   "subject": "Where's my order?", "body": "Any news?"}})
+        client.apple_id = "swayzej@me.com"
+        out = mail_triage.run_mail_triage_once(
+            path, FakeLLM([NEEDS_REPLY_JSON]), client, owner_id)
+        assert out["drafted"] == 1
+
+    def test_a_client_with_no_address_configured_still_works(self, db_path):
+        """getattr default, not an attribute error on an older client."""
+        path, owner_id = db_path
+        client = FakeMailClient(
+            [{"uid": "3", "from": "Someone <x@example.com>", "subject": "Hi", "date": ""}],
+            {"3": {"uid": "3", "from": "Someone <x@example.com>", "subject": "Hi",
+                   "body": "Hello"}})
+        out = mail_triage.run_mail_triage_once(
+            path, FakeLLM([NEEDS_REPLY_JSON]), client, owner_id)
+        assert out["drafted"] == 1

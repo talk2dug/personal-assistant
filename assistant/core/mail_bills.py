@@ -251,6 +251,15 @@ def run_mail_bill_scan_once(
         uid = header["uid"]
         if mail_db.has_scanned_for_bill(db_path, owner_user_id, folder, uid):
             continue
+        # Never his own note to himself. He emails photographs of post to his own
+        # address -- that is the mail-photo intake, and those messages have no body at
+        # all. Triaged as correspondence they became a stream of drafted replies to
+        # himself, and the notifications about them are what he actually noticed.
+        from . import mail_photo
+
+        if mail_photo.is_from_owner(header.get("from", ""),
+                                    getattr(mail_client, "apple_id", "")):
+            continue
         if mail_db.is_logged_junk(db_path, folder, uid):
             continue
         scanned += 1

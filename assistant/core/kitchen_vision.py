@@ -10,6 +10,22 @@ one-shot, queued, always-qwen3-vl call for a browser file upload, with a real jo
 import base64
 import json
 
+
+def _encoded(image_bytes) -> list:
+    """Base64 pages, downscaled, from one photo or several of the same thing.
+
+    Two jobs in one because both were bugs. A phone photograph is 4032x3024 or bigger,
+    which is far more picture than a model needs to read a recipe off a page -- one
+    full-resolution image held the serial GPU queue for 69 minutes and everything behind
+    it simply never ran. And callers now hand over a LIST of pages, since a letter or a
+    recipe can be photographed twice; this took raw bytes and died on the list with a
+    TypeError the moment a real recipe arrived.
+    """
+    from . import mail_photo
+
+    return [base64.b64encode(mail_photo.prepare_for_vision(b)).decode()
+            for b in mail_photo.as_pages(image_bytes)]
+
 # Deliberately includes a worked example for the one case that actually made the model
 # loop in testing: "1 large egg", where it isn't obvious whether "large" is a unit or
 # part of the ingredient name. Spelling out the answer up front heads off exactly the
@@ -72,14 +88,14 @@ def analyze_recipe_photo(bridge, image_bytes: bytes) -> dict:
     with how a failed vision read is handled everywhere else in this codebase (an honest
     "couldn't read this" beats a confidently wrong guess).
     """
-    b64 = base64.b64encode(image_bytes).decode()
+    pages = _encoded(image_bytes)
     # The vision route's shared default (num_predict=4096) was tuned against a simple
     # tagging task and proved too tight here: a real test of this exact prompt hit that
     # cap mid-reasoning before emitting any JSON. A recipe's ingredients+steps can
     # legitimately run long, so both are raised well past the image's own ~4000-token
     # cost plus this prompt, with headroom for the reasoning pass on top of the answer.
     job = bridge.run_sync(
-        "kitchen", "vision", RECIPE_PROMPT, images=[b64],
+        "kitchen", "vision", RECIPE_PROMPT, images=pages,
         options={"num_predict": 8192, "num_ctx": 24576},
         # Constrained to JSON rather than asked for it. Proven necessary on the
         # mail reader, which returned clean JSON for one photo and 8000 characters
@@ -175,7 +191,7 @@ def analyze_inventory_photo(bridge, image_bytes: bytes, item_hint: str | None = 
     tracked to update its quantity); when given, it's fed to the model directly so it
     spends its whole budget on the actual open question, the quantity estimate, rather
     than also re-deriving a name it doesn't need to guess."""
-    b64 = base64.b64encode(image_bytes).decode()
+    pages = _encoded(image_bytes)
     prompt = INVENTORY_PROMPT
     if item_hint:
         prompt += (
@@ -184,7 +200,7 @@ def analyze_inventory_photo(bridge, image_bytes: bytes, item_hint: str | None = 
             f"on estimating the quantity remaining."
         )
     job = bridge.run_sync(
-        "kitchen", "vision", prompt, images=[b64],
+        "kitchen", "vision", prompt, images=pages,
         options={"num_predict": 4096, "num_ctx": 16384},
         fmt="json",
     )
@@ -213,10 +229,10 @@ def analyze_inventory_photo(bridge, image_bytes: bytes, item_hint: str | None = 
 def analyze_receipt_photo(bridge, image_bytes: bytes) -> dict:
     """Returns {"parsed": True, "store", "items": [...]} on success (items may legitimately
     be an empty list), or {"parsed": False, "raw_text", "error"} on failure."""
-    b64 = base64.b64encode(image_bytes).decode()
+    pages = _encoded(image_bytes)
     # A receipt can list many line items -- same headroom reasoning as the recipe prompt.
     job = bridge.run_sync(
-        "kitchen", "vision", RECEIPT_PROMPT, images=[b64],
+        "kitchen", "vision", RECEIPT_PROMPT, images=pages,
         options={"num_predict": 8192, "num_ctx": 24576},
         fmt="json",
     )

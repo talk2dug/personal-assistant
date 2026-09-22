@@ -34,7 +34,7 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -508,10 +508,45 @@ class GPUBridge:
                     return job
         return None
 
+    def reap_stalled(self) -> int:
+        """Fail any job that has been 'running' far longer than it possibly could be.
+
+        The queue is serial per lane, so ONE job stuck in 'running' stops every job
+        behind it, for ever, in silence. A real one did: a full-resolution recipe photo
+        sat 'running' for 69 minutes and held two letters behind it, and nothing in the
+        system noticed -- the scheduler just logged that it was skipping ticks.
+
+        The HTTP call carries its own timeout (request_timeout), so a job older than
+        that plus a wide margin is not slow, it is dead: the worker thread that owned it
+        is gone, most likely with the process that started it. Marked failed rather than
+        requeued, because whatever killed it will most likely kill the retry too, and a
+        failed row is visible while a silently re-queued one is not.
+
+        Sibling of staff.reconcile_orphaned_work and work_queue.reconcile_orphaned,
+        which exist for exactly this failure in their own queues.
+        """
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(seconds=self.request_timeout * 2 + 120)).isoformat()
+        with closing(_connect(self.db_path)) as conn:
+            cur = conn.execute(
+                """UPDATE gpu_jobs SET status = 'failed', finished_at = ?,
+                          error = 'abandoned: still running long past the request timeout'
+                    WHERE status = 'running' AND started_at IS NOT NULL
+                      AND started_at < ?""",
+                (_now(), cutoff))
+            conn.commit()
+        if cur.rowcount:
+            logger.warning("gpu bridge: reaped %d abandoned job(s) blocking the queue",
+                           cur.rowcount)
+        return cur.rowcount
+
     def tick(self) -> int:
         """One scheduling pass. Returns how many jobs it started."""
         if not self.is_available():
             return 0
+        # Before claiming anything: a dead job still marked running holds its lane's
+        # admission slot, so without this the queue can never recover on its own.
+        self.reap_stalled()
         started = 0
         while True:
             job = self._claim_next()

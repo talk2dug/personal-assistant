@@ -271,3 +271,62 @@ def test_status_reports_everything_a_ui_needs(bridge, monkeypatch):
     assert status["task_routing"]["vision"]["available"] is True
     # Declared but not installed, so the UI can show it greyed rather than missing.
     assert status["task_routing"]["image_generation"]["available"] is False
+
+
+class TestReapingAbandonedJobs:
+    """The queue is serial per lane, so ONE job stuck in 'running' stops everything
+    behind it for ever, in silence. A real one did: a full-resolution recipe photo sat
+    'running' for 69 minutes holding two letters behind it, and the only symptom
+    anywhere was APScheduler quietly logging that it was skipping ticks.
+    """
+
+    def _job(self, db_path, status, started_minutes_ago=None):
+        import sqlite3
+        from datetime import datetime, timedelta, timezone
+        started = None
+        if started_minutes_ago is not None:
+            started = (datetime.now(timezone.utc)
+                       - timedelta(minutes=started_minutes_ago)).isoformat()
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.execute(
+                """INSERT INTO gpu_jobs (agent, task_type, model, prompt, payload,
+                                         queued_at, started_at, status)
+                   VALUES ('t','vision','m','p','{}',?,?,?)""",
+                (started or datetime.now(timezone.utc).isoformat(), started, status))
+            return cur.lastrowid
+
+    def _status(self, db_path, job_id):
+        import sqlite3
+        with sqlite3.connect(db_path) as conn:
+            return conn.execute("SELECT status FROM gpu_jobs WHERE id = ?",
+                                (job_id,)).fetchone()[0]
+
+    def test_a_job_running_far_past_its_timeout_is_failed(self, db_path):
+        bridge = GPUBridge(db_path, "http://simrig.test:11434", request_timeout=60)
+        stuck = self._job(bridge.db_path, "running", started_minutes_ago=69)
+        assert bridge.reap_stalled() == 1
+        assert self._status(bridge.db_path, stuck) == "failed"
+
+    def test_a_job_that_is_merely_slow_is_left_alone(self, db_path):
+        """A vision read genuinely takes a while. Reaping a working job would be worse
+        than the bug."""
+        bridge = GPUBridge(db_path, "http://simrig.test:11434", request_timeout=600)
+        working = self._job(bridge.db_path, "running", started_minutes_ago=5)
+        assert bridge.reap_stalled() == 0
+        assert self._status(bridge.db_path, working) == "running"
+
+    def test_queued_and_finished_jobs_are_never_touched(self, db_path):
+        bridge = GPUBridge(db_path, "http://simrig.test:11434", request_timeout=60)
+        queued = self._job(bridge.db_path, "queued")
+        done = self._job(bridge.db_path, "done", started_minutes_ago=200)
+        bridge.reap_stalled()
+        assert self._status(bridge.db_path, queued) == "queued"
+        assert self._status(bridge.db_path, done) == "done"
+
+    def test_it_is_failed_rather_than_requeued(self, db_path):
+        """Whatever killed it will most likely kill the retry too, and a failed row is
+        visible while a silently re-queued one is not."""
+        bridge = GPUBridge(db_path, "http://simrig.test:11434", request_timeout=60)
+        stuck = self._job(bridge.db_path, "running", started_minutes_ago=99)
+        bridge.reap_stalled()
+        assert self._status(bridge.db_path, stuck) == "failed"

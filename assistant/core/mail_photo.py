@@ -547,8 +547,10 @@ def run_inbox_scan_once(db_path: str, mail_client, bridge, owner_user_id: int,
                 # it cannot tell.
                 from . import photo_intake
 
+                # All the paths, not just the first: what counts as ONE thing depends
+                # on what the photos are, and only photo_intake knows that yet.
                 outcome = photo_intake.handle(
-                    db_path, owner_user_id, bridge, pages, saved_paths[0],
+                    db_path, owner_user_id, bridge, pages, saved_paths,
                     raise_task=raise_task, subject=header.get("subject"),
                     media_path=media_path)
                 found += 1

@@ -216,6 +216,13 @@ def describe(verdict: dict, outcome: str | None = None) -> str:
     return f"{lead} {outcome}".strip() if outcome else lead
 
 
+def _paths(saved_path) -> list:
+    """One saved file or several, always as a list."""
+    if isinstance(saved_path, (list, tuple)):
+        return list(saved_path)
+    return [saved_path]
+
+
 def file_artwork(saved_path: str, media_path: str, subject: str | None) -> str:
     """Put the image with the artwork and say where it went.
 
@@ -240,7 +247,7 @@ def file_artwork(saved_path: str, media_path: str, subject: str | None) -> str:
 
 
 def handle(db_path: str, owner_user_id: int, bridge, image_bytes,
-           saved_path: str, raise_task=None, subject: str | None = None,
+           saved_path, raise_task=None, subject: str | None = None,
            media_path: str = "generated") -> dict:
     """Look at one photograph and do the right thing with it, or ask.
 
@@ -265,13 +272,21 @@ def handle(db_path: str, owner_user_id: int, bridge, image_bytes,
                     verdict["confidence"], verdict.get("summary"))
 
     if verdict["kind"] == "artwork":
-        try:
-            target = file_artwork(saved_path, media_path, subject)
-        except Exception:
-            logger.exception("photo intake: could not file the artwork")
+        # Every photo is its OWN design here, and that is the opposite of mail. Several
+        # pictures of a letter are pages of one letter; several pictures of artwork are
+        # several pieces of artwork. He sent eleven in one email and got one filed,
+        # because the grouping built for the two-sided bill was applied to everything.
+        filed = []
+        for one in _paths(saved_path):
+            try:
+                filed.append(file_artwork(one, media_path, subject))
+            except Exception:
+                logger.exception("photo intake: could not file artwork %r", one)
+        if not filed:
             return {"kind": "artwork", "confidence": verdict["confidence"], "acted": False,
-                    "reply": "I couldn't file that with the artwork - the photo is kept.",
+                    "reply": "I couldn't file that with the artwork - the photos are kept.",
                     "review_id": None}
+        target = filed[0]
         # Catalogued, not just filed. A folder cannot be asked what is in it, what he
         # called something, or what has already been made from it -- and his whole
         # reason for sending these is to pick one later and build a product off it.
@@ -279,12 +294,15 @@ def handle(db_path: str, owner_user_id: int, bridge, image_bytes,
         try:
             from . import design_assets
 
-            design_assets.add(db_path, owner_user_id, target, title=subject,
-                              source="emailed")
+            for one in filed:
+                design_assets.add(db_path, owner_user_id, one, title=subject,
+                                  source="emailed")
             count = len(design_assets.catalogue(db_path, owner_user_id))
         except Exception:
             logger.exception("photo intake: filed the artwork but could not catalogue it")
-        reply = f"Filed with the artwork: {os.path.basename(target)}"
+        reply = (f"Filed with the artwork: {os.path.basename(target)}"
+                 if len(filed) == 1
+                 else f"Filed {len(filed)} designs with the artwork.")
         if count:
             reply += f" ({count} design{'s' if count != 1 else ''} to pick from now)"
         return {"kind": "artwork", "confidence": verdict["confidence"], "acted": True,
@@ -309,10 +327,11 @@ def handle(db_path: str, owner_user_id: int, bridge, image_bytes,
 
     if verdict["kind"] == "mail":
         reading = mail_photo.read_photo(bridge, image_bytes)
-        piece_id = mail_photo.record_pending(db_path, owner_user_id, saved_path)
+        piece_id = mail_photo.record_pending(db_path, owner_user_id,
+                                             _paths(saved_path)[0])
         mail_photo.apply_reading(db_path, piece_id, reading)
         if raise_task is not None:
-            raise_task(piece_id, reading, saved_path, {"subject": subject})
+            raise_task(piece_id, reading, _paths(saved_path)[0], {"subject": subject})
         return {"kind": "mail", "confidence": verdict["confidence"], "acted": True,
                 "reply": _mail_reply(reading), "review_id": None}
 
@@ -328,7 +347,7 @@ def handle(db_path: str, owner_user_id: int, bridge, image_bytes,
             kind="other", source_agent="photo_intake",
             summary=describe(verdict, outcome),
             detail=(json.dumps(draft, indent=2)[:4000] if draft else None)
-                   or f"Photo: {saved_path}",
+                   or ("Photos: " + ", ".join(_paths(saved_path))),
             options=[{"label": "Save it", "value": "save"},
                      {"label": "No, discard", "value": "discard"}])
     except Exception:

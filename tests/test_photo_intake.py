@@ -211,3 +211,53 @@ class TestItLearnsWhatHeSends:
         out = photo_intake.handle(path, 1, Bridge("recipe", "high"), b"x", photo,
                                   media_path=str(tmp_path / "media"))
         assert out["acted"] is True
+
+
+class TestWhatCountsAsOneThing:
+    """It depends entirely on what the photos ARE, and getting it backwards loses work.
+
+    Several pictures of a letter are pages of ONE letter -- read separately they became
+    two bills and two tasks. Several pictures of artwork are SEVERAL designs -- grouped
+    together, he sent eleven and got one, because the rule built for the two-sided bill
+    was applied to everything.
+    """
+
+    def test_eleven_designs_are_eleven_designs(self, path, tmp_path):
+        from assistant.core import design_assets
+
+        photos = []
+        for i in range(11):
+            f = tmp_path / f"art{i}.jpg"
+            f.write_bytes(b"jpegbytes")
+            photos.append(str(f))
+        out = photo_intake.handle(path, 1, Bridge(), [b"x"] * 11, photos,
+                                  subject="Art", media_path=str(tmp_path / "media"))
+        assert out["kind"] == "artwork" and out["acted"] is True
+        assert len(design_assets.catalogue(path, 1)) == 11
+        assert len(os.listdir(str(tmp_path / "media" / "artwork"))) == 11
+        assert "11 designs" in out["reply"]
+
+    def test_several_pages_of_post_are_still_one_letter(self, path, tmp_path,
+                                                        monkeypatch):
+        from assistant.core import mail_photo
+
+        monkeypatch.setattr(mail_photo, "read_photo", lambda b, i: {
+            "parsed": True, "sender": "County", "summary": "Tax bill",
+            "amount": 100.0, "due_date": "2026-10-05", "kind": "bill",
+            "action": "Pay it", "deadline_risk": True, "confidence": "high"})
+        photos = []
+        for i in range(2):
+            f = tmp_path / f"page{i}.jpg"
+            f.write_bytes(b"jpegbytes")
+            photos.append(str(f))
+        photo_intake.handle(path, 1, Bridge("mail", "high"), [b"x", b"x"], photos,
+                            subject="Bill", media_path=str(tmp_path / "media"))
+        assert len(mail_photo.recent(path, 1)) == 1, "one letter, not two"
+
+    def test_one_design_still_reads_naturally(self, path, tmp_path):
+        one = tmp_path / "one.jpg"
+        one.write_bytes(b"jpegbytes")
+        out = photo_intake.handle(path, 1, Bridge(), b"x", str(one),
+                                  subject="art", media_path=str(tmp_path / "media"))
+        assert "Filed with the artwork" in out["reply"]
+        assert "1 designs" not in out["reply"]

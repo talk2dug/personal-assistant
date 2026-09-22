@@ -185,3 +185,72 @@ class TestStaffFeed:
         staff.set_data_feeds(path, key, "journal,radio")
         text = staff.build_feed_briefing(path, "radio")
         assert "RADIO / RF AWARENESS FEED" in text
+
+
+class TestWeatherHazardRepeats:
+    """The nineteen-texts bug, from the real rows that caused it.
+
+    A standing coastal flood watch was filed as a new hazard on every ten-minute pass
+    because the key was a hash of the model's prose, and the model rewords the same
+    hazard every time it reads the transcript. The all-clear went out as a hazard too.
+    """
+
+    # Verbatim titles from radio_items, 2026-09-21/22.
+    REAL = [
+        "No hazardous weather is expected at this time.",
+        "Coastal Flood watches have been issued for a large majority of the tidal area "
+        "starting Wednesday afternoon.",
+        "Coastal flood watches have been issued for a large majority of the tidal areas "
+        "starting Wednesday.",
+        "Coastal Flood watches had been issued for a large majority of the tidal area.",
+        "Coastal flood watch for a large majority of the tidal area starting Wednesday "
+        "afternoon.",
+        "Coastal flood watches in effect from late Tuesday night through Thursday evening.",
+    ]
+
+    def test_an_all_clear_is_not_a_hazard(self):
+        assert radio.hazard_is_real("No hazardous weather is expected at this time.") is False
+        assert radio.hazard_is_real("Today and tonight, no hazardous weather is expected.") is False
+        assert radio.hazard_is_real("none") is False
+        assert radio.hazard_is_real("") is False
+        assert radio.hazard_is_real("Tornado Warning for Henrico County") is True
+
+    def test_one_standing_watch_is_one_notice_however_it_is_worded(self, path):
+        sent = []
+        for hazards in self.REAL:
+            if not radio.hazard_is_real(hazards):
+                continue
+            if radio.hazard_already_filed(path, hazards, now=NOW):
+                continue
+            sig = radio.hazard_signature(hazards)
+            radio.add_item(path, f"h{len(sent)}", "weather_hazard", "notice",
+                           hazards, at=NOW, meta={"signature": sig})
+            sent.append(hazards)
+        assert len(sent) == 1, f"one flood watch should be one notice, got {sent}"
+
+    def test_an_escalation_to_a_warning_always_gets_through(self, path):
+        watch = "Coastal Flood Watch for a large majority of the tidal area"
+        radio.add_item(path, "w", "weather_hazard", "notice", watch, at=NOW,
+                       meta={"signature": radio.hazard_signature(watch)})
+        assert radio.hazard_already_filed(path, watch, now=NOW) is True
+        assert radio.hazard_already_filed(
+            path, "Coastal Flood Warning for a large majority of the tidal area",
+            now=NOW) is False
+
+    def test_a_newly_named_hazard_gets_through_even_beside_an_old_one(self, path):
+        flood = "Coastal flood watch for the tidal area"
+        radio.add_item(path, "f", "weather_hazard", "notice", flood, at=NOW,
+                       meta={"signature": radio.hazard_signature(flood)})
+        # The flood half is old news; the gale half is not, so the line must be sent.
+        assert radio.hazard_already_filed(
+            path, "Coastal flood watch for the tidal area; Gale watch for Chesapeake Bay",
+            now=NOW) is False
+        assert radio.hazard_already_filed(
+            path, "Tornado Warning for Henrico County", now=NOW) is False
+
+    def test_a_hazard_is_fresh_again_once_it_has_aged_out(self, path):
+        flood = "Coastal flood watch for the tidal area"
+        radio.add_item(path, "f", "weather_hazard", "notice", flood,
+                       at=NOW - timedelta(hours=20),
+                       meta={"signature": radio.hazard_signature(flood)})
+        assert radio.hazard_already_filed(path, flood, hours=12, now=NOW) is False

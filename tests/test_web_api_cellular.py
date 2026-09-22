@@ -223,6 +223,33 @@ class TestTrimForSms:
         with pytest.raises(ValueError):
             cellular.queue_outbound(db_path, "+12027408240", "   ")
 
+    def test_the_same_text_twice_is_sent_once(self, db_path):
+        """The last gate before his phone.
+
+        Nineteen identical coastal-flood texts in three hours came from a caller that was
+        behaving correctly on each pass and could not see the other eighteen. Only this
+        function can, so only this function can stop it -- whatever the caller is.
+        """
+        first = cellular.queue_outbound(db_path, "+12027408240", "Coastal flood watch.")
+        again = cellular.queue_outbound(db_path, "+12027408240", "Coastal flood watch.")
+        assert again == first, "the repeat should report the message already queued"
+        assert len(cellular.pending_outbound(db_path)) == 1
+
+    def test_a_different_message_is_never_suppressed(self, db_path):
+        cellular.queue_outbound(db_path, "+12027408240", "Coastal flood watch.")
+        cellular.queue_outbound(db_path, "+12027408240", "Tornado warning for Henrico.")
+        assert len(cellular.pending_outbound(db_path)) == 2
+
+    def test_the_same_text_to_a_different_person_still_goes(self, db_path):
+        cellular.queue_outbound(db_path, "+12027408240", "On my way.")
+        cellular.queue_outbound(db_path, "+15406540555", "On my way.")
+        assert len(cellular.pending_outbound(db_path)) == 2
+
+    def test_a_repeat_can_be_forced_when_the_repetition_is_the_point(self, db_path):
+        cellular.queue_outbound(db_path, "+12027408240", "Confirmed.")
+        cellular.queue_outbound(db_path, "+12027408240", "Confirmed.", allow_repeat=True)
+        assert len(cellular.pending_outbound(db_path)) == 2
+
 
 # --- the guest tier -----------------------------------------------------------
 #

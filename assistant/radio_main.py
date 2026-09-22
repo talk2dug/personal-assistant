@@ -267,12 +267,22 @@ class Worker:
                 radio.record_conditions(self.db_path, cond)
                 logger.info("conditions: %s", cond.get("summary"))
                 hazards = (cond.get("hazards") or "").strip()
-                if hazards and hazards.lower() not in ("none", "null", "n/a"):
-                    day = _now().strftime("%Y-%m-%d")
-                    key = "weather_hazard:" + day + ":" + sha1(hazards.lower().encode()).hexdigest()[:10]
-                    radio.add_item(self.db_path, key, "weather_hazard", "notice",
-                                   f"NOAA weather radio mentions: {hazards[:200]}",
-                                   stream=radio.STREAM_WEATHER)
+                # Two gates, because the hazard line is model prose and fails in two
+                # directions. hazard_is_real drops the all-clears ("no hazardous weather
+                # is expected" was being texted to him AS a hazard). hazard_already_filed
+                # drops the same standing hazard reworded on the next pass, which is what
+                # turned one coastal flood watch into nineteen texts in three hours.
+                if hazards and radio.hazard_is_real(hazards):
+                    if radio.hazard_already_filed(self.db_path, hazards):
+                        logger.debug("hazard unchanged, not filing again: %s", hazards[:80])
+                    else:
+                        signature = radio.hazard_signature(hazards)
+                        key = "weather_hazard:" + sha1(
+                            "|".join(signature).encode()).hexdigest()[:12]
+                        radio.add_item(self.db_path, key, "weather_hazard", "notice",
+                                       f"NOAA weather radio mentions: {hazards[:200]}",
+                                       stream=radio.STREAM_WEATHER,
+                                       meta={"signature": signature})
             except Exception:
                 logger.exception("conditions extraction failed")
 

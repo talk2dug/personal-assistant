@@ -198,6 +198,129 @@ def add_item(db_path: str, key: str, kind: str, severity: str, title: str, body:
         return cur.rowcount == 1
 
 
+# --- weather hazards -------------------------------------------------------------
+#
+# The hazard line comes back from a local model reading a twelve-minute transcript, so
+# one STANDING hazard is worded differently on every single pass: "Coastal Flood watches
+# have been issued for a large majority of the tidal area", then "Coastal flood watch for
+# a large majority of the tidal area starting Wednesday". Keying an item on a hash of
+# that sentence makes every rewording a brand-new hazard, which is how a single coastal
+# flood watch became nineteen texts in three hours. So dedupe on what the sentence is
+# ABOUT, not on how this pass happened to word it.
+
+# Words that carry phrasing rather than substance. Weekdays and "issued" are in here on
+# purpose: "watch issued Wednesday" and "watch in effect through Thursday" are the same
+# watch being described from two points in the same broadcast.
+_HAZARD_NOISE = frozenset("""
+a an and are as at be been by for from had has have in into is it its of on or that the
+this to until with will was were through starting start begin begins beginning effect
+expected area time today tonight tomorrow morning afternoon evening night late early
+these those large majority issue issued issues remain remains continue continues
+monday tuesday wednesday thursday friday saturday sunday
+""".split())
+
+# "No hazardous weather is expected at this time" is an all-clear. It was reaching his
+# phone as a hazard notice because the only emptiness check was the literal strings
+# "none", "null" and "n/a".
+_NO_HAZARD = re.compile(
+    r"\bno\s+(?:hazardous|significant|hazards?)\b"
+    r"|\bno\s+\w+\s+(?:weather|hazards?)\s+(?:is|are)\s+expected"
+    r"|\bnot\s+expected\b"
+    r"|\bnone\s+expected\b", re.I)
+
+
+def hazard_is_real(hazards: str | None) -> bool:
+    """False when the forecast is saying there is nothing wrong."""
+    text = (hazards or "").strip()
+    if not text or text.lower().rstrip(".") in ("none", "null", "n/a", "na", "-"):
+        return False
+    return not _NO_HAZARD.search(text)
+
+
+def _stem(word: str) -> str:
+    if word.endswith("es") and len(word) > 4:
+        return word[:-2]
+    if word.endswith("s") and len(word) > 3:
+        return word[:-1]
+    return word
+
+
+def hazard_signature(hazards: str | None) -> list[str]:
+    """The meaningful words: what the hazard is about, minus how it was phrased.
+
+    Sorted rather than a set so it round-trips through JSON into an item's meta, where
+    the next pass reads it back to compare against.
+    """
+    words = re.findall(r"[a-z]+", (hazards or "").lower())
+    return sorted({_stem(w) for w in words if len(w) > 2 and _stem(w) not in _HAZARD_NOISE})
+
+
+# Overlap at which two hazard lines are "the same hazard, said differently". Tuned
+# against the real duplicates: the flood-watch rewordings score 0.75-1.0.
+HAZARD_SAME_RATIO = 0.6
+
+# The NWS severity ladder. A watch becoming a WARNING is the single most important thing
+# the weather radio can say, and word overlap does not protect it on its own: "Coastal
+# Flood Watch for the tidal area" and "Coastal Flood Warning for the tidal area" differ
+# by one token and score 0.6, dead on the threshold. So the level is compared first and
+# exactly, and a hazard at a different level is never a repeat of one already filed.
+HAZARD_LEVELS = frozenset((
+    "warning", "watch", "advisory", "advisori", "emergency", "statement", "outlook"))
+
+# What the hazard actually IS, separated from the words that decorate it. Comparing whole
+# sentences cannot do this: across three passes the same coastal flood watch arrived as
+# four words, as twelve with the tide detail, and once with a Gale watch added -- the
+# first two are one hazard said twice, the third is genuine news. Both readings are
+# invisible to word overlap and obvious once you ask which hazards are named.
+HAZARD_KINDS = {
+    "flood": "flood", "flooding": "flood",
+    "gale": "gale", "tornado": "tornado", "hurricane": "tropical", "tropical": "tropical",
+    "thunderstorm": "thunderstorm", "storm": "thunderstorm", "hail": "thunderstorm",
+    "wind": "wind", "gust": "wind",
+    "heat": "heat", "freeze": "freeze", "frost": "freeze", "cold": "freeze",
+    "snow": "winter", "ice": "winter", "winter": "winter", "sleet": "winter",
+    "blizzard": "winter", "fog": "fog", "surf": "surf", "rip": "surf",
+    "fire": "fire", "smoke": "fire", "marine": "marine", "smallcraft": "marine",
+    "drought": "drought", "dust": "dust", "avalanche": "avalanche",
+}
+
+
+def _levels(signature) -> frozenset:
+    return frozenset(w for w in signature if w in HAZARD_LEVELS)
+
+
+def _kinds(signature) -> frozenset:
+    return frozenset(HAZARD_KINDS[w] for w in signature if w in HAZARD_KINDS)
+
+
+def hazard_already_filed(db_path: str, hazards: str, hours: float = 12,
+                         now: datetime | None = None) -> bool:
+    """Whether this hazard is one already filed recently, however it is worded now.
+
+    Quiet only when there is genuinely nothing new: same severity level, and every
+    hazard named here was already named. A line that adds a hazard always gets through,
+    even if it repeats one he has heard -- "flood watch, and now a gale watch too" is
+    news, and the flood half being old does not make the gale half old.
+    """
+    sig = set(hazard_signature(hazards))
+    if not sig:
+        return True
+    level, kind = _levels(sig), _kinds(sig)
+    for it in recent_items(db_path, hours=hours, kinds=("weather_hazard",),
+                           limit=50, now=now):
+        prior = set(it["meta"].get("signature") or ())
+        if not prior or _levels(prior) != level:
+            continue
+        if kind:
+            # Named hazards are the reliable signal; use them and ignore the prose.
+            if kind <= _kinds(prior):
+                return True
+        elif len(sig & prior) / len(sig | prior) >= HAZARD_SAME_RATIO:
+            # Nothing recognisable named, so fall back to how much wording they share.
+            return True
+    return False
+
+
 def recent_items(db_path: str, hours: float = 24, kinds: tuple[str, ...] | None = None,
                  limit: int = 50, now: datetime | None = None) -> list[dict]:
     since = _iso((now or _now()) - timedelta(hours=hours))

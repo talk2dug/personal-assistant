@@ -26,7 +26,7 @@ import logging
 import re
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -235,13 +235,44 @@ def trim_for_sms(text: str) -> str:
     return window.rstrip() + "..."
 
 
+# How long an identical outbound message stays "already said". Long enough to cover a
+# pipeline that re-files the same finding every few minutes; short enough that a daily
+# briefing, or a genuinely recurring alert the next morning, still gets through.
+REPEAT_WINDOW_HOURS = 6
+
+
 def queue_outbound(db_path: str, number: str, text: str,
-                   reply_to_id: int | None = None) -> int:
-    """Put a message in the outbox for the Pi to collect and send."""
+                   reply_to_id: int | None = None, allow_repeat: bool = False) -> int:
+    """Put a message in the outbox for the Pi to collect and send.
+
+    Sending the owner the same sentence twice is never the right answer, so this is the
+    one place that decides it -- the last gate before his phone, below every pipeline
+    that might want to speak. Jack, on the nineteen identical coastal-flood texts that
+    prompted this: *"i dont need to be told over and over agai about the same thing."*
+    Each of those came from a caller that was individually behaving correctly; no caller
+    could see the other eighteen, and only this function can.
+
+    A repeat inside REPEAT_WINDOW_HOURS returns the id of the message already queued or
+    sent, so the caller's bookkeeping still lines up and it cannot tell the difference.
+    `allow_repeat` is for the case where the repetition IS the message -- a confirmation
+    the owner asked for twice, say.
+    """
     body = trim_for_sms(text)
     if not body:
         raise ValueError("refusing to queue an empty SMS")
     with closing(_connect(db_path)) as conn:
+        if not allow_repeat:
+            since = (datetime.now(timezone.utc)
+                     - timedelta(hours=REPEAT_WINDOW_HOURS)).isoformat()
+            prior = conn.execute(
+                """SELECT id FROM sms_messages
+                    WHERE direction = 'outbound' AND number = ? AND text = ?
+                      AND created_at >= ?
+                    ORDER BY id DESC LIMIT 1""", (number, body, since)).fetchone()
+            if prior is not None:
+                logger.info("suppressed a repeat SMS to %s (same as #%s): %s",
+                            number, prior["id"], body[:60])
+                return int(prior["id"])
         cur = conn.execute(
             """INSERT INTO sms_messages (direction, number, text, status, reply_to_id,
                                          created_at)

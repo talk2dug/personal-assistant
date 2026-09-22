@@ -258,14 +258,19 @@ def start(
                                                     label=label)
                 mail_photo.attach_task(db_path, piece_id, task_id)
 
+            # He gets told what happened to every photo. That is the whole point --
+            # the version before this filed a recipe under post and said nothing, and
+            # the silence was the bug he actually noticed.
+            def say(text):
+                notify(owner["telegram_chat_id"], text)
+
             result = mail_photo.run_inbox_scan_once(
                 db_path, mail.mcp_client, bridge, owner["id"],
                 own_address=mail_photo_from_address or "",
                 media_path=generated_media_path,
-                limit=mail_photo_scan_limit, raise_task=raise_task)
+                limit=mail_photo_scan_limit, raise_task=raise_task, say=say)
             if result.get("found"):
-                logger.info("mail photo scan: filed %d photographed letter(s)",
-                            result["found"])
+                logger.info("mail photo scan: handled %d photo(s)", result["found"])
 
         scheduler.add_job(
             _guarded_simple("mail_photo_scan", _mail_photo_tick), "interval",

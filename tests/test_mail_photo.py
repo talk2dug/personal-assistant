@@ -284,11 +284,40 @@ class TestTheEmailRoute:
                                 {"14": ["a.jpg"]})
         assert self._scan(path, tmp_path, working)["found"] == 1
 
-    def test_several_photos_in_one_email_all_get_read(self, path, tmp_path):
+    def test_several_photos_in_one_email_are_ONE_letter(self, path, tmp_path):
+        """He photographed a single bill as two pictures and emailed them together --
+        the obvious thing to do with a letter that has two sides. Read one at a time
+        they became two pieces of post and two tasks for one bill."""
         mail = self.FakeMail([{"uid": "15", "from": self.OWN, "subject": "todays post"}],
-                             {"15": ["one.jpg", "two.jpg", "three.png"]})
-        assert self._scan(path, tmp_path, mail)["found"] == 3
-        assert len(mail_photo.recent(path, 1)) == 3
+                             {"15": ["front.jpg", "back.jpg", "third.png"]})
+        assert self._scan(path, tmp_path, mail)["found"] == 1
+        assert len(mail_photo.recent(path, 1)) == 1, "one letter, not three"
+
+    def test_every_page_is_still_kept_on_disk(self, path, tmp_path):
+        """Only one row, but no photograph is thrown away -- the parse is a guess and
+        the pictures are the record."""
+        import glob
+        import os
+        mail = self.FakeMail([{"uid": "20", "from": self.OWN, "subject": "post"}],
+                             {"20": ["front.jpg", "back.jpg"]})
+        self._scan(path, tmp_path, mail)
+        kept = glob.glob(os.path.join(str(tmp_path / "media"), "mail_photos", "*"))
+        assert len(kept) == 2
+
+    def test_all_the_pages_reach_the_model_together(self, path, tmp_path):
+        """One call with both pictures, not two calls -- that is what makes it one
+        letter rather than two."""
+        seen = {}
+
+        class Watching:
+            def run_sync(self, lane, kind, prompt, images=None, options=None, fmt=None):
+                seen["images"] = len(images or [])
+                return {"status": "done", "result": GOOD, "error": None}
+
+        mail = self.FakeMail([{"uid": "21", "from": self.OWN, "subject": "IRS letter"}],
+                             {"21": ["front.jpg", "back.jpg"]})
+        self._scan(path, tmp_path, mail, bridge=Watching())
+        assert seen["images"] == 2
 
     def test_the_photo_outlives_the_temp_directory(self, path, tmp_path):
         """The parse is a guess; the photograph is the record. It must survive even when

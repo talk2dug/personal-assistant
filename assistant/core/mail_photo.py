@@ -173,14 +173,33 @@ def _last4(value):
     return cleaned[-4:] if cleaned else None
 
 
-def read_photo(bridge, image_bytes: bytes) -> dict:
-    """Run one photo through the vision model. Never raises; returns parsed=False."""
+def as_pages(image_bytes) -> list:
+    """One photo or several of the same letter, always as a list.
+
+    Jack photographed one bill as two pictures and emailed them together, which is the
+    obvious thing to do with a letter that has two sides. Read one at a time they became
+    two pieces of post and two tasks for one bill; read together they are what they
+    actually are.
+    """
+    if isinstance(image_bytes, (list, tuple)):
+        return list(image_bytes)
+    return [image_bytes]
+
+
+def read_photo(bridge, image_bytes) -> dict:
+    """Run one letter -- one photo, or several pages of it -- through the vision model.
+    Never raises; returns parsed=False."""
     if bridge is None:
         return {"parsed": False, "error": "the GPU bridge is not configured", "raw": ""}
+    pages = as_pages(image_bytes)
     try:
         job = bridge.run_sync(
-            "mail", "vision", PROMPT,
-            images=[base64.b64encode(image_bytes).decode()],
+            "mail", "vision",
+            PROMPT if len(pages) == 1 else PROMPT + (
+                "\n\nThere are %d photographs here and they are pages or sides of the "
+                "SAME letter. Read them together and describe the one letter, not one "
+                "letter per picture." % len(pages)),
+            images=[base64.b64encode(b).decode() for b in pages],
             options={"num_predict": 2048, "num_ctx": 8192},
             # CONSTRAINED, not requested. Reading the same photograph twice, this model
             # returned clean JSON once and 8000 characters of reasoning without a single
@@ -454,42 +473,55 @@ def run_inbox_scan_once(db_path: str, mail_client, bridge, owner_user_id: int,
                 mark_scanned(db_path, folder, uid)
                 continue
 
-            for attachment in images:
-                try:
+            # ONE email of photographs is ONE thing. Jack photographed a single bill
+            # as two pictures -- the obvious thing to do with a letter that has two
+            # sides -- and read one at a time they became two pieces of post and two
+            # tasks for one bill. Handed to the model together they are what they
+            # actually are: one letter, two pages.
+            pages, saved_paths = [], []
+            try:
+                out_dir = os.path.join(media_path, "mail_photos")
+                os.makedirs(out_dir, exist_ok=True)
+                for n, attachment in enumerate(images):
                     with open(attachment["path"], "rb") as handle:
-                        image_bytes = handle.read()
+                        blob = handle.read()
                     # Out of the temp directory before anything else: the parse is a
-                    # guess, the photograph is the record, and it must outlive this
-                    # function even if the model falls over.
-                    out_dir = os.path.join(media_path, "mail_photos")
-                    os.makedirs(out_dir, exist_ok=True)
+                    # guess, the photograph is the record, and every page must outlive
+                    # this function even if the model falls over.
                     suffix = os.path.splitext(attachment["name"])[1].lower() or ".jpg"
+                    stamp = int(datetime.now().timestamp() * 1000)
                     saved = os.path.join(
-                        out_dir, f"mail_{owner_user_id}_{int(datetime.now().timestamp()*1000)}{suffix}")
+                        out_dir, f"mail_{owner_user_id}_{stamp}_{n}{suffix}")
                     with open(saved, "wb") as handle:
-                        handle.write(image_bytes)
+                        handle.write(blob)
+                    pages.append(blob)
+                    saved_paths.append(saved)
+            except Exception:
+                logger.exception("mail photo scan: could not keep the photos for %s", uid)
+                continue                        # unmarked: the letter deserves a retry
 
-                    # Triage FIRST, rather than assuming everything he emails is post.
-                    # He proved why by sending a recipe: the mail reader read a cookbook
-                    # page as a letter, found no sender and no amount, filed it in a mail
-                    # table and said nothing back. photo_intake looks before it reads,
-                    # and asks when it cannot tell.
-                    from . import photo_intake
+            try:
+                # Triage FIRST, rather than assuming everything he emails is post. He
+                # proved why by sending a recipe: the mail reader read a cookbook page
+                # as a letter, found no sender and no amount, filed it under post and
+                # said nothing back. photo_intake looks before it reads, and asks when
+                # it cannot tell.
+                from . import photo_intake
 
-                    outcome = photo_intake.handle(
-                        db_path, owner_user_id, bridge, image_bytes, saved,
-                        raise_task=raise_task, subject=header.get("subject"),
-                        media_path=media_path)
-                    found += 1
-                    logger.info("mail photo scan: emailed %r is %s (%s) - %s",
-                                attachment["name"], outcome["kind"],
-                                outcome["confidence"],
-                                "handled" if outcome["acted"] else "asked him")
-                    if say is not None:
-                        say(outcome["reply"])
-                except Exception:
-                    logger.exception("mail photo scan: failed on attachment %r",
-                                     attachment.get("name"))
+                outcome = photo_intake.handle(
+                    db_path, owner_user_id, bridge, pages, saved_paths[0],
+                    raise_task=raise_task, subject=header.get("subject"),
+                    media_path=media_path)
+                found += 1
+                logger.info("mail photo scan: %d photo(s) from %r are %s (%s) - %s",
+                            len(pages), header.get("subject"), outcome["kind"],
+                            outcome["confidence"],
+                            "handled" if outcome["acted"] else "asked him")
+                if say is not None:
+                    say(outcome["reply"])
+            except Exception:
+                logger.exception("mail photo scan: failed handling uid %s", uid)
+
         mark_scanned(db_path, folder, uid)
 
     return {"scanned": scanned, "found": found, "error": None}

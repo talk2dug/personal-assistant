@@ -91,7 +91,7 @@ SUBJECT_INTENTS = {
 }
 
 
-def triage(bridge, image_bytes: bytes) -> dict:
+def triage(bridge, image_bytes) -> dict:
     """Decide what the photograph is. Never raises; returns kind 'other' on any failure,
     which routes to asking him -- the safe direction."""
     if bridge is None:
@@ -100,7 +100,8 @@ def triage(bridge, image_bytes: bytes) -> dict:
     try:
         job = bridge.run_sync(
             "photo", "vision", TRIAGE_PROMPT,
-            images=[base64.b64encode(image_bytes).decode()],
+            images=[base64.b64encode(b).decode()
+                    for b in mail_photo.as_pages(image_bytes)],
             options={"num_predict": 512, "num_ctx": 8192}, fmt="json")
     except Exception as exc:                                        # noqa: BLE001
         logger.exception("photo triage: vision call failed")
@@ -209,7 +210,7 @@ def file_artwork(saved_path: str, media_path: str, subject: str | None) -> str:
     return target
 
 
-def handle(db_path: str, owner_user_id: int, bridge, image_bytes: bytes,
+def handle(db_path: str, owner_user_id: int, bridge, image_bytes,
            saved_path: str, raise_task=None, subject: str | None = None,
            media_path: str = "generated") -> dict:
     """Look at one photograph and do the right thing with it, or ask.

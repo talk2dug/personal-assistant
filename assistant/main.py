@@ -172,6 +172,10 @@ def main() -> None:
                         orpheus_voice=cfg.orpheus_voice,
                         orpheus_timeout=cfg.orpheus_timeout_seconds),
         voice_keepalive_interval_seconds=cfg.orpheus_keepalive_seconds,
+        # Photographed post he emails to himself -- see the tick's own note for why
+        # email rather than the Share Sheet, Telegram or MMS.
+        mail_photo_from_address=cfg.apple_id,
+        generated_media_path=cfg.generated_media_path,
         # Location watching needs HA for GPS and the other contexts so a routine's
         # prompt has the same tools a chat turn would.
         home_assistant=home_assistant, phone=phone, mail=mail, obsidian=obsidian,

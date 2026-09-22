@@ -167,3 +167,117 @@ class TestFiling:
     def test_status_cannot_be_changed_on_someone_elses_mail(self, path):
         piece = mail_photo.record(path, 1, mail_photo.read_photo(FakeBridge(GOOD), b"x"))
         assert mail_photo.set_status(path, 99, piece, "filed") is False
+
+
+class TestTheEmailRoute:
+    """Email, because the direct upload did not survive his carrier.
+
+    The Share Sheet shortcut posts a multi-megabyte body over Tailscale and the route to
+    his phone carries only ~1160-byte packets, so small requests worked and every real
+    photo stalled. Telegram would dodge it and he will not use Telegram; MMS is not an
+    option either, since the gateway speaks SMS over AT commands and has no MMS stack.
+    """
+
+    OWN = "swayzej@me.com"
+
+    class FakeMail:
+        def __init__(self, emails, attachments=None, explode=False):
+            self.emails, self.attachments = emails, attachments or {}
+            self.explode = explode
+            self.fetched = []
+
+        def list_recent(self, folder="INBOX", limit=10):
+            return {"emails": self.emails}
+
+        def save_attachments(self, uid, out_dir, folder="INBOX"):
+            import os
+            self.fetched.append(uid)
+            if self.explode:
+                raise OSError("imap fell over")
+            saved = []
+            for name in self.attachments.get(str(uid), []):
+                path = os.path.join(out_dir, name)
+                with open(path, "wb") as handle:
+                    handle.write(b"imagebytes")
+                saved.append({"name": name, "path": path, "bytes": 10})
+            return {"saved": saved, "skipped": []}
+
+    def _scan(self, path, tmp_path, mail, bridge=None, raise_task=None):
+        return mail_photo.run_inbox_scan_once(
+            path, mail, bridge or FakeBridge(GOOD), 1, self.OWN, str(tmp_path / "media"),
+            raise_task=raise_task)
+
+    def test_a_photo_he_emailed_himself_is_read_and_filed(self, path, tmp_path):
+        mail = self.FakeMail(
+            [{"uid": "10", "from": "Jack <swayzej@me.com>", "subject": "IRS letter"}],
+            {"10": ["letter.jpg"]})
+        out = self._scan(path, tmp_path, mail)
+        assert out["found"] == 1
+        piece = mail_photo.recent(path, 1)[0]
+        assert piece["sender"] == "Internal Revenue Service"
+        assert piece["status"] == "new"
+
+    def test_mail_from_anyone_else_is_ignored(self, path, tmp_path):
+        """His inbox is full of images -- newsletters, receipts, marketing. Reading all
+        of them as post would bury his task list in the first hour."""
+        mail = self.FakeMail(
+            [{"uid": "11", "from": "Newsletter <news@shop.com>", "subject": "Sale!"}],
+            {"11": ["banner.jpg"]})
+        out = self._scan(path, tmp_path, mail)
+        assert out["found"] == 0 and mail.fetched == [], "never even downloaded"
+
+    def test_his_own_mail_without_an_image_is_skipped(self, path, tmp_path):
+        mail = self.FakeMail(
+            [{"uid": "12", "from": self.OWN, "subject": "note to self"}],
+            {"12": ["notes.pdf"]})
+        assert self._scan(path, tmp_path, mail)["found"] == 0
+
+    def test_the_same_email_is_never_read_twice(self, path, tmp_path):
+        mail = self.FakeMail([{"uid": "13", "from": self.OWN, "subject": "bill"}],
+                             {"13": ["a.jpg"]})
+        assert self._scan(path, tmp_path, mail)["found"] == 1
+        assert self._scan(path, tmp_path, mail)["found"] == 0, "already judged"
+        assert len(mail_photo.recent(path, 1)) == 1
+
+    def test_a_failed_download_is_retried_next_pass(self, path, tmp_path):
+        """Left unmarked on purpose: a flaky IMAP moment must mean 'try again', not 'this
+        letter is invisible for ever'."""
+        broken = self.FakeMail([{"uid": "14", "from": self.OWN, "subject": "x"}],
+                               {"14": ["a.jpg"]}, explode=True)
+        assert self._scan(path, tmp_path, broken)["found"] == 0
+        assert mail_photo.has_scanned(path, "INBOX", "14") is False
+
+        working = self.FakeMail([{"uid": "14", "from": self.OWN, "subject": "x"}],
+                                {"14": ["a.jpg"]})
+        assert self._scan(path, tmp_path, working)["found"] == 1
+
+    def test_several_photos_in_one_email_all_get_read(self, path, tmp_path):
+        mail = self.FakeMail([{"uid": "15", "from": self.OWN, "subject": "todays post"}],
+                             {"15": ["one.jpg", "two.jpg", "three.png"]})
+        assert self._scan(path, tmp_path, mail)["found"] == 3
+        assert len(mail_photo.recent(path, 1)) == 3
+
+    def test_the_photo_outlives_the_temp_directory(self, path, tmp_path):
+        """The parse is a guess; the photograph is the record. It must survive even if
+        the model falls over."""
+        import os
+        mail = self.FakeMail([{"uid": "16", "from": self.OWN, "subject": "x"}],
+                             {"16": ["a.jpg"]})
+        self._scan(path, tmp_path, mail, bridge=FakeBridge("unreadable"))
+        kept = mail_photo.recent(path, 1)[0]["photo_path"]
+        assert os.path.exists(kept) and open(kept, "rb").read() == b"imagebytes"
+
+    def test_a_mailbox_that_cannot_be_listed_is_not_a_crash(self, path, tmp_path):
+        class Dead:
+            def list_recent(self, folder="INBOX", limit=10):
+                raise OSError("no imap")
+
+        assert self._scan(path, tmp_path, Dead())["found"] == 0
+
+    def test_the_task_hook_sees_what_he_wrote_in_the_subject(self, path, tmp_path):
+        seen = []
+        mail = self.FakeMail([{"uid": "17", "from": self.OWN, "subject": "the IRS one"}],
+                             {"17": ["a.jpg"]})
+        self._scan(path, tmp_path, mail,
+                   raise_task=lambda pid, reading, saved, header: seen.append(header))
+        assert seen and seen[0]["subject"] == "the IRS one"

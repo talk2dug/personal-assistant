@@ -79,6 +79,8 @@ def start(
     staff_assignment_timeout_seconds: int = 10800, bridge=None,
     rhythm_nudge_interval_seconds: int = 60, rhythm_sms_number: str | None = None,
     speaker=None, voice_keepalive_interval_seconds: int = 420,
+    mail_photo_scan_interval_seconds: int = 180, mail_photo_scan_limit: int = 20,
+    mail_photo_from_address: str | None = None, generated_media_path: str = "generated",
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -201,6 +203,76 @@ def start(
             # the research queues below: new spam doesn't wait for a service restart's
             # remaining interval to elapse before it's worth a first look.
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
+    if mail is not None and bridge is not None:
+        # Photographed post, emailed in. The Share Sheet shortcut posts straight to the
+        # web server and is faster when it works, but the route to his phone carries only
+        # ~1160-byte packets, so every multi-megabyte upload stalled while small requests
+        # sailed through. Telegram would dodge it and he will not use Telegram; MMS is not
+        # an option either, since the cellular gateway speaks SMS over AT commands and has
+        # no MMS stack. Email is the one channel that already works from wherever he is:
+        # his phone owns the upload and retries it, and Jarvis is signed in to the mailbox.
+        def _mail_photo_tick():
+            from . import mail_photo, personal_db
+
+            owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+            if owner is None:
+                return
+
+            def raise_task(piece_id, reading, saved, header):
+                """Same rules as the uploaded path: a task only for something with an
+                action and a real deadline, so a photographed flyer does not land on the
+                list he runs his day from."""
+                if not reading.get("parsed"):
+                    task_id = personal_db.create_task(
+                        db_path, owner["id"],
+                        "Unreadable mail photo - open the envelope and check it yourself",
+                        priority="normal", track="personal")
+                    personal_db.add_task_detail(
+                        db_path, task_id, "note",
+                        reading.get("error") or "the model returned nothing",
+                        label="Why it could not be read")
+                    personal_db.add_task_detail(db_path, task_id, "note", saved,
+                                                label="The photo")
+                    mail_photo.attach_task(db_path, piece_id, task_id)
+                    return
+                if not mail_photo.should_raise_task(reading):
+                    return
+                task_id = personal_db.create_task(
+                    db_path, owner["id"], mail_photo.task_text(reading),
+                    priority="high" if reading.get("deadline_risk") else "normal",
+                    due_at=reading.get("due_date"), track="personal")
+                for value, label in (
+                    (reading.get("summary"), "What the letter says"),
+                    (saved, "The photo"),
+                    # Whatever he typed in the email subject is the one piece of context
+                    # the model cannot see on the page.
+                    ((header.get("subject") or "").strip() or None, "What he wrote"),
+                    (("Could not read: " + ", ".join(reading["unreadable"]))
+                     if reading.get("unreadable") else None,
+                     "Check these against the letter"),
+                ):
+                    if value:
+                        personal_db.add_task_detail(db_path, task_id, "note", value,
+                                                    label=label)
+                mail_photo.attach_task(db_path, piece_id, task_id)
+
+            result = mail_photo.run_inbox_scan_once(
+                db_path, mail.mcp_client, bridge, owner["id"],
+                own_address=mail_photo_from_address or "",
+                media_path=generated_media_path,
+                limit=mail_photo_scan_limit, raise_task=raise_task)
+            if result.get("found"):
+                logger.info("mail photo scan: filed %d photographed letter(s)",
+                            result["found"])
+
+        scheduler.add_job(
+            _guarded_simple("mail_photo_scan", _mail_photo_tick), "interval",
+            seconds=mail_photo_scan_interval_seconds, id="mail_photo_scan",
+            # Soon after boot: a letter he photographed on the way in should not wait a
+            # full interval because the service happened to restart.
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
         )
 
     if mail is not None and llm is not None:

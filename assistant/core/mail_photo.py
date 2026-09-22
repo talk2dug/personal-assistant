@@ -338,3 +338,140 @@ def set_status(db_path: str, owner_user_id: int, piece_id: int, status: str) -> 
             (status, piece_id, owner_user_id))
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- the email route --------------------------------------------------------------
+#
+# The Share Sheet shortcut posts straight to the server, which is the fastest path when
+# it works. On Jack's phone it did not: the route to his handset carries only ~1160-byte
+# packets, so small requests succeeded and every multi-megabyte photo stalled forever.
+# Telegram would have sidestepped it; he hates Telegram. MMS is not an option either --
+# the cellular gateway speaks SMS over AT commands and has no MMS stack at all.
+#
+# That leaves email, which is the one channel that already works from anywhere he is:
+# his phone owns the upload and retries it, Apple's servers take the file, and Jarvis is
+# already signed in to that mailbox. He photographs the post, shares it to Mail, sends it
+# to himself, and it lands here on the next pass.
+
+SCAN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS mail_photo_scans (
+    folder TEXT NOT NULL,
+    uid TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (folder, uid)
+);
+"""
+
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp")
+
+
+def init_scan_db(db_path: str) -> None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.executescript(SCAN_SCHEMA)
+        conn.commit()
+
+
+def has_scanned(db_path: str, folder: str, uid: str) -> bool:
+    with closing(_connect(db_path)) as conn:
+        return conn.execute(
+            "SELECT 1 FROM mail_photo_scans WHERE folder = ? AND uid = ?",
+            (folder, str(uid))).fetchone() is not None
+
+
+def mark_scanned(db_path: str, folder: str, uid: str) -> None:
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO mail_photo_scans (folder, uid, at) VALUES (?,?,?)",
+            (folder, str(uid), _now()))
+        conn.commit()
+
+
+def is_from_owner(from_address: str, own_address: str) -> bool:
+    """Only mail he sent himself. The inbox is full of images -- newsletters, receipts,
+    marketing -- and reading all of them as post would bury his task list in the first
+    hour. A message from his own address with a photo attached is unambiguous."""
+    if not own_address:
+        return False
+    return own_address.strip().lower() in (from_address or "").lower()
+
+
+def run_inbox_scan_once(db_path: str, mail_client, bridge, owner_user_id: int,
+                        own_address: str, media_path: str, folder: str = "INBOX",
+                        limit: int = 20, raise_task=None) -> dict:
+    """Pick up any photo he has emailed himself, read it, and file it.
+
+    Safe to call repeatedly: a uid is marked the moment it is judged, whether or not it
+    turned out to hold a photo, so a scheduled tick and a manual run are the same call
+    and neither re-reads a letter. A message that fails to download is deliberately left
+    unmarked, so a flaky IMAP moment means "try again next pass" rather than a letter
+    that is invisible for ever -- the same reasoning mail_bills uses.
+
+    Nothing here mutates the mailbox. His mail stays exactly where he left it.
+    """
+    import os
+    import tempfile
+
+    init_mail_photo_db(db_path)
+    init_scan_db(db_path)
+    scanned = found = 0
+
+    try:
+        listing = mail_client.list_recent(folder=folder, limit=limit)
+    except Exception:
+        logger.exception("mail photo scan: could not list %s", folder)
+        return {"scanned": 0, "found": 0, "error": "could not list the mailbox"}
+
+    for header in listing.get("emails", []):
+        uid = str(header.get("uid"))
+        if has_scanned(db_path, folder, uid):
+            continue
+        # Marked even when it is not from him. The inbox is mostly other people, and
+        # re-deciding that every few minutes for ever is the kind of quiet waste that
+        # only shows up as a bill at the end of the month.
+        if not is_from_owner(header.get("from", ""), own_address):
+            mark_scanned(db_path, folder, uid)
+            continue
+
+        scanned += 1
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                result = mail_client.save_attachments(uid, tmp, folder=folder)
+            except Exception:
+                logger.exception("mail photo scan: could not fetch attachments for %s", uid)
+                continue                        # unmarked on purpose: retry next pass
+
+            images = [a for a in result.get("saved", [])
+                      if os.path.splitext(a["name"])[1].lower() in IMAGE_SUFFIXES]
+            if not images:
+                mark_scanned(db_path, folder, uid)
+                continue
+
+            for attachment in images:
+                try:
+                    with open(attachment["path"], "rb") as handle:
+                        image_bytes = handle.read()
+                    # Out of the temp directory before anything else: the parse is a
+                    # guess, the photograph is the record, and it must outlive this
+                    # function even if the model falls over.
+                    out_dir = os.path.join(media_path, "mail_photos")
+                    os.makedirs(out_dir, exist_ok=True)
+                    suffix = os.path.splitext(attachment["name"])[1].lower() or ".jpg"
+                    saved = os.path.join(
+                        out_dir, f"mail_{owner_user_id}_{int(datetime.now().timestamp()*1000)}{suffix}")
+                    with open(saved, "wb") as handle:
+                        handle.write(image_bytes)
+
+                    piece_id = record_pending(db_path, owner_user_id, saved)
+                    reading = read_photo(bridge, image_bytes)
+                    apply_reading(db_path, piece_id, reading)
+                    found += 1
+                    logger.info("mail photo scan: piece %s from emailed %r read as %s",
+                                piece_id, attachment["name"], reading.get("kind"))
+                    if raise_task is not None:
+                        raise_task(piece_id, reading, saved, header)
+                except Exception:
+                    logger.exception("mail photo scan: failed on attachment %r",
+                                     attachment.get("name"))
+        mark_scanned(db_path, folder, uid)
+
+    return {"scanned": scanned, "found": found, "error": None}

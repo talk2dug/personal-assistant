@@ -175,9 +175,18 @@ def record_reading(db_path: str, mission_id: int, value: float, note: str | None
     now = now or _now()
     with closing(_connect(db_path)) as conn:
         prev = conn.execute(
-            "SELECT value FROM mission_readings WHERE mission_id = ? ORDER BY id DESC LIMIT 1",
-            (mission_id,)).fetchone()
+            "SELECT id, value, note FROM mission_readings WHERE mission_id = ? "
+            "ORDER BY id DESC LIMIT 1", (mission_id,)).fetchone()
         if prev is not None and float(prev["value"]) == float(value):
+            # The number has not moved, so no new row -- that invariant is what makes
+            # the latest row the last progress. But the NOTE can still have changed and
+            # still matters: the store sitting at 0 live while the queue behind it goes
+            # from 3 waiting to 10 is the same number and a different situation. Refresh
+            # it in place so the note stays true without inventing a movement.
+            if (prev["note"] or None) != (note or None):
+                conn.execute("UPDATE mission_readings SET note = ? WHERE id = ?",
+                             (note, prev["id"]))
+                conn.commit()
             return False
         conn.execute(
             "INSERT INTO mission_readings (mission_id, at, value, note) VALUES (?,?,?,?)",
@@ -347,6 +356,10 @@ def snapshot(db_path: str, now: datetime | None = None) -> list[dict]:
         out.append({
             **m,
             "current": float(reading["value"]) if reading else None,
+            # The measure's own words about the number. Often the most useful part:
+            # "0 live" reads as a dead shop, while "0 live, 3 waiting to go live" says
+            # the factory works and the door is shut, which is a different problem.
+            "note": reading["note"] if reading else None,
             "last_movement": reading["at"] if reading else None,
             "hours_since_movement": hours_since_movement(db_path, m["id"], now=now),
             "stalled": is_stalled(db_path, m, now=now),

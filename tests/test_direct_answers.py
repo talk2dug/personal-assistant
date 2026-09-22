@@ -79,6 +79,22 @@ class TestItAnswers:
         assert "Hasn't moved in 40 hours" in out
         assert "ran art_director" in out
 
+    def test_the_measure_note_is_included_when_it_adds_something(self, stalled):
+        """Live example that prompted this: the store read "0 of 10", which sounds like
+        a dead shop, while the note read "0 live, 3 waiting to go live" -- the factory
+        works and the door is shut. Different problem, different next action."""
+        m = missions.get_mission(stalled, executive.STORE_MISSION)
+        missions.record_reading(stalled, m["id"], 0, "0 live, 3 waiting to go live",
+                                now=datetime.now(timezone.utc))
+        out = direct_answers.try_direct_answer(stalled, "how is the store doing?")
+        assert "3 waiting to go live" in out
+
+    def test_a_note_that_only_repeats_the_number_is_not_echoed(self, stalled):
+        m = missions.get_mission(stalled, executive.STORE_MISSION)
+        missions.record_reading(stalled, m["id"], 7, "7", now=datetime.now(timezone.utc))
+        out = direct_answers.try_direct_answer(stalled, "how is the store doing?")
+        assert "(7)" not in out
+
     def test_longest_subject_wins_so_paper_trading_is_not_the_store(self, stalled):
         assert "$53.06" in direct_answers.try_direct_answer(stalled, "hows paper trading")
 

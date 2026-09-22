@@ -48,6 +48,26 @@ class TestTheNumber:
         assert missions.record_reading(path, m["id"], 1, now=NOW + timedelta(hours=2)) is True
         assert missions.last_movement(path, m["id"]) == NOW + timedelta(hours=2)
 
+    def test_a_changed_note_refreshes_without_faking_movement(self, path):
+        """The store sitting at 0 live while the queue behind it goes from 3 waiting to
+        10 is the same number and a different situation. The note must follow, but the
+        last-movement time must not: nothing progressed."""
+        m = _mission(path)
+        missions.record_reading(path, m["id"], 0, "0 live, 3 waiting", now=NOW)
+        moved = missions.record_reading(path, m["id"], 0, "0 live, 10 waiting",
+                                        now=NOW + timedelta(hours=5))
+        assert moved is False, "the number did not move"
+        reading = missions.latest_reading(path, m["id"])
+        assert reading["note"] == "0 live, 10 waiting"
+        assert missions.last_movement(path, m["id"]) == NOW, "movement time must not shift"
+
+    def test_an_unchanged_note_writes_nothing(self, path):
+        m = _mission(path)
+        missions.record_reading(path, m["id"], 0, "same", now=NOW)
+        assert missions.record_reading(path, m["id"], 0, "same",
+                                       now=NOW + timedelta(hours=1)) is False
+        assert missions.last_movement(path, m["id"]) == NOW
+
     def test_a_mission_that_has_never_been_read_is_stalled(self, path):
         """None is not zero. A mission with no reading is the most stalled thing in the
         system, not the freshest -- treating it as fresh is how a pipeline that never

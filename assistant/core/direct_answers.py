@@ -123,6 +123,12 @@ def _describe(m: dict) -> str:
     head = f"{m['title'].split(':')[0]}: {value}"
     if m.get("target") is not None:
         head += f" of {target}"
+    # The measure's own note, when it says something the bare number does not. Live
+    # example: the store read "0 of 10", which sounds like a dead shop, while the note
+    # read "0 live, 3 waiting to go live" -- the factory works and the door is shut.
+    note = (m.get("note") or "").strip()
+    if note and note.split(",")[0].strip() != value:
+        head += f" ({note})"
 
     if m.get("current") is None:
         return head + ". Nothing measured yet."

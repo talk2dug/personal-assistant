@@ -188,7 +188,13 @@ def decide_remedy(blocker: dict | None, waiting: dict) -> tuple[str | None, str]
 # while its success rate looked like 84%. Rate inside a window catches that; a streak
 # does not.
 BROKEN_FAILURES = 3
-BROKEN_WINDOW_HOURS = 24
+# Judged over its last runs rather than over a fixed window, which fails at both ends: a
+# worker fixed an hour ago would go on being reported broken all day, and one that runs
+# daily could never reach three failures inside 24h however reliably it failed. Twenty
+# runs is also self-clearing -- once it works again it drops off on its own.
+BROKEN_SAMPLE = 20
+# A worker that failed, was switched off and has sat quiet for a week is not news.
+BROKEN_STALE_DAYS = 7
 
 # Both tables mean the same thing and spell it differently: staff_work says 'failed',
 # agent_runs says 'error'. Kept as data rather than two near-identical functions.
@@ -196,18 +202,18 @@ WORKER_SOURCES = (
     ("employee", """SELECT s.key AS key, s.title AS title, w.status AS status,
                            w.error AS error, w.started_at AS at
                       FROM staff_work w JOIN staff s ON s.id = w.staff_id
-                     WHERE w.started_at >= ?"""),
+                     ORDER BY w.started_at DESC"""),
     ("agent", """SELECT r.agent AS key, r.agent AS title, r.status AS status,
                         r.summary AS error, r.started_at AS at
                    FROM agent_runs r
-                  WHERE r.started_at >= ?"""),
+                  ORDER BY r.started_at DESC"""),
 )
 
 FAILED_STATUSES = ("failed", "error")
 
 
 def broken_workers(db_path: str, now: datetime | None = None,
-                   window_hours: float = BROKEN_WINDOW_HOURS,
+                   sample: int = BROKEN_SAMPLE,
                    threshold: int = BROKEN_FAILURES) -> list[dict]:
     """Every scheduled worker that is failing repeatedly, worst first.
 
@@ -227,30 +233,33 @@ def broken_workers(db_path: str, now: datetime | None = None,
     import sqlite3
 
     now = now or _now()
-    since = (now - timedelta(hours=window_hours)).isoformat()
+    stale_before = (now - timedelta(days=BROKEN_STALE_DAYS)).isoformat()
     out = []
     with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         for kind, sql in WORKER_SOURCES:
             try:
-                rows = [dict(r) for r in conn.execute(sql, (since,))]
+                rows = [dict(r) for r in conn.execute(sql)]
             except sqlite3.OperationalError:
                 # A deployment that has never run one of the two kinds has no table.
                 continue
             by_key: dict = {}
-            for row in rows:
+            for row in rows:                      # already newest-first from the query
                 by_key.setdefault(row["key"], []).append(row)
             for key, runs in by_key.items():
-                bad = [r for r in runs
+                recent = runs[:sample]
+                bad = [r for r in recent
                        if (r["status"] or "").lower() in FAILED_STATUSES]
                 if len(bad) < threshold:
+                    continue
+                if max(r["at"] for r in bad) < stale_before:
                     continue
                 errors = Counter((r["error"] or "unrecorded").strip()[:120] for r in bad)
                 error, hits = errors.most_common(1)[0]
                 out.append({
                     "kind": kind, "key": key,
-                    "title": runs[0]["title"] or key,
-                    "failures": len(bad), "runs": len(runs),
+                    "title": recent[0]["title"] or key,
+                    "failures": len(bad), "runs": len(recent),
                     "error": error, "same_error": hits,
                     "first": min(r["at"] for r in bad),
                     "last": max(r["at"] for r in bad),
@@ -266,11 +275,10 @@ def health_report(worker: dict) -> str:
     the reasonable assumption that it is down; "83 of 529 runs" says it is limping, which
     is a different and much easier thing to ignore for two days.
     """
-    share = f"{worker['failures']} of {worker['runs']} runs"
+    share = f"{worker['failures']} of its last {worker['runs']} runs"
     span = worker["first"][:16].replace("T", " ")
-    return (f"{worker['title']} is failing: {share} in the last "
-            f"{BROKEN_WINDOW_HOURS:.0f}h, {worker['same_error']} of them with "
-            f"{worker['error']}, starting {span}Z.")
+    return (f"{worker['title']} is failing: {share}, {worker['same_error']} of them "
+            f"with {worker['error']}, starting {span}Z.")
 
 
 def _open_health_task(db_path: str, owner_user_id: int, key: str):

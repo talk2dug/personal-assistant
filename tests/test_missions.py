@@ -405,11 +405,34 @@ class TestWatchingTheMachinery:
         conn.close()
         assert executive.broken_workers(path, now=NOW) == []
 
-    def test_failures_older_than_the_window_do_not_count(self, path):
+    def test_a_worker_that_broke_and_went_quiet_is_not_news(self, path):
+        """Failed, was switched off, has not run since. Reporting it weeks later is how
+        a real signal turns into a list he scrolls past."""
         conn, sid = self._staff(path)
-        self._runs(conn, sid, "xxxx", start=NOW - timedelta(days=4))
+        self._runs(conn, sid, "xxxx", start=NOW - timedelta(days=30))
         conn.close()
         assert executive.broken_workers(path, now=NOW) == []
+
+    def test_a_fixed_worker_clears_itself(self, path):
+        """The reason this is a run sample and not a 24-hour window. The day trader was
+        fixed on 2026-09-22 after failing 42 of 73 runs that day; under a window it would
+        have gone on being reported broken until the next evening, which teaches him to
+        ignore the message. Twenty good runs and it is gone."""
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "xxxxxx", start=NOW - timedelta(hours=30))
+        assert executive.broken_workers(path, now=NOW), "broken while it was broken"
+        self._runs(conn, sid, "o" * 20)
+        conn.close()
+        assert executive.broken_workers(path, now=NOW) == []
+
+    def test_a_daily_worker_failing_for_a_week_is_caught(self, path):
+        """The other end a fixed window gets wrong: three failures cannot fit inside 24h
+        for something that only runs once a day, so it would never be reported at all."""
+        conn, sid = self._staff(path)
+        for day in range(5):
+            self._runs(conn, sid, "x", start=NOW - timedelta(days=4 - day))
+        conn.close()
+        assert len(executive.broken_workers(path, now=NOW)) == 1
 
     def test_it_names_the_common_error_not_the_latest(self, path):
         """41 KeyErrors and one unrelated timeout is one problem. Naming the timeout
@@ -429,7 +452,7 @@ class TestWatchingTheMachinery:
         self._runs(conn, sid, "oxoxoxoxoxox")
         conn.close()
         line = executive.health_report(executive.broken_workers(path, now=NOW)[0])
-        assert "6 of 12 runs" in line and "qty" in line
+        assert "6 of its last 12 runs" in line and "qty" in line
 
     def test_he_is_told_and_it_lands_on_his_board(self, path):
         """Two channels deliberately. The text is how he finds out; the task is how it

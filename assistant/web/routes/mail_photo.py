@@ -31,14 +31,36 @@ ALLOWED_SUFFIXES = (".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp")
 
 
 def _require_device_key(request: Request) -> None:
+    """The door, and it says out loud when someone is turned away.
+
+    Setting a Shortcut up is done blind: iOS shows nothing unless a Show Result action
+    was added, so a first attempt that fails looks identical to one that worked. These
+    lines are what makes the difference visible from this end. They record the SHAPE of
+    what arrived -- whether a header was present, whether it was spelled Bearer -- and
+    never the key itself, which would put the credential in a log that rotates to disk.
+    """
     cfg = request.app.state.cfg
     key = getattr(cfg, "device_api_key", None)
     if not key:
         raise HTTPException(503, "device endpoints are not configured")
-    supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+
+    header = request.headers.get("authorization", "")
+    supplied = header.removeprefix("Bearer ").strip()
+    via = "header"
     if not supplied:
         supplied = request.query_params.get("key", "")
-    if not supplied or not secrets.compare_digest(supplied, key):
+        via = "query"
+    if not supplied:
+        logger.warning(
+            "mail-photo: refused, no key at all (authorization header %s, from %s)",
+            "present but unparsed: %r" % header[:12] if header else "absent",
+            request.client.host if request.client else "?")
+        raise HTTPException(401, "invalid device key")
+    if not secrets.compare_digest(supplied, key):
+        logger.warning(
+            "mail-photo: refused, wrong key via %s (%d chars, expected %d, from %s)",
+            via, len(supplied), len(key),
+            request.client.host if request.client else "?")
         raise HTTPException(401, "invalid device key")
 
 
@@ -63,8 +85,15 @@ async def post_mail_photo(request: Request, photo: UploadFile):
     cfg = request.app.state.cfg
     owner_id = _owner_user_id(request)
 
+    # Logged before anything can reject it, so a rejected upload is still visible as an
+    # arrival rather than as silence.
+    logger.info("mail-photo: received %r (%s) from %s", photo.filename,
+                photo.content_type, request.client.host if request.client else "?")
+
     suffix = pathlib.Path(photo.filename or "").suffix.lower()
     if suffix and suffix not in ALLOWED_SUFFIXES:
+        logger.warning("mail-photo: refused suffix %r from filename %r",
+                       suffix, photo.filename)
         raise HTTPException(400, f"{suffix} is not an image this can read")
 
     image_bytes = await photo.read()

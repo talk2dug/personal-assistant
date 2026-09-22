@@ -16,7 +16,7 @@ import pathlib
 import secrets
 import time
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 
 from ...core import mail_photo, personal_db
 
@@ -52,10 +52,14 @@ def _owner_user_id(request: Request) -> int:
     return int(owner["id"])
 
 
-@router.post("")
+# Declared as a dependency rather than called in the body, so it runs BEFORE FastAPI
+# validates the upload field. Called inside the function it answered an unauthenticated
+# POST with 422 ("photo field required") instead of 401 -- which leaks the endpoint's
+# shape to anyone probing, and, more practically, means a Shortcut with the wrong field
+# name and a Shortcut with the wrong key look identical while he is setting it up.
+@router.post("", dependencies=[Depends(_require_device_key)])
 async def post_mail_photo(request: Request, photo: UploadFile):
     """Read one photographed letter, file it, and raise a task if it needs one."""
-    _require_device_key(request)
     cfg = request.app.state.cfg
     owner_id = _owner_user_id(request)
 

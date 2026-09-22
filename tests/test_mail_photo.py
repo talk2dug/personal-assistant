@@ -209,20 +209,46 @@ class TestTheEmailRoute:
                 saved.append({"name": name, "path": path, "bytes": 10})
             return {"saved": saved, "skipped": []}
 
+    TRIAGE_MAIL = json.dumps({"kind": "mail", "summary": "A letter from the IRS.",
+                              "title": "IRS notice", "confidence": "high"})
+
+    class TwoStep:
+        """Triage first, then the specialist reader -- the real sequence now."""
+
+        def __init__(self, *replies):
+            self.replies, self.calls = list(replies), 0
+
+        def run_sync(self, *a, fmt=None, **k):
+            reply = self.replies[min(self.calls, len(self.replies) - 1)]
+            self.calls += 1
+            return {"status": "done", "result": reply, "error": None}
+
     def _scan(self, path, tmp_path, mail, bridge=None, raise_task=None):
         return mail_photo.run_inbox_scan_once(
-            path, mail, bridge or FakeBridge(GOOD), 1, self.OWN, str(tmp_path / "media"),
-            raise_task=raise_task)
+            path, mail, bridge or self.TwoStep(self.TRIAGE_MAIL, GOOD), 1, self.OWN,
+            str(tmp_path / "media"), raise_task=raise_task)
 
     def test_a_photo_he_emailed_himself_is_read_and_filed(self, path, tmp_path):
+        # Subject deliberately carries no routing keyword, so triage decides.
         mail = self.FakeMail(
-            [{"uid": "10", "from": "Jack <swayzej@me.com>", "subject": "IRS letter"}],
+            [{"uid": "10", "from": "Jack <swayzej@me.com>", "subject": "this morning"}],
             {"10": ["letter.jpg"]})
         out = self._scan(path, tmp_path, mail)
         assert out["found"] == 1
         piece = mail_photo.recent(path, 1)[0]
         assert piece["sender"] == "Internal Revenue Service"
         assert piece["status"] == "new"
+
+    def test_saying_letter_in_the_subject_skips_the_triage_call(self, path, tmp_path):
+        """His shortcut. A word in the subject is better evidence than a classifier, and
+        it saves the whole first vision pass."""
+        bridge = self.TwoStep(GOOD)      # only the reader should ever be called
+        mail = self.FakeMail(
+            [{"uid": "19", "from": self.OWN, "subject": "IRS letter"}],
+            {"19": ["a.jpg"]})
+        self._scan(path, tmp_path, mail, bridge=bridge)
+        assert bridge.calls == 1, "one call: the reader, not triage then the reader"
+        assert mail_photo.recent(path, 1)[0]["sender"] == "Internal Revenue Service"
 
     def test_mail_from_anyone_else_is_ignored(self, path, tmp_path):
         """His inbox is full of images -- newsletters, receipts, marketing. Reading all
@@ -265,14 +291,16 @@ class TestTheEmailRoute:
         assert len(mail_photo.recent(path, 1)) == 3
 
     def test_the_photo_outlives_the_temp_directory(self, path, tmp_path):
-        """The parse is a guess; the photograph is the record. It must survive even if
-        the model falls over."""
+        """The parse is a guess; the photograph is the record. It must survive even when
+        nothing can be made of it -- the model falling over is not a reason to lose his
+        letter between the doormat and the desk."""
+        import glob
         import os
         mail = self.FakeMail([{"uid": "16", "from": self.OWN, "subject": "x"}],
                              {"16": ["a.jpg"]})
         self._scan(path, tmp_path, mail, bridge=FakeBridge("unreadable"))
-        kept = mail_photo.recent(path, 1)[0]["photo_path"]
-        assert os.path.exists(kept) and open(kept, "rb").read() == b"imagebytes"
+        kept = glob.glob(os.path.join(str(tmp_path / "media"), "mail_photos", "*"))
+        assert len(kept) == 1 and open(kept[0], "rb").read() == b"imagebytes"
 
     def test_a_mailbox_that_cannot_be_listed_is_not_a_crash(self, path, tmp_path):
         class Dead:
@@ -283,8 +311,22 @@ class TestTheEmailRoute:
 
     def test_the_task_hook_sees_what_he_wrote_in_the_subject(self, path, tmp_path):
         seen = []
-        mail = self.FakeMail([{"uid": "17", "from": self.OWN, "subject": "the IRS one"}],
+        mail = self.FakeMail([{"uid": "17", "from": self.OWN, "subject": "the letter"}],
                              {"17": ["a.jpg"]})
         self._scan(path, tmp_path, mail,
                    raise_task=lambda pid, reading, saved, header: seen.append(header))
-        assert seen and seen[0]["subject"] == "the IRS one"
+        assert seen and seen[0]["subject"] == "the letter"
+
+    def test_a_recipe_he_emails_is_not_filed_as_post(self, path, tmp_path):
+        """The bug he found by sending one: the mail reader read a cookbook page as a
+        letter, found no sender, filed it under post and said nothing."""
+        triage_recipe = json.dumps({"kind": "recipe", "summary": "A cookbook page.",
+                                    "title": "Fettuccine", "confidence": "high"})
+        mail = self.FakeMail([{"uid": "18", "from": self.OWN, "subject": "dinner"}],
+                             {"18": ["a.jpg"]})
+        said = []
+        mail_photo.run_inbox_scan_once(
+            path, mail, self.TwoStep(triage_recipe, "{}"), 1, self.OWN,
+            str(tmp_path / "media"), say=said.append)
+        assert mail_photo.recent(path, 1) == [], "not post"
+        assert said and "recipe" in said[0].lower(), "and he is told what it was"

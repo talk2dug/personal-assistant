@@ -81,6 +81,11 @@ def analyze_recipe_photo(bridge, image_bytes: bytes) -> dict:
     job = bridge.run_sync(
         "kitchen", "vision", RECIPE_PROMPT, images=[b64],
         options={"num_predict": 8192, "num_ctx": 24576},
+        # Constrained to JSON rather than asked for it. Proven necessary on the
+        # mail reader, which returned clean JSON for one photo and 8000 characters
+        # of reasoning without a single brace for the next one -- same model, same
+        # shared bridge, so the same failure was always available here.
+        fmt="json",
     )
 
     if job.get("status") != "done":
@@ -181,6 +186,7 @@ def analyze_inventory_photo(bridge, image_bytes: bytes, item_hint: str | None = 
     job = bridge.run_sync(
         "kitchen", "vision", prompt, images=[b64],
         options={"num_predict": 4096, "num_ctx": 16384},
+        fmt="json",
     )
 
     if job.get("status") != "done":
@@ -212,6 +218,7 @@ def analyze_receipt_photo(bridge, image_bytes: bytes) -> dict:
     job = bridge.run_sync(
         "kitchen", "vision", RECEIPT_PROMPT, images=[b64],
         options={"num_predict": 8192, "num_ctx": 24576},
+        fmt="json",
     )
 
     if job.get("status") != "done":

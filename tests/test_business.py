@@ -11,7 +11,7 @@ import json
 import pytest
 
 from assistant.config import BusinessProfile
-from assistant.core import agents, business_db, business_tools, ops_plans, staff
+from assistant.core import agents, business_db, business_tools, db as core_db, ops_plans, staff, store_policy
 from assistant.core.business_tools import BUSINESS_TOOLS, BusinessClient
 from assistant.core.engine import BusinessContext, _dispatch_tool_call, build_system_prompt, select_tools
 
@@ -24,6 +24,10 @@ PROFILE = BusinessProfile(
 @pytest.fixture
 def db_path(tmp_path):
     path = str(tmp_path / "business.db")
+    # Both, as production does. business_db alone leaves no `settings` table, so anything
+    # reading a stored policy (store_policy, which the product pipeline now consults)
+    # blew up in a way the real system never would.
+    core_db.init_db(path)
     business_db.init_business_db(path)
     return path
 
@@ -237,12 +241,15 @@ def test_product_creator_turns_trends_into_concepts(db_path):
          "price_estimate": 6.0, "production_notes": "Cut on the vinyl cutter",
          "trend_topic": "RVA local pride"},
     ]))
+    # With the approval gate back on, a concept waits for him -- this is the behaviour
+    # that used to be unconditional, and is now what store_policy.autopublish(False) buys.
+    store_policy.set_autopublish(db_path, False, reason="test: exercise the gate")
     result = agents.run_product_creator(db_path, llm, 1, PROFILE)
 
     assert result["new"] == 1
     concept = business_db.list_product_concepts(db_path, 1)[0]
     assert concept["name"] == "RVA Skyline Die-Cut Decal"
-    assert concept["status"] == "proposed"     # never auto-approved
+    assert concept["status"] == "proposed"     # not auto-approved, because the gate is on
     assert concept["trend_lead_id"] is not None  # traceable back to its signal
 
 
@@ -254,7 +261,13 @@ def test_a_new_concept_actually_reaches_the_review_queue(db_path):
     downstream agent reported "no approved concepts waiting" -- reading as idle rather
     than blocked. Asserts the card exists and points back at the concept, because the
     card is the only thing that can break the cycle.
+
+    Since store_policy was wired up, the ordinary path no longer needs a card at all -- an
+    automated-market concept is approved outright (see test_product_creator_autopublish).
+    This test now pins the OTHER half: with the gate on, a card must still appear, because
+    the gate being on is the only state in which the eight-day deadlock can recur.
     """
+    store_policy.set_autopublish(db_path, False, reason="test: exercise the gate")
     business_db.upsert_trend_lead(db_path, 1, "RVA local pride", "reddit", 78, "skyline decal", "rising")
     llm = FakeResearchLLM(json.dumps([
         {"name": "RVA Skyline Die-Cut Decal", "product_type": "sticker",
@@ -340,7 +353,10 @@ def test_art_director_uses_medium_specific_direction(db_path):
     assert "pure black background" in llm.prompts[0]  # metal guidance, not sticker guidance
     brief = business_db.list_art_briefs(db_path, 1)[0]
     assert brief["negative_prompt"] and "deformed" in brief["negative_prompt"]
-    assert brief["status"] == "draft"
+    # Metal is made on his own equipment, so this is a 'local' brief: under his default
+    # policy it advances anyway (the pipeline must not stall) but still leaves him a card.
+    assert brief["status"] == "approved"
+    assert [i["kind"] for i in business_db.list_review_items(db_path, 1, status="pending")] == ["art"]
 
 
 class FakeImageBridge:
@@ -354,7 +370,8 @@ class FakeImageBridge:
     def get_mode(self):
         return {"mode": self.mode, "reason": "racing" if self.mode == "reserved" else None}
 
-    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900):
+    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900,
+                 fmt=None):
         self.prompts.append(prompt)
         name = f"generated/render{len(self.prompts)}.png"
         return {"status": "done", "result": json.dumps({"files": [name], "count": 1})}
@@ -373,6 +390,11 @@ THREE_DIRECTIONS = {
 
 
 def _approved_concept(db_path, name="Squirrel Decal", kind="sticker"):
+    # These tests are about the review CARD -- what it shows, what approving it adopts.
+    # A card only exists when the gate is on, so turn it on rather than asserting against
+    # a pipeline his own policy says should run without him. See test_product_creator_
+    # autopublish for the ungated path.
+    store_policy.set_autopublish(db_path, False, reason="test: exercise the card")
     business_db.create_product_concept(db_path, 1, name, kind, "desc")
     concept_id = business_db.list_product_concepts(db_path, 1)[0]["id"]
     business_db.set_concept_status(db_path, 1, concept_id, "approved")
@@ -569,6 +591,9 @@ def test_added_options_do_not_collide_with_existing_ones(db_path):
 
 
 def test_store_manager_then_social_director_chain(db_path):
+    # Asserts the review cards each stage leaves, so the gate has to be on -- see
+    # _approved_concept above.
+    store_policy.set_autopublish(db_path, False, reason="test: exercise the cards")
     business_db.create_product_concept(db_path, 1, "RVA Decal", "sticker", "4in vinyl")
     concept_id = business_db.list_product_concepts(db_path, 1)[0]["id"]
     business_db.set_concept_status(db_path, 1, concept_id, "approved")

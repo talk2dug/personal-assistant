@@ -15,7 +15,8 @@ class FakeBridge:
         self.results = list(results)
         self.calls = []
 
-    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900):
+    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900,
+                 fmt=None):
         self.calls.append({"agent": agent, "task_type": task_type, "prompt": prompt,
                            "options": options or {}, "timeout": timeout})
         result = self.results.pop(0)

@@ -404,7 +404,7 @@ def is_from_owner(from_address: str, own_address: str) -> bool:
 
 def run_inbox_scan_once(db_path: str, mail_client, bridge, owner_user_id: int,
                         own_address: str, media_path: str, folder: str = "INBOX",
-                        limit: int = 20, raise_task=None) -> dict:
+                        limit: int = 20, raise_task=None, say=None) -> dict:
     """Pick up any photo he has emailed himself, read it, and file it.
 
     Safe to call repeatedly: a uid is marked the moment it is judged, whether or not it
@@ -469,14 +469,24 @@ def run_inbox_scan_once(db_path: str, mail_client, bridge, owner_user_id: int,
                     with open(saved, "wb") as handle:
                         handle.write(image_bytes)
 
-                    piece_id = record_pending(db_path, owner_user_id, saved)
-                    reading = read_photo(bridge, image_bytes)
-                    apply_reading(db_path, piece_id, reading)
+                    # Triage FIRST, rather than assuming everything he emails is post.
+                    # He proved why by sending a recipe: the mail reader read a cookbook
+                    # page as a letter, found no sender and no amount, filed it in a mail
+                    # table and said nothing back. photo_intake looks before it reads,
+                    # and asks when it cannot tell.
+                    from . import photo_intake
+
+                    outcome = photo_intake.handle(
+                        db_path, owner_user_id, bridge, image_bytes, saved,
+                        raise_task=raise_task, subject=header.get("subject"),
+                        media_path=media_path)
                     found += 1
-                    logger.info("mail photo scan: piece %s from emailed %r read as %s",
-                                piece_id, attachment["name"], reading.get("kind"))
-                    if raise_task is not None:
-                        raise_task(piece_id, reading, saved, header)
+                    logger.info("mail photo scan: emailed %r is %s (%s) - %s",
+                                attachment["name"], outcome["kind"],
+                                outcome["confidence"],
+                                "handled" if outcome["acted"] else "asked him")
+                    if say is not None:
+                        say(outcome["reply"])
                 except Exception:
                     logger.exception("mail photo scan: failed on attachment %r",
                                      attachment.get("name"))

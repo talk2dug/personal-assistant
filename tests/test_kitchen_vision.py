@@ -10,7 +10,8 @@ class FakeBridge:
         self._job = job
         self.calls = []
 
-    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900):
+    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900,
+                 fmt=None):
         self.calls.append({"agent": agent, "task_type": task_type, "prompt": prompt, "images": images})
         return self._job
 

@@ -138,7 +138,8 @@ class FakeBridge:
     def __init__(self, job):
         self._job = job
 
-    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900):
+    def run_sync(self, agent, task_type, prompt, images=None, options=None, timeout=900,
+                 fmt=None):
         return self._job
 
 

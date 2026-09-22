@@ -272,9 +272,23 @@ def handle(db_path: str, owner_user_id: int, bridge, image_bytes,
             return {"kind": "artwork", "confidence": verdict["confidence"], "acted": False,
                     "reply": "I couldn't file that with the artwork - the photo is kept.",
                     "review_id": None}
+        # Catalogued, not just filed. A folder cannot be asked what is in it, what he
+        # called something, or what has already been made from it -- and his whole
+        # reason for sending these is to pick one later and build a product off it.
+        count = None
+        try:
+            from . import design_assets
+
+            design_assets.add(db_path, owner_user_id, target, title=subject,
+                              source="emailed")
+            count = len(design_assets.catalogue(db_path, owner_user_id))
+        except Exception:
+            logger.exception("photo intake: filed the artwork but could not catalogue it")
+        reply = f"Filed with the artwork: {os.path.basename(target)}"
+        if count:
+            reply += f" ({count} design{'s' if count != 1 else ''} to pick from now)"
         return {"kind": "artwork", "confidence": verdict["confidence"], "acted": True,
-                "reply": f"Filed with the artwork: {os.path.basename(target)}",
-                "review_id": None}
+                "reply": reply, "review_id": None}
 
     if not should_act(verdict):
         # Ask. Filed on the Needs You board with the options, so the question survives a

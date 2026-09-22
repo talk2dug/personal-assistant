@@ -5,7 +5,7 @@ import asyncio
 import base64
 import functools
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Request, Response, UploadFile
 
 from ...core import db, ui_content, vision
 from ...core.engine import handle_message
@@ -107,3 +107,36 @@ async def transcribe(request: Request, audio: UploadFile):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"transcription failed: {e}")
     return {"text": text}
+
+
+@router.post("/say")
+async def say(request: Request):
+    """Jarvis's own voice, for the browser.
+
+    The web UI used to speak through the browser's speechSynthesis, which meant a
+    different voice on every browser and every operating system he opened it on -- while
+    the phone used Orpheus and the Pi terminals used Piper. Three voices, one of them
+    different per device. Jack: *"i want it to feel as if Jarvis moved to the device im
+    talking to him on."* He cannot, if Jarvis changes accent per screen.
+
+    Same Speaker every other surface uses, so the voice is chosen in exactly one place.
+    Owner-scoped rather than device-key scoped like /api/devices/say: the browser has a
+    session, not a device key, and this is the owner asking his assistant to speak.
+    """
+    user = require_user(request)
+    speaker = request.app.state.speaker
+    if speaker is None or not speaker.available():
+        # Not an error the UI should shout about -- it falls back to the browser voice,
+        # which is worse but is still an answer he can hear.
+        raise HTTPException(503, "text-to-speech is not configured")
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    loop = asyncio.get_running_loop()
+    try:
+        wav = await loop.run_in_executor(None, speaker.synthesize, text)
+    except Exception as e:
+        raise HTTPException(500, f"speech synthesis failed: {e}")
+    return Response(content=wav, media_type="audio/wav",
+                    headers={"Cache-Control": "no-store"})

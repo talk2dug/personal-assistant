@@ -36,6 +36,20 @@ export const api = {
   logout: () => request('/api/logout', { method: 'POST' }),
   me: () => request('/api/me'),
 
+  // Returns a WAV Blob, not JSON, so it cannot go through request(). This is Jarvis's
+  // own voice — the same Speaker the phone and the Pi terminals use — rather than the
+  // browser's speechSynthesis, which was a different voice on every browser and OS.
+  speak: async (text) => {
+    const res = await fetch('/api/chat/say', {
+      credentials: 'include',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    if (!res.ok) throw new ApiError(res.status, null)
+    return res.blob()
+  },
+
   chatHistory: () => request('/api/chat/history'),
   sendMessage: (text, image, viewingContext) =>
     request('/api/chat/message', {

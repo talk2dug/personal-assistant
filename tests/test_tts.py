@@ -159,3 +159,112 @@ class TestSynthesizeStream:
         out = self._speaker(voice).synthesize("The first sentence. The second sentence.")
         assert out.startswith(b"RIFF")
         assert len(voice.spoken) == 1, "the whole reply should be one synthesis call"
+
+
+class TestOneVoiceEverywhere:
+    """Jack had three voices: Orpheus on the phone, Piper on the terminals, and the
+    browser's own speechSynthesis in the web UI -- which is a different voice on every
+    browser and every OS. "I want it to feel as if Jarvis moved to the device im talking
+    to him on." So the choice lives in Speaker and every surface asks it.
+
+    The fallback is the part that has to be right. Preferring the slower, better voice is
+    only safe because a failure lands on Piper instead of on silence.
+    """
+
+    def _speaker(self, monkeypatch, orpheus_result):
+        """A real Speaker with both engines stubbed at their edges.
+
+        Deliberately NOT a reimplementation of _synthesize_one: patching the method
+        under test with a copy of itself proves only that the copy works. Only the two
+        outermost calls are faked -- the HTTP post and the Piper model load -- so the
+        real branching, the real fallback and the real error handling all execute.
+        """
+        spk = Speaker(voice_path="voice.onnx", orpheus_url="http://127.0.0.1:8130/tts")
+        calls = {"orpheus": 0, "piper": 0}
+
+        def fake_orpheus(spoken):
+            calls["orpheus"] += 1
+            if isinstance(orpheus_result, Exception):
+                raise orpheus_result
+            return orpheus_result
+
+        class FakePiper:
+            def synthesize_wav(self, spoken, wav, syn_config=None):
+                calls["piper"] += 1
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(22050)
+                wav.writeframes(bytes(16))
+
+        monkeypatch.setattr(spk, "_orpheus", fake_orpheus)
+        monkeypatch.setattr(spk, "_ensure_loaded", lambda: FakePiper())
+        return spk, calls
+
+    def test_the_natural_voice_is_used_when_it_is_there(self, monkeypatch):
+        spk, calls = self._speaker(monkeypatch, b"ORPHEUS")
+        assert spk.synthesize("Hello there.") == b"ORPHEUS"
+        assert calls == {"orpheus": 1, "piper": 0}, "Piper must not also be invoked"
+
+    def test_a_failure_falls_back_to_piper_rather_than_silence(self, monkeypatch):
+        spk, calls = self._speaker(monkeypatch, RuntimeError("service down"))
+        out = spk.synthesize("Hello there.")
+        assert out.startswith(b"RIFF"), "should be the real WAV Piper produced"
+        assert calls == {"orpheus": 1, "piper": 1}
+
+    def test_every_chunk_of_a_long_reply_uses_the_same_engine(self, monkeypatch):
+        """A reply that starts in one voice and finishes in another is worse than
+        either voice on its own."""
+        spk, calls = self._speaker(monkeypatch, b"ORPHEUS")
+        chunks = list(spk.synthesize_stream(
+            "The store is at zero. It has not moved in forty hours. "
+            "Art director is the hold-up, and I already ran it once."))
+        assert len(chunks) > 1 and set(chunks) == {b"ORPHEUS"}
+        assert calls["piper"] == 0
+
+    def test_with_no_natural_voice_configured_nothing_changes(self, monkeypatch):
+        """Every surface behaved this way before Orpheus existed and must still."""
+        spk, calls = self._speaker(monkeypatch, b"ORPHEUS")
+        spk.orpheus_url = None
+        assert spk.synthesize("Hello.").startswith(b"RIFF")
+        assert calls == {"orpheus": 0, "piper": 1}
+
+    def test_a_failure_with_no_fallback_raises_rather_than_returning_silence(self, monkeypatch):
+        spk, _ = self._speaker(monkeypatch, RuntimeError("service down"))
+        spk.voice_path = None
+        with pytest.raises(RuntimeError):
+            spk.synthesize("Hello.")
+
+    def test_available_is_true_on_either_voice_alone(self):
+        assert Speaker(voice_path="v.onnx").available() is True
+        assert Speaker(orpheus_url="http://127.0.0.1:8130/tts").available() is True
+        assert Speaker().available() is False
+
+    def test_warming_is_a_no_op_without_the_natural_voice(self):
+        assert Speaker(voice_path="v.onnx").warm() is False
+
+    def test_warming_never_raises_when_the_service_is_down(self, monkeypatch):
+        """It runs on a scheduler tick; an exception there kills the job for the life of
+        the process."""
+        spk = Speaker(orpheus_url="http://127.0.0.1:8130/tts")
+        monkeypatch.setattr(spk, "_orpheus",
+                            lambda s: (_ for _ in ()).throw(OSError("connection refused")))
+        assert spk.warm() is False
+
+    def test_warming_reports_success(self, monkeypatch):
+        spk = Speaker(orpheus_url="http://127.0.0.1:8130/tts")
+        monkeypatch.setattr(spk, "_orpheus", lambda s: b"WAV")
+        assert spk.warm() is True
+
+    def test_empty_audio_from_the_service_counts_as_a_failure(self, monkeypatch):
+        """A 200 with no body would otherwise be handed to an audio player as silence,
+        which is indistinguishable from Jarvis ignoring him."""
+        import requests
+
+        class Empty:
+            content = b""
+            def raise_for_status(self): pass
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: Empty())
+        spk = Speaker(orpheus_url="http://127.0.0.1:8130/tts")
+        with pytest.raises(ValueError):
+            spk._orpheus("Hello.")

@@ -5,6 +5,7 @@ import logging
 from .config import load_config
 from .core import business_db, cellular, db, github_client, pipelines, staff, ui_content, vision, work_queue, radio
 from .core import scheduler
+from .core.tts import Speaker
 from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_notifier,
@@ -164,6 +165,13 @@ def main() -> None:
         # His own number, so the daily rhythm can text him rather than push. The first
         # allowed number is the owner's; without one the nudges fall back to Telegram.
         rhythm_sms_number=(cfg.sms_allowed_numbers or [None])[0],
+        # Only so the natural voice can be kept warm. Piper inside it loads lazily and
+        # is never touched here, so this costs nothing in the core process -- but a cold
+        # Orpheus makes the first reply of the day the slowest one, ~7.4s against ~1s.
+        speaker=Speaker(voice_path=cfg.piper_voice_path, orpheus_url=cfg.orpheus_url,
+                        orpheus_voice=cfg.orpheus_voice,
+                        orpheus_timeout=cfg.orpheus_timeout_seconds),
+        voice_keepalive_interval_seconds=cfg.orpheus_keepalive_seconds,
         # Location watching needs HA for GPS and the other contexts so a routine's
         # prompt has the same tools a chat turn would.
         home_assistant=home_assistant, phone=phone, mail=mail, obsidian=obsidian,

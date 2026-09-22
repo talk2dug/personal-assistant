@@ -135,15 +135,70 @@ def split_for_speech(text: str) -> list[str]:
 
 
 class Speaker:
-    def __init__(self, voice_path: str | None = None, length_scale: float | None = 1.04):
+    """One voice, wherever Jarvis is speaking from.
+
+    Jack, 2026-09-21: *"i really want to look at how we can use the same voice in all
+    instances"* and *"i want it to feel as if Jarvis moved to the device im talking to
+    him on."* He had three voices. The phone used Orpheus, the Pi terminals used Piper,
+    and the web UI used the BROWSER's own speechSynthesis -- which is not merely a third
+    voice but a different voice on every browser and every OS he opened it on. Nothing
+    reads as one person moving between rooms when he changes accent per screen.
+
+    So the choice of voice lives here, once, and every surface asks this class. Orpheus
+    first because it is the one that sounds like a person; Piper underneath it because a
+    plainer voice is enormously better than silence, and because the fallback is what
+    makes it safe to prefer the slower engine at all.
+
+    Measured locally, both on this box (there is no network in this path -- Orpheus
+    listens on 127.0.0.1):
+        Piper     ~4.7x realtime
+        Orpheus   ~2.0x realtime warm, ~7.4s on the first call after it goes cold
+    Both outrun playback, so with split_for_speech chunking the only real cost of the
+    better voice is time-to-first-word, about +0.7s. The cold start is the part that
+    actually hurts, and it is why the scheduler pings this every few minutes.
+    """
+
+    def __init__(self, voice_path: str | None = None, length_scale: float | None = 1.04,
+                 orpheus_url: str | None = None, orpheus_voice: str = "dan",
+                 orpheus_timeout: float = 30.0):
         self.voice_path = voice_path
         # Slightly slower than default: Jarvis is measured, and it also survives a cheap
         # speaker better than a rushed delivery does.
         self.length_scale = length_scale
+        self.orpheus_url = orpheus_url
+        self.orpheus_voice = orpheus_voice
+        self.orpheus_timeout = orpheus_timeout
         self._voice = None
 
     def available(self) -> bool:
-        return bool(self.voice_path)
+        return bool(self.voice_path) or bool(self.orpheus_url)
+
+    def warm(self) -> bool:
+        """Synthesise something tiny so the next real reply is not the cold one.
+
+        A 7.4s first word after an idle hour reads as Jarvis being slow, not as a model
+        loading, and it lands precisely when he has not spoken to it in a while -- the
+        worst possible moment for the illusion of presence.
+        """
+        if not self.orpheus_url:
+            return False
+        try:
+            self._orpheus("Ready.")
+            return True
+        except Exception:
+            logger.debug("tts: could not warm the natural voice", exc_info=True)
+            return False
+
+    def _orpheus(self, spoken: str) -> bytes:
+        import requests
+
+        response = requests.post(
+            self.orpheus_url, json={"text": spoken, "voice": self.orpheus_voice},
+            timeout=self.orpheus_timeout)
+        response.raise_for_status()
+        if not response.content:
+            raise ValueError("the natural voice returned no audio")
+        return response.content
 
     def _ensure_loaded(self):
         if self._voice is None:
@@ -215,7 +270,20 @@ class Speaker:
 
     def _synthesize_one(self, spoken: str) -> bytes:
         """Synthesise already-cleaned text. Shared by synthesize and synthesize_stream so
-        the two can never drift in pacing or format."""
+        the two can never drift in pacing or format -- and now so they can never drift in
+        VOICE either, which is the whole point of routing every surface through here.
+        """
+        if self.orpheus_url:
+            try:
+                return self._orpheus(spoken)
+            except Exception:
+                # Never fail the reply over the nicer voice. Logged rather than silent:
+                # "why does he sound different today" should be answerable from the log,
+                # since a fallback that hides itself is how three voices went unnoticed.
+                logger.warning("tts: natural voice unavailable, falling back to Piper",
+                               exc_info=True)
+            if not self.voice_path:
+                raise RuntimeError("the natural voice failed and no fallback is configured")
         voice = self._ensure_loaded()
         buffer = io.BytesIO()
         with wave.open(buffer, "wb") as wav:

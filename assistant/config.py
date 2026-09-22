@@ -324,6 +324,15 @@ class Config:
     # this codebase (CCXT, git_ops), never a tool argument the model could leak or forge.
     ssh_hosts: dict = field(default_factory=dict)
     piper_voice_path: str | None = None
+    # The natural voice. Orpheus runs on this same box (127.0.0.1) -- there is no network
+    # in this path, so its cost is compute, not the link. Unset falls back to Piper
+    # everywhere, which is exactly what every surface did before this existed.
+    orpheus_url: str | None = None
+    orpheus_voice: str = "dan"
+    orpheus_timeout_seconds: float = 30.0
+    # How often to keep the natural voice warm. Cold, its first reply takes ~7.4s against
+    # ~1s warm, and it goes cold precisely when he has not spoken to Jarvis for a while.
+    orpheus_keepalive_seconds: int = 420
     generated_media_path: str = "generated"
     # Master switch for unattended agent runs. Off by default and currently off in the
     # real config: the owner's call is that nothing should fire on a timer until he and
@@ -545,6 +554,10 @@ def load_config(path: str = "config.json") -> Config:
         scan_subnet=data.get("scan_subnet", "192.168.0"),
         ssh_hosts=data.get("ssh_hosts", {}),
         piper_voice_path=data.get("piper_voice_path"),
+        orpheus_url=data.get("orpheus_url"),
+        orpheus_voice=data.get("orpheus_voice", "dan"),
+        orpheus_timeout_seconds=data.get("orpheus_timeout_seconds", 30.0),
+        orpheus_keepalive_seconds=data.get("orpheus_keepalive_seconds", 420),
         generated_media_path=data.get("generated_media_path", "generated"),
         business_agents_enabled=data.get("business_agents_enabled", False),
         market_scan_interval_hours=data.get("market_scan_interval_hours", 72),

@@ -93,7 +93,9 @@ def main() -> None:
     cellular_ctx = build_cellular_context(cfg)
     local_llm = build_local_llm_context(cfg)
     stt = Transcriber(model_size=cfg.stt_model_size)
-    speaker = Speaker(voice_path=cfg.piper_voice_path)
+    speaker = Speaker(voice_path=cfg.piper_voice_path, orpheus_url=cfg.orpheus_url,
+                      orpheus_voice=cfg.orpheus_voice,
+                      orpheus_timeout=cfg.orpheus_timeout_seconds)
 
     app = create_app(
         cfg, llm, era, calendar, phone, stt, mail=mail, obsidian=obsidian, home_assistant=home_assistant,

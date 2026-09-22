@@ -78,6 +78,7 @@ def start(
     local_llm=None, local_llm_keepalive_interval_seconds: int = 600,
     staff_assignment_timeout_seconds: int = 10800, bridge=None,
     rhythm_nudge_interval_seconds: int = 60, rhythm_sms_number: str | None = None,
+    speaker=None, voice_keepalive_interval_seconds: int = 420,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -355,6 +356,18 @@ def start(
             _guarded_simple("local_llm_keepalive", _local_llm_keepalive_tick), "interval",
             seconds=local_llm_keepalive_interval_seconds, id="local_llm_keepalive",
             next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
+        )
+
+    # The same problem, for the voice. Measured on this box: Orpheus answers in about a
+    # second warm and takes ~7.4s cold, and it goes cold exactly during the quiet spell
+    # before the owner speaks to it again -- so without this, the slowest reply of the
+    # day is reliably the first one. A few words of synthesis every seven minutes is far
+    # cheaper than that first impression.
+    if speaker is not None and getattr(speaker, "orpheus_url", None):
+        scheduler.add_job(
+            _guarded_simple("voice_keepalive", speaker.warm), "interval",
+            seconds=voice_keepalive_interval_seconds, id="voice_keepalive",
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
         )
 
     if home_assistant is not None:

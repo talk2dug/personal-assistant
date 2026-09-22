@@ -99,6 +99,8 @@ export function JarvisProvider({ children }) {
   const recorderRef = useRef(null)
   const chunksRef = useRef([])
   const jarvisVoiceRef = useRef(null)
+  // The <Audio> currently playing Jarvis's real voice, so a new reply can stop it.
+  const serverAudioRef = useRef(null)
   const cancelledRef = useRef(false)
   // Mirrors of state for use inside callbacks that outlive a render (the recorder's
   // onstop, the key handlers), where a captured value would be stale.
@@ -143,11 +145,18 @@ export function JarvisProvider({ children }) {
     if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
     audioCtxRef.current?.close().catch(() => {})
     speechSynthesis.cancel()
+    serverAudioRef.current?.pause()
   }, [])
 
-  const speak = useCallback((text) => {
-    const spoken = stripMarkdown(text)
-    if (!spoken || !voiceOnRef.current) return
+  // Jarvis's real voice, the same one the phone and the terminals use, fetched from the
+  // server. This screen used to speak through the browser's speechSynthesis, which is a
+  // different voice on every browser AND every OS — so he sounded like one person on the
+  // phone, another on a kiosk, and a third here. "I want it to feel as if Jarvis moved to
+  // the device I'm talking to him on"; he cannot, while the accent changes per screen.
+  //
+  // The browser voice stays as the fallback, never as the default: if the server has no
+  // speech configured or the fetch fails, a plainer voice is far better than silence.
+  const speakInBrowser = useCallback((spoken) => {
     speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(spoken)
     if (jarvisVoiceRef.current) utterance.voice = jarvisVoiceRef.current
@@ -159,12 +168,44 @@ export function JarvisProvider({ children }) {
     speechSynthesis.speak(utterance)
   }, [])
 
+  const speak = useCallback(async (text) => {
+    const spoken = stripMarkdown(text)
+    if (!spoken || !voiceOnRef.current) return
+    // Whatever was already playing stops, by either route — a new reply must never
+    // overlap the last one.
+    speechSynthesis.cancel()
+    serverAudioRef.current?.pause()
+
+    try {
+      const blob = await api.speak(spoken)
+      if (!voiceOnRef.current) return
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      serverAudioRef.current = audio
+      const done = () => {
+        setSpeaking(false)
+        URL.revokeObjectURL(url)
+        if (serverAudioRef.current === audio) serverAudioRef.current = null
+      }
+      audio.onplay = () => setSpeaking(true)
+      audio.onended = done
+      // A decode or autoplay failure here has already cost the round trip, so fall
+      // back rather than leaving him with nothing.
+      audio.onerror = () => { done(); speakInBrowser(spoken) }
+      await audio.play()
+    } catch {
+      if (voiceOnRef.current) speakInBrowser(spoken)
+    }
+  }, [speakInBrowser])
+
   const toggleVoice = useCallback(() => {
     setVoiceOn((prev) => {
       const next = !prev
       localStorage.setItem('jarvis-voice-out', next ? 'on' : 'off')
       if (!next) {
         speechSynthesis.cancel()
+        serverAudioRef.current?.pause()
+        serverAudioRef.current = null
         setSpeaking(false)
       }
       return next

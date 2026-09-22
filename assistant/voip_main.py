@@ -295,7 +295,9 @@ def build_runtime(cfg: Config):
         "local_llm": build_local_llm_context(cfg),
     }
     stt = Transcriber(model_size=cfg.stt_model_size)
-    speaker = Speaker(voice_path=cfg.piper_voice_path)
+    speaker = Speaker(voice_path=cfg.piper_voice_path, orpheus_url=cfg.orpheus_url,
+                      orpheus_voice=cfg.orpheus_voice,
+                      orpheus_timeout=cfg.orpheus_timeout_seconds)
     # Pre-warm both models with a REAL op on THIS (main) thread, before pjsua2 starts. Piper
     # lazily imports the NATIVE espeak phonemizer on first synthesize, and onnxruntime builds
     # its session on first run; forcing both here means the worker only ever REUSES modules

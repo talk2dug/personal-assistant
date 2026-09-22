@@ -162,3 +162,52 @@ class TestWhenItDoesNot:
             out = photo_intake.handle(path, 1, bridge, b"x", photo,
                                       media_path=str(tmp_path / "media"))
             assert out["reply"].strip()
+
+
+class TestItLearnsWhatHeSends:
+    """His words: "He learns the types of things I send and learns what my intentions
+    are." Every question Jarvis asks is filed as a review card under photo_intake, so
+    answering one is already a recorded ruling -- this is the loop that reads them back.
+    """
+
+    def test_past_answers_reach_the_next_triage(self, path, photo, tmp_path,
+                                                monkeypatch):
+        seen = {}
+
+        class Watching:
+            def run_sync(self, lane, kind, prompt, images=None, options=None, fmt=None):
+                seen["prompt"] = prompt
+                return {"status": "done", "error": None, "result": json.dumps(
+                    {"kind": "other", "summary": "?", "title": None,
+                     "confidence": "low"})}
+
+        monkeypatch.setattr(photo_intake, "learned_from",
+                            lambda db, uid: "\n\nHE HAS TOLD YOU BEFORE: a photo of a "
+                                            "canvas is artwork.")
+        photo_intake.handle(path, 1, Watching(), b"x", photo,
+                            media_path=str(tmp_path / "media"))
+        assert "canvas is artwork" in seen["prompt"]
+
+    def test_a_subject_keyword_skips_the_lookup_entirely(self, path, photo, tmp_path,
+                                                         monkeypatch):
+        """No model call means no prompt to teach -- he already said what it was."""
+        called = []
+        monkeypatch.setattr(photo_intake, "learned_from",
+                            lambda db, uid: called.append(1) or "")
+        photo_intake.handle(path, 1, Bridge(), b"x", photo, subject="art work",
+                            media_path=str(tmp_path / "media"))
+        assert called == []
+
+    def test_losing_the_history_never_breaks_the_read(self, path, photo, tmp_path,
+                                                      monkeypatch):
+        """Remembering is a nicety; answering is the job."""
+        monkeypatch.setattr(
+            photo_intake, "review_examples",
+            None, raising=False)
+        import assistant.core.review_examples as re_mod
+        monkeypatch.setattr(re_mod, "build_verdict_briefing",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("gone")))
+        assert photo_intake.learned_from(path, 1) == ""
+        out = photo_intake.handle(path, 1, Bridge("recipe", "high"), b"x", photo,
+                                  media_path=str(tmp_path / "media"))
+        assert out["acted"] is True

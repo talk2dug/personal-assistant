@@ -91,18 +91,47 @@ SUBJECT_INTENTS = {
 }
 
 
-def triage(bridge, image_bytes) -> dict:
+def learned_from(db_path: str, owner_user_id: int) -> str:
+    """What he has already told Jarvis about the photos he sends.
+
+    His own words for why this exists: *"He learns the types of things I send and learns
+    what my intentions are."* Every question Jarvis asks is filed as a review card under
+    source_agent='photo_intake', so once he answers one the answer is already recorded --
+    this feeds those rulings back into the next triage, which is the same loop the store
+    agents already run on their own verdicts (see review_examples).
+
+    The effect he is after: he answers "that's artwork" once, and the next photo like it
+    is not a question.
+    """
+    try:
+        from . import review_examples
+
+        return review_examples.build_verdict_briefing(db_path, owner_user_id,
+                                                      "photo_intake")
+    except Exception:
+        # Never let the memory of past answers break the ability to answer now.
+        logger.debug("photo intake: could not read past verdicts", exc_info=True)
+        return ""
+
+
+def triage(bridge, image_bytes, learned: str = "") -> dict:
     """Decide what the photograph is. Never raises; returns kind 'other' on any failure,
-    which routes to asking him -- the safe direction."""
+    which routes to asking him -- the safe direction.
+
+    `learned` is his own past rulings, appended to the prompt so the same question is
+    not asked twice.
+    """
     if bridge is None:
         return {"kind": "other", "summary": None, "title": None,
                 "confidence": "low", "error": "no vision bridge"}
     try:
         job = bridge.run_sync(
-            "photo", "vision", TRIAGE_PROMPT,
-            images=[base64.b64encode(b).decode()
+            "photo", "vision", TRIAGE_PROMPT + (learned or ""),
+            images=[base64.b64encode(mail_photo.prepare_for_vision(b)).decode()
                     for b in mail_photo.as_pages(image_bytes)],
-            options={"num_predict": 512, "num_ctx": 8192}, fmt="json")
+            options={"num_predict": 512,
+                     "num_ctx": max(8192, 6144 * len(mail_photo.as_pages(image_bytes)) + 1024)},
+            fmt="json")
     except Exception as exc:                                        # noqa: BLE001
         logger.exception("photo triage: vision call failed")
         return {"kind": "other", "summary": None, "title": None,
@@ -230,7 +259,8 @@ def handle(db_path: str, owner_user_id: int, bridge, image_bytes,
         logger.info("photo intake: %s, because he said so in the subject %r",
                     stated, subject)
     else:
-        verdict = triage(bridge, image_bytes)
+        verdict = triage(bridge, image_bytes,
+                         learned=learned_from(db_path, owner_user_id))
         logger.info("photo intake: %s (confidence %s) - %s", verdict["kind"],
                     verdict["confidence"], verdict.get("summary"))
 

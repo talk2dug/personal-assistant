@@ -22,6 +22,7 @@ is kept so the original can always be looked at again. Nothing here overwrites a
 that came from a bank.
 """
 import base64
+import io
 import json
 import logging
 import re
@@ -186,6 +187,41 @@ def as_pages(image_bytes) -> list:
     return [image_bytes]
 
 
+# A phone camera produces far more picture than a model needs to read a letter. His
+# were 5712x4284 and ~3.9MB each, and two of those in one call is roughly 8000 image
+# tokens against a context of 8192 -- the read sat spinning for over three minutes and
+# the scheduler started skipping ticks because the previous one had never finished.
+# Downscaling is not a saving, it is the difference between working and not.
+MAX_EDGE = 1600
+
+
+def prepare_for_vision(image_bytes: bytes, max_edge: int = MAX_EDGE) -> bytes:
+    """Shrink a phone photo to something a model can actually read in one pass.
+
+    Returns the original bytes unchanged if Pillow cannot open it -- an unreadable
+    image should reach the model and be reported as unreadable, not vanish here.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("RGB")
+            if max(img.size) <= max_edge:
+                return image_bytes
+            scale = max_edge / float(max(img.size))
+            resized = img.resize(
+                (max(1, int(img.width * scale)), max(1, int(img.height * scale))),
+                Image.LANCZOS)
+            out = io.BytesIO()
+            # 85 keeps small print legible while cutting a 3.9MB photo to a few
+            # hundred KB; the letter is text on paper, not a photograph of a sunset.
+            resized.save(out, "JPEG", quality=85)
+            return out.getvalue()
+    except Exception:
+        logger.warning("could not downscale a photo; sending it as-is", exc_info=True)
+        return image_bytes
+
+
 def read_photo(bridge, image_bytes) -> dict:
     """Run one letter -- one photo, or several pages of it -- through the vision model.
     Never raises; returns parsed=False."""
@@ -199,8 +235,11 @@ def read_photo(bridge, image_bytes) -> dict:
                 "\n\nThere are %d photographs here and they are pages or sides of the "
                 "SAME letter. Read them together and describe the one letter, not one "
                 "letter per picture." % len(pages)),
-            images=[base64.b64encode(b).decode() for b in pages],
-            options={"num_predict": 2048, "num_ctx": 8192},
+            images=[base64.b64encode(prepare_for_vision(b)).decode() for b in pages],
+            # Context grows with the pages: one image is roughly 4000 tokens even after
+            # downscaling, so a two-sided letter needs room for both plus the answer.
+            options={"num_predict": 2048,
+                     "num_ctx": max(8192, 6144 * len(pages) + 2048)},
             # CONSTRAINED, not requested. Reading the same photograph twice, this model
             # returned clean JSON once and 8000 characters of reasoning without a single
             # brace the next time -- it talked itself through every field in prose and ran

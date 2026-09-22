@@ -2323,6 +2323,19 @@ def handle_message(
                 kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops,
                 cellular_ctx=cellular_ctx)
 
+    # Before anything that costs a model call, including the local fast path below: a
+    # question whose answer is a row in SQLite should never cost an inference. "What is
+    # the current value of the paper trading?" measured 8.9 seconds, all of it spent
+    # spawning a CLI and running a tool loop to read one number off one table. This
+    # answers in ~25ms or declines and costs nothing. See direct_answers.
+    if image_bytes is None:
+        from . import direct_answers
+        instant = direct_answers.try_direct_answer(db_path, user_text)
+        if instant is not None:
+            db.add_message(db_path, requesting_user_id, "user", user_text, source=source)
+            db.add_message(db_path, requesting_user_id, "assistant", instant, source=source)
+            return instant
+
     if local_llm is not None and home_assistant is not None and image_bytes is None:
         from . import local_fast_path
         fast_reply = local_fast_path.try_home_assistant_fast_path(

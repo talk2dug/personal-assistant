@@ -29,6 +29,7 @@ one person means.
 """
 import logging
 import re
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,22 @@ def _subject_in(text: str) -> str | None:
     return None
 
 
+# How the counted-up half of a day reads. "due" only where a date is a deadline: a
+# payday is not due, it arrives.
+_KIND_WORDS = {
+    "task": ("task due", "tasks due"),
+    "bill": ("bill due", "bills due"),
+    "deadline": ("deadline", "deadlines"),
+    "income": ("payday", "paydays"),
+    "reminder": ("reminder", "reminders"),
+}
+
+
+def _plural(kind: str, n: int) -> str:
+    one, many = _KIND_WORDS.get(kind, (kind, kind + "s"))
+    return f"{n} {one if n == 1 else many}"
+
+
 def _day_label(day_date: str, today: str) -> str:
     from datetime import date, timedelta
     try:
@@ -256,24 +273,30 @@ def _agenda_answer(db_path: str, text: str) -> str | None:
         if not entries:
             continue
 
-        def at(entry):
-            """Sort by the clock. The agenda groups by kind, which puts a 16:00 meetup
-            above an 08:00 standup -- fine on a screen with columns, wrong when it is
-            read aloud or arrives as a text."""
-            found = re.match(r"^(\d{1,2}):(\d{2})", (entry.get("detail") or "").strip())
-            return (0, int(found.group(1)), int(found.group(2))) if found else (1, 0, 0)
+        # What is on the clock gets named; everything else gets counted. Jack asked for
+        # exactly this: "Two tasks due tomorrow. Then I can ask about them if I want."
+        # His task titles are whole paragraphs of reasoning -- genuinely useful on the
+        # task, but four of them bury the two meetings that are the actual answer.
+        timed, counted = [], Counter()
+        for e in entries:
+            when = (e.get("detail") or "").split("·")[0].strip()
+            found = re.match(r"^(\d{1,2}):(\d{2})", when)
+            if found or e.get("kind") == "event":
+                # All-day meetings have no clock but are still appointments.
+                timed.append((
+                    (0, int(found.group(1)), int(found.group(2))) if found else (1, 0, 0),
+                    f"{when} " if found else "", (e.get("title") or "").strip()))
+            else:
+                counted[e.get("kind") or "item"] += 1
 
         lines.append(f"{_day_label(day.get('date', ''), today)}:")
-        for e in sorted(entries, key=at):
-            when = (e.get("detail") or "").split("·")[0].strip()
-            head = f"{when} " if re.match(r"^\d{1,2}:\d{2}", when) else ""
-            kind = "" if e.get("kind") == "event" else f"{e.get('kind')}: "
-            # Task titles here are whole paragraphs of reasoning. Useful on the task
-            # itself, unreadable in a list of what his day holds.
-            title = (e.get("title") or "").strip()
+        for _, head, title in sorted(timed):
             if len(title) > 72:
                 title = title[:69].rstrip(" ,.-") + "..."
-            lines.append(f"- {head}{kind}{title}")
+            lines.append(f"- {head}{title}")
+        if counted:
+            rest = ", ".join(_plural(kind, n) for kind, n in sorted(counted.items()))
+            lines.append(f"- plus {rest}" if timed else f"- {rest}")
     if not lines:
         return f"Nothing on {window}, sir."
     return "\n".join(lines)

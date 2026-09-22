@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from assistant.core import (attention, business_db, db as core_db, direct_answers,
-                            executive, missions)
+                            executive, missions, personal_db)
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -25,6 +25,7 @@ def path(tmp_path):
     business_db.init_business_db(p)
     missions.init_missions_db(p)
     attention.init_attention_db(p)
+    personal_db.init_personal_db(p)
     executive.seed_missions(p)
     return p
 
@@ -178,6 +179,41 @@ class TestTheAgenda:
         self._feed(path, [((today + timedelta(days=3)).isoformat(), "10:00", "Thursday thing")])
         assert "Thursday thing" in direct_answers.try_direct_answer(
             path, "what does my week look like")
+
+    def test_untimed_items_are_counted_not_listed(self, path):
+        """Jack: "Two tasks due tomorrow. Then I can ask about them if I want." His task
+        titles are whole paragraphs, and four of them bury the two meetings that are the
+        actual answer."""
+        today = datetime.now(timezone.utc).date()
+        self._feed(path, [(today.isoformat(), "09:00", "Standup")])
+        for i in range(2):
+            personal_db.create_task(
+                path, 1, f"A task with a very long explanatory title number {i} " + "x" * 90,
+                due_at=today.isoformat())
+        out = direct_answers.try_direct_answer(path, "whats on today")
+        assert "09:00 Standup" in out
+        assert "plus 2 tasks due" in out
+        assert "explanatory" not in out, "the paragraph must not be in the answer"
+
+    def test_one_of_something_is_singular(self, path):
+        today = datetime.now(timezone.utc).date()
+        self._feed(path, [(today.isoformat(), "09:00", "Standup")])
+        personal_db.create_task(path, 1, "Just the one", due_at=today.isoformat())
+        assert "plus 1 task due" in direct_answers.try_direct_answer(path, "whats on today")
+
+    def test_a_day_with_nothing_timed_drops_the_plus(self, path):
+        """"- plus 2 tasks due" with nothing before it reads as a fragment."""
+        today = datetime.now(timezone.utc).date()
+        self._feed(path, [])
+        personal_db.create_task(path, 1, "Only a task", due_at=today.isoformat())
+        out = direct_answers.try_direct_answer(path, "whats on today")
+        assert "- 1 task due" in out and "plus" not in out
+
+    def test_an_all_day_meeting_is_still_named(self, path):
+        """It has no clock but it is still an appointment, not a countable."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        self._feed(path, [(today, None, "Offsite")])
+        assert "Offsite" in direct_answers.try_direct_answer(path, "whats on today")
 
     def test_an_empty_day_says_so_rather_than_going_quiet(self, path):
         self._feed(path, [])

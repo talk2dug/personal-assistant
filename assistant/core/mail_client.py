@@ -246,7 +246,8 @@ class MailClient:
                          max_bytes: int = 40 * 1024 * 1024,
                          allowed_suffixes: tuple = (".pdf", ".csv", ".txt", ".html", ".htm",
                                                     ".mhtml", ".mht", ".webarchive",
-                                                    ".json", ".png", ".jpg", ".jpeg")) -> dict:
+                                                    ".json", ".png", ".jpg", ".jpeg"),
+                         include_inline: bool = False) -> dict:
         """Write one message's attachments to disk and say what landed.
 
         _extract_body deliberately skips attachments -- it is reading prose for triage --
@@ -263,6 +264,12 @@ class MailClient:
         """
         import os
 
+        # iOS Mail sends a photographed letter as an INLINE image, not an attachment --
+        # which is why a photo Jack emailed himself arrived, was recognised as his, and
+        # produced nothing. Off by default so every existing caller behaves exactly as
+        # before; the mail-photo scan is the one that asks for inline parts.
+        wanted = ("attachment", "inline") if include_inline else ("attachment",)
+
         os.makedirs(out_dir, exist_ok=True)
         saved, skipped = [], []
         conn = self._imap()
@@ -276,9 +283,17 @@ class MailClient:
             conn.logout()
 
         for part in msg.walk():
-            if part.get_content_disposition() != "attachment":
+            disposition = part.get_content_disposition()
+            if disposition not in wanted:
                 continue
-            raw_name = part.get_filename() or "attachment"
+            raw_name = part.get_filename()
+            # An inline part with no filename is the body, not a document. Only real
+            # attachments keep the old fallback name, so nothing that worked before
+            # changes shape.
+            if not raw_name:
+                if disposition != "attachment":
+                    continue
+                raw_name = "attachment"
             name = os.path.basename(raw_name.replace("\\", "/"))
             name = re.sub(r"[^A-Za-z0-9._-]", "_", name).lstrip(".") or "attachment"
             suffix = os.path.splitext(name)[1].lower()

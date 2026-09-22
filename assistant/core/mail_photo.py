@@ -46,7 +46,8 @@ Report only what you can actually SEE. This is a phone photo, so glare, folds an
 are expected. If a value is unreadable or cut off, say null -- never guess at a number,
 an account number or a date. A wrong figure here ends up in his finances.
 
-Return ONE JSON object, no prose around it, with these keys:
+Reply with ONLY the JSON object. Start at the opening brace, explain nothing,
+reason about nothing. These are the keys:
 
   "sender"        the organisation that sent it, as printed, or null
   "kind"          one of: bill, statement, tax, legal, collection, government, medical,
@@ -180,7 +181,13 @@ def read_photo(bridge, image_bytes: bytes) -> dict:
         job = bridge.run_sync(
             "mail", "vision", PROMPT,
             images=[base64.b64encode(image_bytes).decode()],
-            options={"num_predict": 2048, "num_ctx": 8192})
+            options={"num_predict": 2048, "num_ctx": 8192},
+            # CONSTRAINED, not requested. Reading the same photograph twice, this model
+            # returned clean JSON once and 8000 characters of reasoning without a single
+            # brace the next time -- it talked itself through every field in prose and ran
+            # out of tokens before it got to the answer. No prompt wording survives that;
+            # Ollama's format=json does.
+            fmt="json")
     except Exception as exc:                                        # noqa: BLE001
         logger.exception("mail photo: vision call failed")
         return {"parsed": False, "error": str(exc)[:200], "raw": ""}
@@ -435,7 +442,8 @@ def run_inbox_scan_once(db_path: str, mail_client, bridge, owner_user_id: int,
         scanned += 1
         with tempfile.TemporaryDirectory() as tmp:
             try:
-                result = mail_client.save_attachments(uid, tmp, folder=folder)
+                result = mail_client.save_attachments(
+                    uid, tmp, folder=folder, include_inline=True)
             except Exception:
                 logger.exception("mail photo scan: could not fetch attachments for %s", uid)
                 continue                        # unmarked on purpose: retry next pass

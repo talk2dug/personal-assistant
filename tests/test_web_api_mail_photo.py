@@ -29,7 +29,10 @@ class FakeBridge:
     def __init__(self, result=GOOD, status="done"):
         self.result, self.status = result, status
 
-    def run_sync(self, lane, kind, prompt, images=None, options=None):
+    def run_sync(self, lane, kind, prompt, images=None, options=None, fmt=None):
+        # The reader must CONSTRAIN the reply to JSON, not ask for it: the same
+        # photo once produced 8000 characters of prose with no brace in it.
+        assert fmt == "json", "the mail reader must demand json"
         return {"status": self.status, "result": self.result, "error": None}
 
 

@@ -28,7 +28,10 @@ class FakeBridge:
         self.result, self.status, self.error = result, status, error
         self.calls = []
 
-    def run_sync(self, lane, kind, prompt, images=None, options=None):
+    def run_sync(self, lane, kind, prompt, images=None, options=None, fmt=None):
+        # The reader must CONSTRAIN the reply to JSON, not ask for it: the same
+        # photo once produced 8000 characters of prose with no brace in it.
+        assert fmt == "json", "the mail reader must demand json"
         self.calls.append({"lane": lane, "kind": kind, "images": images})
         if isinstance(self.result, Exception):
             raise self.result
@@ -189,8 +192,12 @@ class TestTheEmailRoute:
         def list_recent(self, folder="INBOX", limit=10):
             return {"emails": self.emails}
 
-        def save_attachments(self, uid, out_dir, folder="INBOX"):
+        def save_attachments(self, uid, out_dir, folder="INBOX", include_inline=False):
             import os
+            # The scan must ask for inline parts: iOS Mail sends a photographed
+            # letter inline, not as an attachment, which is why the first real
+            # email arrived and produced nothing.
+            assert include_inline is True, "the scan must accept inline images"
             self.fetched.append(uid)
             if self.explode:
                 raise OSError("imap fell over")

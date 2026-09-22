@@ -253,9 +253,17 @@ class GPUBridge:
 
     def submit(
         self, agent: str, task_type: str, prompt: str, images: list[str] | None = None,
-        options: dict | None = None,
+        options: dict | None = None, fmt: str | None = None,
     ) -> int:
+        """fmt is Ollama's `format` -- pass "json" to CONSTRAIN the reply to valid JSON
+        rather than asking for it politely in the prompt. Worth having: a vision model
+        reading the same photograph returned clean JSON one minute and 8000 characters of
+        reasoning without a single brace the next, and no prompt wording survives that.
+        It is top-level in Ollama's API, not an option, which is why it needs its own
+        parameter instead of riding along in `options`."""
         payload = {"images": images or [], "options": options or {}}
+        if fmt:
+            payload["format"] = fmt
         route = self.task_models.get(task_type) or {}
         with closing(_connect(self.db_path)) as conn:
             cur = conn.execute(
@@ -399,6 +407,8 @@ class GPUBridge:
             }
             if payload.get("images"):
                 body["images"] = payload["images"]
+            if payload.get("format"):
+                body["format"] = payload["format"]
 
             resp = httpx.post(f"{self.host}/api/generate", json=body, timeout=self.request_timeout)
             resp.raise_for_status()
@@ -536,14 +546,14 @@ class GPUBridge:
 
     def run_sync(
         self, agent: str, task_type: str, prompt: str, images: list[str] | None = None,
-        options: dict | None = None, timeout: int = 900,
+        options: dict | None = None, timeout: int = 900, fmt: str | None = None,
     ) -> dict:
         """Submits and waits. For callers that genuinely need the answer inline.
 
         Still goes through the queue rather than jumping it — the whole point of the queue
         is that it holds even when someone is in a hurry, and reservations are respected.
         """
-        job_id = self.submit(agent, task_type, prompt, images, options)
+        job_id = self.submit(agent, task_type, prompt, images, options, fmt=fmt)
         deadline = time.time() + timeout
         while time.time() < deadline:
             self.tick()

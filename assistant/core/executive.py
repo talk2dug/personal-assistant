@@ -49,19 +49,38 @@ def measure_store(db_path: str, owner_user_id: int) -> tuple[float, str]:
     is listed, so tracking it today would report a flat zero caused by a missing
     integration and read as a market verdict. This counts the thing that must move first
     and cannot be faked by activity: four agents can run all week and leave it at zero.
+
+    LIVE MEANS A REAL CHANNEL AGREES. The count requires an external_id -- an id handed
+    back by Etsy, Shopify or Printify -- and not merely status = 'published'. As Jarvis
+    put it to Jack on 2026-09-22: *"published just records your decision internally; it
+    doesn't push to Etsy, Shopify, or anywhere real."* A metric that a status flip can
+    satisfy would have reported this mission WON, and closed it, with not one product
+    for sale anywhere on earth. The number has to be answerable by someone other than us.
     """
     from contextlib import closing
     import sqlite3
     with closing(sqlite3.connect(db_path)) as conn:
         n = conn.execute(
             """SELECT count(*) FROM store_listings
-                WHERE owner_user_id = ? AND status IN ('published', 'on_sale')""",
+                WHERE owner_user_id = ? AND status IN ('published', 'on_sale')
+                  AND external_id IS NOT NULL AND trim(external_id) <> ''""",
+            (owner_user_id,)).fetchone()[0]
+        # Counted apart, because the two mean very different things. Waiting is work
+        # done; claimed-but-unconfirmed is a listing this system believes it published
+        # and no storefront has ever heard of.
+        claimed = conn.execute(
+            """SELECT count(*) FROM store_listings
+                WHERE owner_user_id = ? AND status IN ('published', 'on_sale')
+                  AND (external_id IS NULL OR trim(external_id) = '')""",
             (owner_user_id,)).fetchone()[0]
         drafts = conn.execute(
             """SELECT count(*) FROM store_listings
                 WHERE owner_user_id = ? AND status IN ('draft', 'approved')""",
             (owner_user_id,)).fetchone()[0]
-    return float(n), f"{n} live, {drafts} waiting to go live"
+    note = f"{n} live, {drafts} waiting to go live"
+    if claimed:
+        note += (f", {claimed} marked published but on no real storefront")
+    return float(n), note
 
 
 def measure_crypto(db_path: str, owner_user_id: int) -> tuple[float, str]:
@@ -158,6 +177,158 @@ def decide_remedy(blocker: dict | None, waiting: dict) -> tuple[str | None, str]
                       f"is what needs to run")
 
 
+# --- is the machinery actually working --------------------------------------------
+
+# A worker that fails three times in a day is broken, however many times it also
+# succeeded in between.
+#
+# Counting CONSECUTIVE failures is the obvious rule and it would have missed the bug
+# that prompted this one. The crypto day trader only failed on the runs where it raised
+# a stop, so it never failed twice in a row -- and it still died 83 times over two days
+# while its success rate looked like 84%. Rate inside a window catches that; a streak
+# does not.
+BROKEN_FAILURES = 3
+BROKEN_WINDOW_HOURS = 24
+
+# Both tables mean the same thing and spell it differently: staff_work says 'failed',
+# agent_runs says 'error'. Kept as data rather than two near-identical functions.
+WORKER_SOURCES = (
+    ("employee", """SELECT s.key AS key, s.title AS title, w.status AS status,
+                           w.error AS error, w.started_at AS at
+                      FROM staff_work w JOIN staff s ON s.id = w.staff_id
+                     WHERE w.started_at >= ?"""),
+    ("agent", """SELECT r.agent AS key, r.agent AS title, r.status AS status,
+                        r.summary AS error, r.started_at AS at
+                   FROM agent_runs r
+                  WHERE r.started_at >= ?"""),
+)
+
+FAILED_STATUSES = ("failed", "error")
+
+
+def broken_workers(db_path: str, now: datetime | None = None,
+                   window_hours: float = BROKEN_WINDOW_HOURS,
+                   threshold: int = BROKEN_FAILURES) -> list[dict]:
+    """Every scheduled worker that is failing repeatedly, worst first.
+
+    This is the half of "keep the missions moving" that was missing. The mission loop
+    below watches NUMBERS, and a number can keep moving while the machinery producing it
+    is broken: crypto P&L drifted from $51 to $55 across the same two days the day trader
+    was crashing on every stop raise, because the positions it had already opened went on
+    closing themselves. Nothing was stalled, so nothing was diagnosed, so the only thing
+    that ever mentioned it was a single text that nobody owned.
+
+    Reports the most common error rather than the most recent: 83 KeyErrors and one
+    unrelated timeout is one problem, and naming the timeout would send him after the
+    wrong thing.
+    """
+    from collections import Counter
+    from contextlib import closing
+    import sqlite3
+
+    now = now or _now()
+    since = (now - timedelta(hours=window_hours)).isoformat()
+    out = []
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        for kind, sql in WORKER_SOURCES:
+            try:
+                rows = [dict(r) for r in conn.execute(sql, (since,))]
+            except sqlite3.OperationalError:
+                # A deployment that has never run one of the two kinds has no table.
+                continue
+            by_key: dict = {}
+            for row in rows:
+                by_key.setdefault(row["key"], []).append(row)
+            for key, runs in by_key.items():
+                bad = [r for r in runs
+                       if (r["status"] or "").lower() in FAILED_STATUSES]
+                if len(bad) < threshold:
+                    continue
+                errors = Counter((r["error"] or "unrecorded").strip()[:120] for r in bad)
+                error, hits = errors.most_common(1)[0]
+                out.append({
+                    "kind": kind, "key": key,
+                    "title": runs[0]["title"] or key,
+                    "failures": len(bad), "runs": len(runs),
+                    "error": error, "same_error": hits,
+                    "first": min(r["at"] for r in bad),
+                    "last": max(r["at"] for r in bad),
+                })
+    out.sort(key=lambda w: w["failures"], reverse=True)
+    return out
+
+
+def health_report(worker: dict) -> str:
+    """One sentence he can act on: what broke, how often, and since when.
+
+    The failure COUNT next to the run count is the part that matters. "Failing" invites
+    the reasonable assumption that it is down; "83 of 529 runs" says it is limping, which
+    is a different and much easier thing to ignore for two days.
+    """
+    share = f"{worker['failures']} of {worker['runs']} runs"
+    span = worker["first"][:16].replace("T", " ")
+    return (f"{worker['title']} is failing: {share} in the last "
+            f"{BROKEN_WINDOW_HOURS:.0f}h, {worker['same_error']} of them with "
+            f"{worker['error']}, starting {span}Z.")
+
+
+def _open_health_task(db_path: str, owner_user_id: int, key: str):
+    """The still-open task already raised for this worker, if any."""
+    from . import personal_db
+
+    marker = _HEALTH_MARKER % key
+    try:
+        tasks = personal_db.list_tasks(db_path, owner_user_id, status="open")
+    except Exception:
+        logger.exception("could not read tasks while checking worker health")
+        return None
+    for task in tasks:
+        if marker in (task.get("text") or ""):
+            return task
+    return None
+
+
+# Carried in the task text so the next tick can find its own task again. Ugly, and the
+# alternative is a table whose only column is this string.
+_HEALTH_MARKER = "[worker:%s]"
+
+
+def watch_workers(db_path: str, owner_user_id: int, say=None,
+                  now: datetime | None = None) -> list[dict]:
+    """Notice broken workers, put each on his board once, and tell him once.
+
+    Two channels on purpose, because one of them was the whole problem. A text is how he
+    finds out; a task is how it survives being read on a phone and forgotten. The day
+    trader sent exactly one text in two days -- correctly, since the cooldown is what
+    stops 83 failures becoming 83 texts -- and because nothing else recorded it, that
+    text was the entire institutional memory of the bug.
+    """
+    from . import personal_db
+
+    now = now or _now()
+    handled = []
+    for worker in broken_workers(db_path, now=now):
+        body = health_report(worker)
+        existing = _open_health_task(db_path, owner_user_id, worker["key"])
+        if existing is None:
+            text = (f"Fix {worker['title']}: {worker['same_error']}x {worker['error']} "
+                    f"{_HEALTH_MARKER % worker['key']}")
+            try:
+                personal_db.init_personal_db(db_path)
+                personal_db.create_task(db_path, owner_user_id, text,
+                                        priority="high", track="project")
+            except Exception:
+                logger.exception("could not raise a task for %s", worker["key"])
+        verdict = attention.should_say(db_path, f"worker:{worker['key']}", body,
+                                       priority="high", now=now)
+        if verdict["say"] and say is not None:
+            say(f"worker:{worker['key']}", verdict["body"], "high")
+        handled.append({"worker": worker["key"], "failures": worker["failures"],
+                        "task_existed": existing is not None, "told": verdict["say"]})
+    return handled
+
+
 # --- the tick ---------------------------------------------------------------------
 
 def run_once(db_path: str, owner_user_id: int, run_agent=None, say=None,
@@ -206,7 +377,16 @@ def run_once(db_path: str, owner_user_id: int, run_agent=None, say=None,
         agent_to_run, why = decide_remedy(blocker, waiting)
 
         hours = missions.hours_since_movement(db_path, fresh["id"], now=now)
-        stuck_for = f"{hours:.0f}h" if hours is not None else "as long as it has existed"
+        if missions.has_never_moved(db_path, fresh["id"]):
+            # The clock starts when the mission is created, not when the thing actually
+            # broke, so a mission seeded on a metric that was already dead reports a
+            # tidy "stuck for 19h". The store had been at zero for a week before anyone
+            # was measuring it; saying 19h understates it by six days.
+            stuck_for = "its whole life -- it has never once moved"
+        elif hours is not None:
+            stuck_for = f"{hours:.0f}h"
+        else:
+            stuck_for = "as long as it has existed"
         diagnosis = f"{mission['metric']} stuck at {value} for {stuck_for}: {why}"
 
         acted = False
@@ -243,4 +423,8 @@ def run_once(db_path: str, owner_user_id: int, run_agent=None, say=None,
 
         results.append(outcome)
 
-    return {"at": now.isoformat(), "missions": results}
+    # Missions above measure whether the numbers are moving. This asks the other
+    # question, the one nothing was asking: is the machinery still working at all.
+    workers = watch_workers(db_path, owner_user_id, say=say, now=now)
+
+    return {"at": now.isoformat(), "missions": results, "workers": workers}

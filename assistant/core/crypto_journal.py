@@ -408,6 +408,16 @@ def _opening_link(db_path: str | None, employee_title: str, code: str) -> str:
 def _fill_lines(fills: list[dict], employee_title: str, db_path: str | None) -> list[str]:
     lines = ["", "Filled this run (the ledger's record, not the employee's claim):"]
     for f in fills:
+        if f.get("side") == "raise_stop":
+            # Same fill list, but this one moved a stop rather than a coin. Printed as a
+            # trade it reads "RAISE_STOP 0 ARB @ $0.163 = $0.00", which in a journal he
+            # reads back later looks like a zero-quantity trade rather than the ratchet
+            # doing its job.
+            why = f" -- \"{f['reason']}\"" if f.get("reason") else ""
+            lines.append(f"- STOP RAISED {f.get('code')} {_fmt_price(f.get('from_stop'))} "
+                         f"-> {_fmt_price(f.get('to_stop'))} "
+                         f"(spot {_fmt_price(f.get('price'))}){why}")
+            continue
         realized = f.get("realized")
         tail = ""
         if realized is not None:

@@ -29,6 +29,15 @@ def db(tmp_path):
     return path
 
 
+def _fenced(orders):
+    """Orders the way an employee emits them -- a fenced JSON block in prose, which is
+    what _apply_paper_orders parses."""
+    import json
+
+    return ("Here is the plan.\n\n```json\n"
+            + json.dumps(orders) + "\n```\n")
+
+
 def buy(code, usd, stop=None, target=None, **extra):
     """A well-formed buy. Since exits became mechanical every buy must carry both levels
     and a target at least MIN_REWARD_RISK x the stop distance, so tests that only need a
@@ -331,6 +340,57 @@ class TestTheStopRatchet:
         assert open_rows == 0
         assert row["exit_kind"] == "stop_loss"
         assert row["realized"] > 0, "a stop exit ABOVE entry is the trail paying for itself"
+
+
+class TestReportingARaisedStop:
+    """The ratchet is not a trade, and everything that reads the fill list must know it.
+
+    This is the bug that cost the desk two days. A raise_stop fill carries no qty, usd or
+    fee -- deliberately, so it pays no fee and leaves no phantom buy -- and the execution
+    report formatted every fill as a trade. From the first raise on 2026-09-20 to the fix,
+    83 of the day trader's runs died with KeyError: 'qty', every one of them in the same
+    minute as a stop raise. The ratchet itself worked the whole time: the raise commits
+    before the report is built, so the money-making behaviour survived and only the run
+    reporting it was lost. That is precisely why it stayed invisible.
+    """
+
+    def _raised(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        return paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 189.0,
+                  "reason": "higher low holding"}])
+
+    def test_the_execution_report_survives_a_raised_stop(self, db):
+        from assistant.core import staff
+
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        note, result = staff._apply_paper_orders(
+            db, _fenced([{"side": "raise_stop", "code": "SOL", "stop_loss": 189.0,
+                          "reason": "higher low holding"}]),
+            staff_key="crypto_day_trader_paper_trading")
+        assert result is not None and result["fills"], note
+        assert "STOP RAISED" in note
+        assert "EXECUTION FAILED" not in note
+
+    def test_the_report_says_where_the_stop_moved_to(self, db):
+        """A raise the employee cannot see in the report is one it proposes again next
+        run, and then reads the 'only ever moves up' rejection as the desk refusing it."""
+        from assistant.core import staff
+
+        self._raised(db)
+        note, _ = staff._apply_paper_orders(
+            db, _fenced([{"side": "raise_stop", "code": "SOL", "stop_loss": 194.0}]),
+            staff_key="crypto_day_trader_paper_trading")
+        assert "189" in note and "194" in note
+
+    def test_the_journal_does_not_file_it_as_a_zero_quantity_trade(self, db):
+        from assistant.core import crypto_journal
+
+        fills = self._raised(db)["fills"]
+        lines = crypto_journal._fill_lines(fills, "Crypto Day Trader", db)
+        body = "\n".join(lines)
+        assert "STOP RAISED" in body
+        assert "RAISE_STOP 0" not in body, "printed as a trade it reads as a trade"
 
 
 def test_check_stops_closes_a_position_that_breached_its_stop_loss(db):

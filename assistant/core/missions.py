@@ -221,6 +221,21 @@ def hours_since_movement(db_path: str, mission_id: int,
     return ((now or _now()) - moved).total_seconds() / 3600.0
 
 
+def has_never_moved(db_path: str, mission_id: int) -> bool:
+    """Whether this number has sat at its opening value since the day it was first read.
+
+    Readings are only written when the value CHANGES, so one row means one value, ever.
+    Worth its own question because the stall clock necessarily starts when the mission is
+    created rather than when the thing broke: a mission defined over a metric that was
+    already dead reports a reasonable-sounding "stuck for 19h" for something that has
+    never worked at all. The hours are true and the impression they give is not.
+    """
+    with closing(_connect(db_path)) as conn:
+        n = conn.execute("SELECT count(*) FROM mission_readings WHERE mission_id = ?",
+                         (mission_id,)).fetchone()[0]
+    return n == 1
+
+
 def is_stalled(db_path: str, mission: dict, now: datetime | None = None) -> bool:
     """Whether this mission has sat still longer than it is allowed to.
 

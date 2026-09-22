@@ -15,7 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from assistant.core import attention, business_db, db as core_db, executive, missions
+from assistant.core import (attention, business_db, db as core_db, executive, missions,
+                            personal_db)
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -27,6 +28,9 @@ def path(tmp_path):
     business_db.init_business_db(p)
     missions.init_missions_db(p)
     attention.init_attention_db(p)
+    # A broken worker now lands on his board as well as on his phone, so the tick needs
+    # somewhere to put a task.
+    personal_db.init_personal_db(p)
     return p
 
 
@@ -234,10 +238,48 @@ class TestTheExecutiveTick:
             for i in range(existing, listings_live):
                 conn.execute(
                     """INSERT INTO store_listings
-                           (owner_user_id, title, status, created_at, updated_at)
-                       VALUES (1,?,?,?,?)""",
-                    (f"thing {i}", "published", NOW.isoformat(), NOW.isoformat()))
+                           (owner_user_id, title, status, channel, external_id,
+                            created_at, updated_at)
+                       VALUES (1,?,?,?,?,?,?)""",
+                    (f"thing {i}", "published", "etsy", f"etsy-{i}",
+                     NOW.isoformat(), NOW.isoformat()))
         executive.seed_missions(path)
+
+    def test_a_number_that_never_moved_is_not_described_as_recently_stuck(self, path):
+        """The stall clock can only start when the mission is created, so a mission
+        defined over something that was ALREADY dead reports a tidy "stuck for 30h".
+        True, and it understated the store by a week. Say which it is."""
+        self._seed_store(path)
+        self._chain_state(path)
+        said = []
+        executive.run_once(path, 1, now=NOW)
+        executive.run_once(path, 1, say=lambda topic, body, pr: said.append(body),
+                           now=NOW + timedelta(hours=30))
+        store = [b for b in said if "Store" in b]
+        assert store, said
+        assert "never once moved" in store[0]
+        assert "for 30h" not in store[0]
+
+    def test_a_listing_no_storefront_has_heard_of_is_not_live(self, path):
+        """The metric has to be answerable by someone other than us.
+
+        'published' is this system recording Jack's decision; it pushes to nothing. A
+        count that a status flip could satisfy would have reported the store mission WON
+        -- ten products live, target met, mission closed -- with not one thing for sale
+        anywhere. Jarvis said it plainly on 2026-09-22: "published just records your
+        decision internally."
+        """
+        import sqlite3
+        self._seed_store(path)
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                """INSERT INTO store_listings
+                       (owner_user_id, title, status, created_at, updated_at)
+                   VALUES (1,?,?,?,?)""",
+                ("claimed", "published", NOW.isoformat(), NOW.isoformat()))
+        value, note = executive.measure_store(path, 1)
+        assert value == 0.0
+        assert "marked published but on no real storefront" in note
 
     def test_it_fixes_what_it_can_before_it_says_anything(self, path, monkeypatch):
         """The half he has never had. A stall that Jarvis can clear itself should cost
@@ -301,3 +343,138 @@ class TestTheExecutiveTick:
         executive.run_once(path, 1, now=NOW)
         out = executive.run_once(path, 1, now=NOW + timedelta(hours=30))
         assert out["missions"], "it should still measure and report"
+
+class TestWatchingTheMachinery:
+    """The half that was missing, written from the failure that proved it missing.
+
+    2026-09-20 to 09-22: the crypto day trader died with KeyError: 'qty' on every run
+    that raised a stop -- 83 times over two days, more than half its runs. Nothing
+    noticed. The mission that owns the desk watched realised P&L, which drifted from $51
+    to $55 over the same period because positions opened earlier went on closing
+    themselves, so the number never stalled and the diagnosis never ran. Jack found it by
+    reading a text.
+    """
+
+    def _staff(self, path, key="crypto_day_trader_paper_trading",
+               title="Crypto Day Trader (Paper Trading)"):
+        import sqlite3
+        conn = sqlite3.connect(path)
+        conn.execute("""CREATE TABLE IF NOT EXISTS staff
+                        (id INTEGER PRIMARY KEY, key TEXT, title TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS staff_work
+                        (id INTEGER PRIMARY KEY, staff_id INTEGER, status TEXT,
+                         error TEXT, started_at TEXT)""")
+        conn.execute("INSERT INTO staff (key, title) VALUES (?,?)", (key, title))
+        sid = conn.execute("SELECT id FROM staff WHERE key = ?", (key,)).fetchone()[0]
+        conn.commit()
+        return conn, sid
+
+    def _runs(self, conn, sid, pattern, error="KeyError: 'qty'", start=NOW):
+        """pattern is a string of o (delivered) and x (failed), oldest first."""
+        for i, ch in enumerate(pattern):
+            at = (start - timedelta(hours=len(pattern) - i)).isoformat()
+            conn.execute(
+                "INSERT INTO staff_work (staff_id, status, error, started_at) "
+                "VALUES (?,?,?,?)",
+                (sid, "failed" if ch == "x" else "delivered",
+                 error if ch == "x" else None, at))
+        conn.commit()
+
+    def test_a_worker_that_fails_between_successes_is_still_broken(self, path):
+        """THE test. A streak counter reads oxoxoxox as healthy -- it never fails twice
+        in a row -- and that is exactly the shape the real bug had, because the run only
+        died when it happened to raise a stop."""
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "oxoxoxoxoxox")
+        conn.close()
+        broken = executive.broken_workers(path, now=NOW)
+        assert len(broken) == 1
+        assert broken[0]["failures"] == 6 and broken[0]["runs"] == 12
+
+    def test_a_healthy_worker_is_not_reported(self, path):
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "oooooooooooo")
+        conn.close()
+        assert executive.broken_workers(path, now=NOW) == []
+
+    def test_one_bad_run_is_not_a_broken_worker(self, path):
+        """Everything fails occasionally. Waking him for a single timeout is how a
+        useful signal becomes noise he filters out."""
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "ooooxoooo")
+        conn.close()
+        assert executive.broken_workers(path, now=NOW) == []
+
+    def test_failures_older_than_the_window_do_not_count(self, path):
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "xxxx", start=NOW - timedelta(days=4))
+        conn.close()
+        assert executive.broken_workers(path, now=NOW) == []
+
+    def test_it_names_the_common_error_not_the_latest(self, path):
+        """41 KeyErrors and one unrelated timeout is one problem. Naming the timeout
+        because it happened last sends him after the wrong thing."""
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "xxxx")
+        conn.execute(
+            "INSERT INTO staff_work (staff_id, status, error, started_at) VALUES (?,?,?,?)",
+            (sid, "failed", "TimeoutError", NOW.isoformat()))
+        conn.commit(); conn.close()
+        assert "qty" in executive.broken_workers(path, now=NOW)[0]["error"]
+
+    def test_the_report_gives_the_share_of_runs_not_just_a_count(self, path):
+        """'Failing' sounds like down. '6 of 12 runs' says limping, which is the thing
+        that went unnoticed for two days."""
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "oxoxoxoxoxox")
+        conn.close()
+        line = executive.health_report(executive.broken_workers(path, now=NOW)[0])
+        assert "6 of 12 runs" in line and "qty" in line
+
+    def test_he_is_told_and_it_lands_on_his_board(self, path):
+        """Two channels deliberately. The text is how he finds out; the task is how it
+        survives being read on a phone and forgotten, which is what happened."""
+        from assistant.core import personal_db
+
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "oxoxoxoxoxox")
+        conn.close()
+        said = []
+        out = executive.watch_workers(path, 1, say=lambda t, b, p: said.append((t, b)),
+                                      now=NOW)
+        assert out and out[0]["told"] is True
+        assert said and said[0][0] == "worker:crypto_day_trader_paper_trading"
+        tasks = [t for t in personal_db.list_tasks(path, 1, status="open")
+                 if "crypto_day_trader" in t["text"]]
+        assert len(tasks) == 1
+
+    def test_the_same_break_does_not_raise_a_second_task(self, path):
+        """Hourly, for a bug that takes days to fix, is 40 identical tasks."""
+        from assistant.core import personal_db
+
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "oxoxoxoxoxox")
+        conn.close()
+        for hour in range(4):
+            executive.watch_workers(path, 1, now=NOW + timedelta(hours=hour))
+        tasks = [t for t in personal_db.list_tasks(path, 1, status="open")
+                 if "crypto_day_trader" in t["text"]]
+        assert len(tasks) == 1
+
+    def test_it_stops_saying_it_once_he_has_heard(self, path):
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "oxoxoxoxoxox")
+        conn.close()
+        said = []
+        for minute in (0, 5, 10):
+            executive.watch_workers(path, 1, say=lambda t, b, p: said.append(b),
+                                    now=NOW + timedelta(minutes=minute))
+        assert len(said) == 1, "the cooldown is what stopped 83 failures becoming 83 texts"
+
+    def test_the_tick_reports_workers_alongside_missions(self, path):
+        conn, sid = self._staff(path)
+        self._runs(conn, sid, "oxoxoxoxoxox")
+        conn.close()
+        executive.seed_missions(path)
+        out = executive.run_once(path, 1, now=NOW)
+        assert out["workers"] and out["workers"][0]["failures"] == 6

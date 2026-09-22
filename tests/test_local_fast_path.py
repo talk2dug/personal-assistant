@@ -313,3 +313,72 @@ def test_get_entity_state_style_read_only_call_also_works(db_path, owner_id):
     result = local_fast_path.try_home_assistant_fast_path(llm, ha, db_path, owner_id, "is the kitchen stove light on")
 
     assert result == "Kitchen Stove 1 is currently off, sir."
+
+
+class TestSeveralCallsForOneRequest:
+    """The same sentence must not be fast one night and slow the next.
+
+    Measured on his own history: "Turn the living lights on" was answered in 0.0s on
+    09-19 and took 12.3s on 09-20. Nothing changed but the local model's shape -- one
+    call carrying three entity_ids, or three separate calls -- and only the first shape
+    was accepted. Half his light commands fell through to the slow path this way.
+    """
+
+    def _msg(self, calls):
+        return {"role": "assistant", "content": "",
+                "tool_calls": [{"function": {"name": n, "arguments": a}} for n, a in calls]}
+
+    def test_the_same_service_on_several_entities_becomes_one_call(self):
+        msg = self._msg([
+            ("call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.a"}),
+            ("call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.b"}),
+            ("call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.c"}),
+        ])
+        name, args = local_fast_path._extract_single_tool_call(msg)
+        assert name == "call_service"
+        assert args["entity_id"] == ["light.a", "light.b", "light.c"]
+        assert local_fast_path._deterministic_action_reply(args) == "All 3 turned on, sir."
+
+    def test_a_single_call_is_untouched(self):
+        msg = self._msg([("call_service", {"domain": "light", "service": "turn_on",
+                                           "entity_id": ["light.a", "light.b"]})])
+        name, args = local_fast_path._extract_single_tool_call(msg)
+        assert name == "call_service" and args["entity_id"] == ["light.a", "light.b"]
+
+    def test_duplicated_entities_are_not_actioned_twice(self):
+        msg = self._msg([
+            ("call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.a"}),
+            ("call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.a"}),
+        ])
+        _, args = local_fast_path._extract_single_tool_call(msg)
+        assert args["entity_id"] == ["light.a"]
+
+    def test_two_different_requests_still_go_to_the_main_path(self):
+        """'Lights on and set the thermostat' is two intentions, not one merged action."""
+        msg = self._msg([
+            ("call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.a"}),
+            ("call_service", {"domain": "climate", "service": "set_temperature",
+                              "entity_id": "climate.hall"}),
+        ])
+        assert local_fast_path._extract_single_tool_call(msg) is None
+
+    def test_conflicting_arguments_are_never_merged(self):
+        """Merging these would apply one call's brightness to a light he never said it for."""
+        msg = self._msg([
+            ("call_service", {"domain": "light", "service": "turn_on",
+                              "entity_id": "light.a", "brightness_pct": 5}),
+            ("call_service", {"domain": "light", "service": "turn_on",
+                              "entity_id": "light.b", "brightness_pct": 100}),
+        ])
+        assert local_fast_path._extract_single_tool_call(msg) is None
+
+    def test_a_sensitive_domain_is_never_merged_here(self):
+        msg = self._msg([
+            ("call_service", {"domain": "lock", "service": "unlock", "entity_id": "lock.front"}),
+            ("call_service", {"domain": "lock", "service": "unlock", "entity_id": "lock.back"}),
+        ])
+        assert local_fast_path._extract_single_tool_call(msg, {"lock"}) is None
+
+    def test_no_tool_calls_is_still_a_fall_through(self):
+        assert local_fast_path._extract_single_tool_call(
+            {"role": "assistant", "content": "I'm not sure."}) is None

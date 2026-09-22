@@ -67,18 +67,65 @@ def _deterministic_action_reply(arguments: dict) -> str:
     return f"{phrase.capitalize()}, sir."
 
 
-def _extract_single_tool_call(message) -> tuple[str, dict] | None:
-    """Returns (name, arguments) if the model made exactly one well-formed tool call,
-    else None. Same dict-style access as engine.handle_message's own Ollama tool loop
-    (message.get("tool_calls"), call["function"]) -- proven shape for this backend."""
+def _extract_single_tool_call(message, sensitive_domains=()) -> tuple[str, dict] | None:
+    """One (name, arguments) from a model that may have emitted several tool calls.
+
+    Same dict-style access as engine.handle_message's own Ollama tool loop
+    (message.get("tool_calls"), call["function"]) -- proven shape for this backend.
+
+    Several calls are merged rather than refused when they are plainly one request. The
+    local model is not consistent about shape: "turn the living lights on" comes back as
+    one call carrying three entity_ids on one pass and as three separate calls on the
+    next, and refusing the second shape sent an identical sentence down the slow path at
+    random. Measured on his own history, the same request took 0.0s one night and 12.3s
+    the next, which is worse than being reliably slow -- he cannot build a habit on it.
+
+    Merging is deliberately narrow: same tool, same domain, same service, and every
+    argument except entity_id identical, so "all the lights on" merges and "lights on and
+    set the thermostat" still falls through to the main path to be reasoned about
+    properly. A sensitive domain never merges, for the same reason it is never actioned
+    here at all.
+    """
     tool_calls = message.get("tool_calls")
-    if not tool_calls or len(tool_calls) != 1:
+    if not tool_calls:
         return None
-    fn = tool_calls[0]["function"]
-    name, arguments = fn.get("name"), fn.get("arguments")
-    if not name or not isinstance(arguments, dict):
+
+    parsed: list[tuple[str, dict]] = []
+    for call in tool_calls:
+        fn = (call.get("function") or {}) if hasattr(call, "get") else call["function"]
+        name, arguments = fn.get("name"), fn.get("arguments")
+        if not name or not isinstance(arguments, dict):
+            return None
+        parsed.append((name, arguments))
+
+    if len(parsed) == 1:
+        return parsed[0]
+
+    if {name for name, _ in parsed} != {"call_service"}:
         return None
-    return name, arguments
+    targets = {(a.get("domain"), a.get("service")) for _, a in parsed}
+    if len(targets) != 1:
+        return None
+    domain, _service = next(iter(targets))
+    if domain in sensitive_domains:
+        return None
+    # Everything except the entities must agree, or merging would silently apply one
+    # call's brightness or colour to entities the model did not ask it for.
+    rest = {tuple(sorted((k, repr(v)) for k, v in a.items() if k != "entity_id"))
+            for _, a in parsed}
+    if len(rest) != 1:
+        return None
+
+    entities: list = []
+    for _, a in parsed:
+        got = a.get("entity_id")
+        entities.extend(got if isinstance(got, list) else [got] if got else [])
+    if not entities:
+        return None
+    seen = set()
+    merged = dict(parsed[0][1])
+    merged["entity_id"] = [e for e in entities if not (e in seen or seen.add(e))]
+    return "call_service", merged
 
 
 def try_home_assistant_fast_path(
@@ -124,9 +171,9 @@ def try_home_assistant_fast_path(
         logger.debug("HA fast path: local model call failed, falling back", exc_info=True)
         return None
 
-    call = _extract_single_tool_call(message)
+    call = _extract_single_tool_call(message, home_assistant.sensitive_domains)
     if call is None:
-        return None  # zero or multiple tool calls -- not confident, let the main path reason properly
+        return None  # nothing confident enough to act on -- let the main path reason properly
     name, arguments = call
     if name not in home_assistant.tool_names:
         return None

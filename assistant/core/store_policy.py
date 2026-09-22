@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 RATE_KEY = "store.products_per_day"
 AUTOPUBLISH_KEY = "store.autopublish"
+GO_LIVE_KEY = "store.go_live"
 HISTORY_KEY = "store.policy_history"
 
 DEFAULT_PER_DAY = 1
@@ -96,6 +97,34 @@ def set_autopublish(db_path: str, enabled: bool, *, changed_by: str = "owner",
     return {"previous": previous, "autopublish": bool(enabled)}
 
 
+def go_live(db_path: str) -> bool:
+    """Whether a staged product may be put ON SALE without asking him first.
+
+    Distinct from `autopublish`, and deliberately not the same switch. Autopublish means
+    "do not make me approve every stage of your own pipeline" -- his words: *"I dont need
+    to approve what they make or sell."* This one governs the single step where a thing
+    stops being a draft in a tool he owns and becomes something a stranger can buy under
+    his brand name. Creating a Printify product is reversible with one call; the listing
+    going live is not, and overloading one flag to mean both would hide that difference.
+
+    Defaults OFF. Turning it on is one sentence to Jarvis.
+    """
+    try:
+        raw = core_db.get_setting(db_path, GO_LIVE_KEY)
+    except sqlite3.OperationalError:
+        return False
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def set_go_live(db_path: str, enabled: bool, *, changed_by: str = "owner",
+                reason: str | None = None) -> dict:
+    previous = go_live(db_path)
+    core_db.set_setting(db_path, GO_LIVE_KEY, "1" if enabled else "0")
+    _record(db_path, {"at": _now(), "field": "go_live", "from": previous,
+                      "to": bool(enabled), "by": changed_by, "reason": reason})
+    return {"previous": previous, "go_live": bool(enabled)}
+
+
 def _record(db_path: str, entry: dict) -> None:
     history = policy_history(db_path)
     history.insert(0, entry)
@@ -122,6 +151,7 @@ def current(db_path: str) -> dict:
         "products_per_day": rate,
         "paused": rate == 0,
         "autopublish": autopublish(db_path),
+        "go_live": go_live(db_path),
         "max_per_day": MAX_PER_DAY,
         "marketing_budget_cents": budget,
         "marketing_is_free_only": budget <= 0,

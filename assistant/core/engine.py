@@ -1640,6 +1640,27 @@ def _dispatch_tool_call(
         except ValueError as e:
             return json.dumps({"error": str(e)})
         return json.dumps({"ok": True, "camera": camera["name"], "location": camera["location"]})
+    if name == "publish_store_products":
+        # The last mile. Everything upstream of this produced rows; this is what makes
+        # something a person can actually buy.
+        from . import store_publish
+        from .printify_client import PrintifyClient
+
+        try:
+            result = store_publish.publish_approved(
+                db_path, owner_user_id, PrintifyClient(db_path),
+                live=bool(arguments.get("go_live")),
+                limit=int(arguments.get("limit") or 5))
+        except Exception as e:                                      # noqa: BLE001
+            return json.dumps({"error": f"{type(e).__name__}: {e}"})
+        return json.dumps(result)
+
+    if name == "set_store_go_live":
+        from . import store_policy
+        return json.dumps(store_policy.set_go_live(
+            db_path, bool(arguments.get("enabled")), changed_by="owner",
+            reason=arguments.get("reason")))
+
     if name == "set_store_rate":
         # His dial, changed by talking. See store_policy for why it is a setting rather
         # than config: "make it three a day" cannot require an editor and a restart.

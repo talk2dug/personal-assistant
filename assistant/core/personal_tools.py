@@ -485,6 +485,21 @@ PERSONAL_TOOLS = [
         }, "required": []},
     }},
     {"type": "function", "function": {
+        "name": "sync_dispute_letters",
+        "description": (
+            "Ask LetterStream what actually happened to his dispute letters and update "
+            "our record to match. Run this BEFORE telling him anything about whether a "
+            "letter was sent — our status only ever reflected what Jarvis itself did, so "
+            "a letter he paid for on LetterStream's own site still reads 'quoted' here "
+            "and contradicting him about it is exactly the failure this exists to "
+            "prevent. Also run it after an authorize call comes back saying already "
+            "submitted, and whenever he asks where a dispute stands. Free and read-only "
+            "at LetterStream's end; it mails nothing. Returns what changed, with "
+            "tracking numbers and the 30-day reply deadline."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "get_mail",
         "description": (
             "The physical post he has photographed and emailed in: who sent it, what it "
@@ -1209,6 +1224,14 @@ class PersonalClient:
             return leonardo.import_generations(
                 db_path, owner, client, self.generated_media_path,
                 max_images=int(arguments.get("max_images") or 500))
+
+        if name == "sync_dispute_letters":
+            from . import letter_sync
+
+            if self.letterstream is None:
+                return {"error": "LetterStream is not configured"}
+            client = getattr(self.letterstream, "client", self.letterstream)
+            return letter_sync.sync(db_path, owner, client)
 
         if name == "get_mail":
             # The picture is the record and the reading is a guess -- both go to the

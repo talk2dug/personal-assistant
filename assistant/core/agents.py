@@ -544,6 +544,12 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                 db_path, owner_user_id, title=concept["name"], concept_id=concept["id"],
                 style_direction=brief.get("style_direction"), image_prompt=options[0]["body"],
                 negative_prompt=NEGATIVE_PROMPT, aspect=aspect, notes=brief.get("notes"),
+                # The picture, not just the words that asked for it. When autopublish is
+                # on, file_for_review advances the brief without writing a card, so the
+                # options below -- and the images in them -- are dropped. This is the only
+                # thing that survives that path, and nothing downstream can print a
+                # product from a prompt.
+                media_path=options[0].get("media_path"),
             )
             business_db.create_review_item(
                 db_path, owner_user_id, f"Art direction: {concept['name']}", kind="art",

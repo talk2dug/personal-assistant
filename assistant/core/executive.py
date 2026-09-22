@@ -337,10 +337,34 @@ def watch_workers(db_path: str, owner_user_id: int, say=None,
     return handled
 
 
+def stage_store_products(db_path: str, owner_user_id: int, printify=None,
+                         limit: int = 5) -> dict:
+    """Turn approved listings into real products, ready to go on sale.
+
+    The last mile the pipeline never had. Staging is reversible -- a Printify product
+    that has not been published is a draft nobody can buy, and deleting it is one call --
+    so this runs unattended like every other stage. Whether any of it actually goes ON
+    SALE is a separate switch (store_policy.go_live), because that step is the one that
+    cannot be taken back.
+    """
+    from . import store_policy, store_publish
+
+    if printify is None:
+        return {"ok": False, "why": "Printify is not configured", "made": [], "blocked": []}
+    try:
+        return store_publish.publish_approved(
+            db_path, owner_user_id, printify,
+            live=store_policy.go_live(db_path), limit=limit)
+    except Exception as exc:                                        # noqa: BLE001
+        logger.exception("staging store products failed")
+        return {"ok": False, "why": f"{type(exc).__name__}: {exc}",
+                "made": [], "blocked": []}
+
+
 # --- the tick ---------------------------------------------------------------------
 
 def run_once(db_path: str, owner_user_id: int, run_agent=None, say=None,
-             now: datetime | None = None) -> dict:
+             now: datetime | None = None, printify=None) -> dict:
     """Measure every mission, act on the stalled ones, escalate what it cannot fix.
 
     `run_agent(name) -> dict` runs one business agent; without it nothing is actuated and
@@ -435,4 +459,9 @@ def run_once(db_path: str, owner_user_id: int, run_agent=None, say=None,
     # question, the one nothing was asking: is the machinery still working at all.
     workers = watch_workers(db_path, owner_user_id, say=say, now=now)
 
-    return {"at": now.isoformat(), "missions": results, "workers": workers}
+    # And the last mile: approved listings become real products. Nothing here goes on
+    # sale unless store_policy.go_live says so.
+    staged = stage_store_products(db_path, owner_user_id, printify) if printify else None
+
+    return {"at": now.isoformat(), "missions": results, "workers": workers,
+            "staged": staged}

@@ -139,6 +139,41 @@ REQUEST_CAPABILITY_TOOLS = [
 
 STORE_POLICY_TOOLS = [
     {"type": "function", "function": {
+        "name": "publish_store_products",
+        "description": (
+            "Turn approved listings into REAL products on his Printify/Shopify store. "
+            "This is the step that was missing for weeks: before it, 'published' only "
+            "wrote a row in our own database and pushed to nothing, which is why the "
+            "store had listings and no sales. Run it when he asks why nothing is "
+            "selling, or asks to put products up. By default it STAGES them -- a "
+            "Printify product nobody can buy yet -- and tells him what was made and what "
+            "was blocked. Pass go_live only if he has actually said to put them on sale: "
+            "staging is reversible, going on sale under his brand is not. Tell him the "
+            "blocked ones and why, because that is usually a concept whose artwork was "
+            "never rendered."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "go_live": {"type": "boolean",
+                        "description": "Actually put them on sale. Only if he said so."},
+            "limit": {"type": "integer", "description": "How many to do. Default 5."},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "set_store_go_live",
+        "description": (
+            "Turn on or off whether the store may put new products ON SALE by itself. "
+            "Off by default. This is NOT the same as the approval setting: that one is "
+            "about whether he approves each stage of the team's own work, this one is "
+            "about whether a finished product becomes something a stranger can buy under "
+            "his brand without him seeing it. Only change it when he says so."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "enabled": {"type": "boolean"},
+            "reason": {"type": "string",
+                       "description": "What he said, in a few words, for the dashboard."},
+        }, "required": ["enabled"]},
+    }},
+    {"type": "function", "function": {
         "name": "set_store_rate",
         "description": (
             "Change how many products the store launches per day, when Jack says so in "
@@ -1109,6 +1144,12 @@ def apply_review_decision(db_path: str, owner: int, item: dict, decision: str, s
                            if o.get("chosen") and o.get("body")), None)
             if target == "approved" and chosen:
                 business_db.set_art_brief_prompt(db_path, owner, ref_id, chosen["body"])
+                # And the image itself, not only the prompt behind it. Adopting one
+                # without the other leaves the brief describing the picture he chose and
+                # pointing at the picture he did not.
+                if chosen.get("media_path"):
+                    business_db.set_art_brief_media(db_path, owner, ref_id,
+                                                    chosen["media_path"])
         elif ref_table == "store_listings":
             business_db.update_store_listing(db_path, owner, ref_id, status=target)
         elif ref_table == "social_posts":

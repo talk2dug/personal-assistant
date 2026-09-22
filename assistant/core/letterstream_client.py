@@ -236,7 +236,23 @@ class LetterStreamTools:
             return {"job": job, "doc_id": f"{job}-0", **result}
 
         if name == "letterstream_authorize_mail":
-            return self.client.authorize(arguments["authcode"])
+            try:
+                return self.client.authorize(arguments["authcode"])
+            except LetterStreamError as exc:
+                from . import letter_sync
+
+                if not letter_sync.already_submitted(exc):
+                    raise
+                # -960 reads as a failure and means the opposite: this job is already
+                # released into production. Jack paid for three letters on LetterStream's
+                # own site, told Jarvis to authorize them, and got an error for work that
+                # was already done. Saying so plainly is the whole fix.
+                return {"ok": True, "already_submitted": True,
+                        "message": ("This letter was already submitted to LetterStream "
+                                    "and is in production — most likely paid for "
+                                    "directly on their site. Nothing was charged twice. "
+                                    "Run letterstream_sync_letters to pull its tracking "
+                                    "number and reply deadline.")}
 
         if name == "letterstream_track_mail":
             return self.client.track(cert=arguments.get("tracking_number"),
@@ -245,5 +261,10 @@ class LetterStreamTools:
 
         if name == "letterstream_account_balance":
             return self.client.account_status()
+
+        if name == "letterstream_doc_status":
+            from . import letter_sync
+
+            return letter_sync.status_of(self.client, arguments.get("doc_ids") or [])
 
         return {"error": f"unknown letterstream tool {name}"}

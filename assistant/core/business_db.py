@@ -151,6 +151,9 @@ CREATE TABLE IF NOT EXISTS art_briefs (
     negative_prompt TEXT,
     aspect TEXT,
     notes TEXT,
+    -- The rendered image this brief settled on. A prompt cannot be printed on a
+    -- t-shirt; something downstream has to be able to find the actual file.
+    media_path TEXT,
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'rendered', 'rejected')),
     created_at TEXT NOT NULL
 );
@@ -712,18 +715,48 @@ def create_art_brief(
     db_path: str, owner_user_id: int, title: str, concept_id: int | None = None,
     style_direction: str | None = None, image_prompt: str | None = None,
     negative_prompt: str | None = None, aspect: str | None = None, notes: str | None = None,
+    media_path: str | None = None,
 ) -> int:
+    """`media_path` is the rendered image this brief settled on.
+
+    It matters because the picture used to be reachable only through the review card's
+    options, and when autopublish is on no card is filed at all -- so every image the art
+    director rendered was orphaned the moment it was made. A product cannot be printed
+    with a prompt; something downstream has to be able to find the actual file.
+    """
+    ensure_art_brief_media(db_path)
     with closing(_connect(db_path)) as conn:
         cur = conn.execute(
             """INSERT INTO art_briefs
                (owner_user_id, concept_id, title, style_direction, image_prompt, negative_prompt,
-                aspect, notes, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                aspect, notes, media_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (owner_user_id, concept_id, title, style_direction, image_prompt, negative_prompt,
-             aspect, notes, _now()),
+             aspect, notes, media_path, _now()),
         )
         conn.commit()
         return cur.lastrowid
+
+
+def ensure_art_brief_media(db_path: str) -> None:
+    """Add art_briefs.media_path to a database that predates it. Cheap and idempotent."""
+    with closing(_connect(db_path)) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(art_briefs)")}
+        if "media_path" not in cols:
+            conn.execute("ALTER TABLE art_briefs ADD COLUMN media_path TEXT")
+            conn.commit()
+
+
+def set_art_brief_media(db_path: str, owner_user_id: int, brief_id: int,
+                        media_path: str) -> bool:
+    """Point the brief at the image that actually won."""
+    ensure_art_brief_media(db_path)
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "UPDATE art_briefs SET media_path = ? WHERE id = ? AND owner_user_id = ?",
+            (media_path, brief_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def list_art_briefs(db_path: str, owner_user_id: int, status: str | None = None, limit: int = 25):
@@ -798,10 +831,30 @@ def list_store_listings(db_path: str, owner_user_id: int, status: str | None = N
         return _rows(conn.execute(query, params))
 
 
+def get_store_listing(db_path: str, owner_user_id: int, listing_id: int) -> dict | None:
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM store_listings WHERE id = ? AND owner_user_id = ?",
+            (listing_id, owner_user_id)).fetchone()
+    return dict(row) if row else None
+
+
+def get_concept(db_path: str, owner_user_id: int, concept_id: int) -> dict | None:
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM product_concepts WHERE id = ? AND owner_user_id = ?",
+            (concept_id, owner_user_id)).fetchone()
+    return dict(row) if row else None
+
+
 def update_store_listing(db_path: str, owner_user_id: int, listing_id: int, **fields) -> bool:
     allowed = {
         k: v for k, v in fields.items()
-        if k in ("title", "description", "seo_tags", "price", "status", "external_id", "metrics") and v is not None
+        # `channel` was not writable until 2026-09-22, which is quietly telling: nothing
+        # had ever needed to record WHERE a listing went, because nothing had ever sent
+        # one anywhere.
+        if k in ("title", "description", "seo_tags", "price", "status", "channel",
+                 "external_id", "metrics") and v is not None
     }
     if not allowed:
         return False

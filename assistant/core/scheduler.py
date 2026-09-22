@@ -620,15 +620,50 @@ def start(
                                                           profile, obsidian=mcp)
                     raise ValueError(f"executive may not run {name!r}")
 
+                # The fulfiller, so approved listings can become real products rather
+                # than staying rows in a table nobody can buy from.
+                try:
+                    from .printify_client import PrintifyClient
+
+                    printify = PrintifyClient(db_path)
+                except Exception:                                   # noqa: BLE001
+                    logger.exception("executive: no Printify client")
+                    printify = None
+
                 executive.seed_missions(db_path)
                 executive.run_once(
-                    db_path, owner["id"], run_agent=run_agent,
+                    db_path, owner["id"], run_agent=run_agent, printify=printify,
                     say=lambda topic, body, priority: notify(owner["telegram_chat_id"], body))
 
             scheduler.add_job(
                 _guarded_simple("executive", _executive_tick), "interval", hours=1,
                 id="executive", next_run_time=datetime.now(timezone.utc) + timedelta(minutes=3),
             )
+
+            # What actually happened to his letters, rather than what we did to them.
+            # Jack pays for dispute letters on LetterStream's own site, which this system
+            # had no way to see -- so three letters genuinely in production, with real
+            # certified tracking numbers, still read 'quoted' here and Jarvis told him
+            # three times over that nothing had been sent. docstatus is free and mails
+            # nothing, so the only cost of asking is a request, and the cost of not
+            # asking was contradicting him about his own mail.
+            def _letter_sync_tick():
+                from . import letter_sync
+
+                if letterstream is None:
+                    return
+                client = getattr(letterstream, "client", letterstream)
+                result = letter_sync.sync(db_path, owner["id"], client)
+                for change in result.get("changed", []):
+                    logger.info("letter %s -> %s (%s)", change["letter_id"],
+                                change.get("to"), change.get("tracking"))
+
+            if letterstream is not None:
+                scheduler.add_job(
+                    _guarded_simple("letter_sync", _letter_sync_tick), "interval",
+                    hours=6, id="letter_sync",
+                    next_run_time=datetime.now(timezone.utc) + timedelta(minutes=5),
+                )
 
             def _digest_tick():
                 text = agents.build_digest(db_path, owner["id"], hours=24)

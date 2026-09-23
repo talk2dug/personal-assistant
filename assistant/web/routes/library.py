@@ -11,8 +11,11 @@ category rather than this router re-wrapping them, so there is exactly one place
 owns drive-scan data.
 """
 import json
+import mimetypes
+import pathlib
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from ...core import design_assets, library_assets
 from ..auth import require_owner
@@ -65,6 +68,38 @@ async def categories(request: Request):
     counts = library_assets.category_counts(db, owner["id"])
     counts["design"] = len(design_assets.catalogue(db, owner["id"], status=None, limit=100000))
     return {"counts": counts}
+
+
+@router.get("/assets/{category}/{asset_id}/media")
+async def media(category: str, asset_id: int, request: Request):
+    """Serves an asset's own file -- the preview image the grid/inspector show.
+
+    Same pattern as review.py's media route: the path comes from a database row, so it's
+    resolved and then checked to sit inside generated_media_path before anything is
+    served, so a bad or crafted row can't turn this into an arbitrary-file read. Every
+    design_assets/library_assets writer (leonardo.py, photo_intake.py, the mockup
+    generator) already saves under this same root.
+    """
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    if category == "design":
+        asset = design_assets.get(cfg.db_path, owner["id"], asset_id)
+    elif category in library_assets.CATEGORIES:
+        asset = library_assets.get(cfg.db_path, owner["id"], asset_id)
+    else:
+        raise HTTPException(400, f"category must be one of {ALL_CATEGORIES}")
+    if not asset or not asset.get("path"):
+        raise HTTPException(404, "no file for that asset")
+
+    root = pathlib.Path(cfg.generated_media_path).resolve()
+    path = pathlib.Path(asset["path"]).resolve()
+    if not path.is_file():
+        raise HTTPException(404, "the file is no longer on disk")
+    if root not in path.parents:
+        raise HTTPException(403, "that file is outside the generated media directory")
+
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @router.post("/assets")

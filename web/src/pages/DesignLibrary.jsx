@@ -40,6 +40,14 @@ function fmtBytes(n) {
   return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`
 }
 
+/** Whether a browser can plausibly render this as an <img> -- everything else (STL, audio,
+ * cut-file binaries) still gets a real file at its media URL, it just isn't a preview. */
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'])
+function looksLikeImage(path) {
+  const ext = (path || '').split('.').pop()?.toLowerCase()
+  return IMAGE_EXTENSIONS.has(ext || '')
+}
+
 /** Normalizes a raw row (library_assets row, design_assets row, or a media_scan folder)
  * into the one shape the grid/list/inspector all read from. Nothing else in this file
  * branches on category shape again after this. */
@@ -51,23 +59,43 @@ function normalize(category, row) {
       meta: `${row.file_count} files · ${fmtBytes(row.total_bytes) || '0 B'}`,
       status: row.decision,
       sub: `${row.hostname || row.address || ''} · ${row.label || row.mountpoint || ''}`,
+      previewUrl: null,
+      properties: [],
       raw: row,
     }
   }
   const metaBits = []
   if (row.width && row.height) metaBits.push(`${row.width}×${row.height}`)
   if (row.bytes) metaBits.push(fmtBytes(row.bytes))
+
+  // Properties shown one-per-line in the inspector -- every real column this row
+  // actually carries, not just the ones that happened to exist when this was first
+  // written. design_assets and library_assets each have their own extra fields; only
+  // show a property when the row actually has a value for it.
+  const properties = []
+  const add = (label, value) => { if (value != null && value !== '') properties.push({ label, value }) }
+  add('Source', row.source)
+  add('Format', row.file_format)
+  if (row.is_vector != null) add('Vector', row.is_vector ? 'yes' : 'no')
+  if (row.print_ready != null) add('Print-ready', row.print_ready ? 'yes' : (row.print_ready_note || 'no'))
+  add('Tag status', row.tag_status)
+  add('External ID', row.external_id)
+  add('Times used', row.times_used)
+  add('Added', (row.added_at || '').slice(0, 10))
   if (row.metadata) {
-    for (const [k, v] of Object.entries(row.metadata)) {
-      if (v != null && v !== '') metaBits.push(`${k}: ${v}`)
-    }
+    for (const [k, v] of Object.entries(row.metadata)) add(k, v)
   }
+
   return {
     id: row.id,
     title: row.title || '(untitled)',
     meta: metaBits.join(' · ') || '—',
     status: row.status,
-    sub: row.note || row.source || '',
+    sub: row.note || '',
+    previewUrl: looksLikeImage(row.path)
+      ? `/api/library/assets/${category}/${row.id}/media`
+      : null,
+    properties,
     raw: row,
   }
 }
@@ -103,9 +131,24 @@ function Inspector({ item, category, busy, onDecide, onGenerateMockup }) {
       <div className="dl-inspector-top">
         <span className="dl-inspector-kind">{CATEGORY_META[category].label}</span>
       </div>
+      {item.previewUrl && (
+        <img className="dl-inspector-img" src={item.previewUrl} alt={item.title}
+             onError={(e) => { e.target.style.display = 'none' }} />
+      )}
       <h2 className="dl-inspector-title">{item.title}</h2>
       <div className="dl-inspector-meta">{item.meta}</div>
       {item.sub && <div className="dl-inspector-sub">{item.sub}</div>}
+
+      {item.properties.length > 0 && (
+        <div className="dl-inspector-properties">
+          <span className="dl-inspector-label">Properties</span>
+          {item.properties.map((p) => (
+            <div key={p.label} className="dl-inspector-property">
+              <span>{p.label}</span><span>{String(p.value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="dl-inspector-status">
         <span className="dl-inspector-label">Status</span>
@@ -284,7 +327,11 @@ export default function DesignLibrary() {
               {filtered.map((it) => (
                 <div key={it.id} className={`dl-card ${selected.has(it.id) ? 'is-selected' : ''}`}>
                   <div className="dl-card-thumb">
-                    <span className="dl-card-tag">{CATEGORY_META[category].tag}</span>
+                    {it.previewUrl
+                      ? <img className="dl-card-img" src={it.previewUrl} alt={it.title}
+                             loading="lazy"
+                             onError={(e) => { e.target.style.display = 'none' }} />
+                      : <span className="dl-card-tag">{CATEGORY_META[category].tag}</span>}
                     <input type="checkbox" checked={selected.has(it.id)} onChange={() => toggle(it.id)} />
                     <span className={`dl-card-badge is-${it.status}`}>{it.status}</span>
                   </div>

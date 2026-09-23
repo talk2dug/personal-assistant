@@ -57,6 +57,24 @@ def close(db, code, qty="all"):
         db, [{"side": "sell", "code": code, "qty": qty}], allow_exit=True)
 
 
+def short(code, usd, stop=None, target=None, **extra):
+    """A well-formed short -- the mirror of buy(): stop above price, target below, same
+    2x-reward-to-risk default (risk 10% of price, reward 30%, same ratio buy() uses)."""
+    price = {"BTC": 80_000.0, "SOL": 200.0, "PEPE": 0.000012}[code]
+    order = {"side": "short", "code": code, "usd": usd,
+             "stop_loss": stop if stop is not None else price * 1.1,
+             "take_profit": target if target is not None else price * 0.7}
+    order.update(extra)
+    return order
+
+
+def cover(db, code, qty="all"):
+    """The short-side mirror of close(): force-cover via the exit authority, since the
+    model cannot place one itself either."""
+    return paper_trading.execute_orders(
+        db, [{"side": "cover", "code": code, "qty": qty}], allow_exit=True)
+
+
 def test_buy_deducts_cash_and_fee_and_opens_a_position(db):
     r = paper_trading.execute_orders(db, [buy("SOL", 1000)])
     assert not r["rejections"]
@@ -391,6 +409,41 @@ class TestReportingARaisedStop:
         body = "\n".join(lines)
         assert "STOP RAISED" in body
         assert "RAISE_STOP 0" not in body, "printed as a trade it reads as a trade"
+
+
+class TestReportingALoweredStop:
+    """The exact regression above, pinned for the short side before it can happen: a
+    lower_stop fill also carries no qty/usd/fee, and the same 09-20/09-22 KeyError shape
+    is possible here unless staff.py's and crypto_journal.py's formatters both special-
+    case it the same way they already special-case raise_stop.
+    """
+
+    def _lowered(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+        return paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "SOL", "stop_loss": 211.0,
+                  "reason": "lower high holding"}])
+
+    def test_the_execution_report_survives_a_lowered_stop(self, db):
+        from assistant.core import staff
+
+        paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+        note, result = staff._apply_paper_orders(
+            db, _fenced([{"side": "lower_stop", "code": "SOL", "stop_loss": 211.0,
+                          "reason": "lower high holding"}]),
+            staff_key="crypto_day_trader_paper_trading")
+        assert result is not None and result["fills"], note
+        assert "STOP LOWERED" in note
+        assert "EXECUTION FAILED" not in note
+
+    def test_the_journal_does_not_file_it_as_a_zero_quantity_trade(self, db):
+        from assistant.core import crypto_journal
+
+        fills = self._lowered(db)["fills"]
+        lines = crypto_journal._fill_lines(fills, "Crypto Day Trader", db)
+        body = "\n".join(lines)
+        assert "STOP LOWERED" in body
+        assert "LOWER_STOP 0" not in body, "printed as a trade it reads as a trade"
 
 
 def test_check_stops_closes_a_position_that_breached_its_stop_loss(db):
@@ -884,6 +937,259 @@ class TestMechanicalExits:
         assert "cannot close a position" in out
         # The model is told the numbers behind the rule, not just the rule.
         assert "2.0 hours and losers 8.7 hours" in out
+
+
+class TestShortSelling:
+    """Profiting when a coin falls, not just when it rises -- the mirror of every buy/sell
+    rule above, added alongside it rather than replacing it. Every long-side test in this
+    file must keep passing unmodified; these pin the short side to the same standard.
+    """
+
+    def _move(self, db, code, rate):
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (rate, code))
+        conn.commit(); conn.close()
+
+    def test_opening_a_short_moves_no_cash_at_all(self, db):
+        """No margin/collateral modeling exists here -- nothing has actually settled when
+        a short opens, not even its fee. The fee shows up folded into the cost basis and
+        is only realized (and only then does it touch cash) when the short is covered."""
+        cash_before = paper_trading.portfolio(db)["cash"]
+        r = paper_trading.execute_orders(db, [short("SOL", 500)])
+        assert r["fills"], r["rejections"]
+        assert paper_trading.portfolio(db)["cash"] == pytest.approx(cash_before)
+
+    def test_the_position_is_recorded_as_short_with_positive_qty(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500)])
+        pos = paper_trading.portfolio(db)["positions"][0]
+        assert pos["direction"] == "short"
+        assert pos["qty"] > 0
+
+    def test_a_stop_at_or_below_the_fill_price_is_refused(self, db):
+        r = paper_trading.execute_orders(
+            db, [short("SOL", 500, stop=200.0, target=140.0)])
+        assert not r["fills"]
+        assert "a short's stop must sit above it" in r["rejections"][0]["reason"]
+
+    def test_a_target_at_or_above_the_fill_price_is_refused(self, db):
+        r = paper_trading.execute_orders(
+            db, [short("SOL", 500, stop=220.0, target=200.0)])
+        assert not r["fills"]
+        assert "a short's target must sit below it" in r["rejections"][0]["reason"]
+
+    def test_a_target_worth_less_than_twice_the_risk_is_refused(self, db):
+        # $200 entry, $20 of risk (stop at 220), only $20 of reward (target at 180).
+        r = paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=180.0)])
+        assert not r["fills"]
+        assert "1.00x the risk" in r["rejections"][0]["reason"]
+
+    def test_exactly_two_to_one_is_accepted(self, db):
+        r = paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=160.0)])
+        assert not r["rejections"] and r["fills"]
+
+    def test_a_short_missing_either_level_is_refused(self, db):
+        r = paper_trading.execute_orders(
+            db, [{"side": "short", "code": "SOL", "usd": 500, "stop_loss": 220.0}])
+        assert "take_profit is missing" in r["rejections"][0]["reason"]
+
+    def test_covering_at_a_profit_when_price_falls(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 1000)])  # entry 200
+        self._move(db, "SOL", 150.0)
+        r = cover(db, "SOL")
+        assert r["fills"][0]["realized"] > 0
+
+    def test_covering_at_a_loss_when_price_rises(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 1000, stop=250.0, target=100.0)])
+        self._move(db, "SOL", 230.0)
+        r = cover(db, "SOL")
+        assert r["fills"][0]["realized"] < 0
+
+    def test_cash_effect_of_a_round_trip_equals_realized(self, db):
+        """No proceeds were ever received at open, so the entire cash change across the
+        round trip (fee at open, settlement at cover) must equal the realized figure."""
+        cash_before = paper_trading.portfolio(db)["cash"]
+        paper_trading.execute_orders(db, [short("SOL", 1000)])
+        self._move(db, "SOL", 150.0)
+        r = cover(db, "SOL")
+        realized = r["fills"][0]["realized"]
+        assert paper_trading.portfolio(db)["cash"] == pytest.approx(cash_before + realized)
+
+    def test_check_stops_covers_on_price_rising_to_the_stop(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 1000, stop=220.0, target=140.0)])
+        self._move(db, "SOL", 225.0)
+        r = paper_trading.check_stops(db)
+        assert len(r["fills"]) == 1
+        trade = paper_trading.recent_trades(db, limit=1)[0]
+        assert trade["exit_kind"] == "stop_loss"
+        assert trade["realized"] < 0
+
+    def test_check_stops_covers_on_price_falling_to_the_target(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 1000, stop=220.0, target=140.0)])
+        self._move(db, "SOL", 135.0)
+        r = paper_trading.check_stops(db)
+        assert len(r["fills"]) == 1
+        trade = paper_trading.recent_trades(db, limit=1)[0]
+        assert trade["exit_kind"] == "take_profit"
+        assert trade["realized"] > 0
+
+    def test_a_long_and_a_short_on_the_same_coin_cannot_coexist(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 500)])
+        r = paper_trading.execute_orders(db, [short("SOL", 500)])
+        assert not r["fills"]
+        assert "already long" in r["rejections"][0]["reason"]
+
+    def test_a_buy_is_refused_against_an_open_short(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500)])
+        r = paper_trading.execute_orders(db, [buy("SOL", 500)])
+        assert not r["fills"]
+        assert "already short" in r["rejections"][0]["reason"]
+
+    def test_sell_against_a_short_is_refused(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500)])
+        r = paper_trading.execute_orders(
+            db, [{"side": "sell", "code": "SOL", "qty": "all"}], allow_exit=True)
+        assert not r["fills"]
+        assert "close it with cover" in r["rejections"][0]["reason"]
+
+    def test_cover_against_a_long_is_refused(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 500)])
+        r = paper_trading.execute_orders(
+            db, [{"side": "cover", "code": "SOL", "qty": "all"}], allow_exit=True)
+        assert not r["fills"]
+        assert "close it with sell" in r["rejections"][0]["reason"]
+
+    def test_the_model_cannot_cover_its_own_short(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500)])
+        r = paper_trading.execute_orders(db, [{"side": "cover", "code": "SOL", "qty": "all"}])
+        assert not r["fills"]
+        assert "exits are mechanical" in r["rejections"][0]["reason"]
+
+    def test_a_cooldown_on_a_stopped_long_does_not_block_a_fresh_short(self, db):
+        """A stop on the long side and then a short on the same coin is a reversal
+        thesis, not the whipsaw the cooldown exists to catch."""
+        paper_trading.execute_orders(db, [buy("SOL", 1000, stop=180.0, target=260.0)])
+        self._move(db, "SOL", 170.0)
+        paper_trading.check_stops(db)
+        # SOL now marks at 170 (post stop-out), not short()'s default 200 assumption --
+        # explicit levels here rather than relying on the helper's hardcoded price.
+        r = paper_trading.execute_orders(
+            db, [short("SOL", 500, stop=190.0, target=100.0)])
+        assert r["fills"], r["rejections"]
+
+    def test_a_cooldown_on_a_stopped_short_still_blocks_a_fresh_short(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 1000, stop=220.0, target=140.0)])
+        self._move(db, "SOL", 225.0)
+        paper_trading.check_stops(db)
+        r = paper_trading.execute_orders(db, [short("SOL", 500)])
+        assert not r["fills"]
+        assert "cooldown active" in r["rejections"][0]["reason"]
+
+    def test_expectancy_counts_a_short_round_trip_with_zero_code_changes_there(self, db):
+        """Proves, rather than assumes, the plan's claim: expectancy()/performance() need
+        no changes because a cover is stored as side='sell', same as a long's close."""
+        paper_trading.execute_orders(db, [short("SOL", 1000)])
+        self._move(db, "SOL", 150.0)
+        cover(db, "SOL")
+        stats = paper_trading.expectancy(db)
+        assert stats["closed_trades"] == 1
+        assert stats["win_rate_pct"] == 100.0
+        perf = paper_trading.performance(db)
+        assert perf["closed_trades"] == 1 and perf["wins"] == 1
+
+
+class TestTheLowerStopRatchet:
+    """The short side's mirror of TestTheStopRatchet -- a short's stop only ever moves
+    down, staying above price, on the same trail-floor terms as raise_stop's ceiling."""
+
+    def _move(self, db, code, rate):
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (rate, code))
+        conn.commit(); conn.close()
+
+    def _stop(self, db, code="SOL"):
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT stop_loss, initial_stop_loss FROM paper_positions WHERE code=?",
+            (code,)).fetchone()
+        conn.close()
+        return row
+
+    def test_a_stop_can_be_lowered_behind_a_winner(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+        r = paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "SOL", "stop_loss": 211.0}])
+        assert r["fills"] and not r["rejections"]
+        assert self._stop(db)["stop_loss"] == 211.0
+
+    def test_lowering_a_stop_costs_no_cash_and_files_no_trade(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+        cash_before = paper_trading.portfolio(db)["cash"]
+        conn = sqlite3.connect(db)
+        trades_before = conn.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+        conn.close()
+        paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "SOL", "stop_loss": 211.0}])
+        conn = sqlite3.connect(db)
+        trades_after = conn.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+        conn.close()
+        assert paper_trading.portfolio(db)["cash"] == pytest.approx(cash_before)
+        assert trades_after == trades_before
+
+    def test_a_stop_can_never_be_raised(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+        paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "SOL", "stop_loss": 211.0}])
+        r = paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "SOL", "stop_loss": 215.0}])
+        assert not r["fills"] and "only ever moves down" in r["rejections"][0]["reason"]
+        assert self._stop(db)["stop_loss"] == 211.0
+
+    def test_a_stop_pinned_over_spot_is_refused_as_a_disguised_cover(self, db):
+        """SOL marks at 200 with an original risk of 20 (stop at 220), so the trail must
+        stay at least 10 above: 205 is covering at market with extra steps."""
+        paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+        r = paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "SOL", "stop_loss": 205.0}])
+        assert not r["fills"]
+        assert "too close" in r["rejections"][0]["reason"]
+        assert self._stop(db)["stop_loss"] == 220.0
+
+    def test_raise_stop_is_refused_against_a_short(self, db):
+        paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+        r = paper_trading.execute_orders(
+            db, [{"side": "raise_stop", "code": "SOL", "stop_loss": 211.0}])
+        assert not r["fills"]
+        assert "use lower_stop" in r["rejections"][0]["reason"]
+
+    def test_lower_stop_is_refused_against_a_long(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 500, stop=180.0, target=260.0)])
+        r = paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "SOL", "stop_loss": 190.0}])
+        assert not r["fills"]
+        assert "use raise_stop" in r["rejections"][0]["reason"]
+
+    def test_a_trailed_short_covers_on_the_lowered_stop_below_its_entry(self, db):
+        """The point of the mechanism, end to end: SOL is shorted at 200, falls to 160,
+        the stop trails down to 180, and the bounce covers the trade at a PROFIT rather
+        than back at the 220 it was opened with."""
+        paper_trading.execute_orders(db, [short("SOL", 1000, stop=220.0, target=140.0)])
+        self._move(db, "SOL", 160.0)
+        r = paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "SOL", "stop_loss": 180.0}])
+        assert r["fills"], r["rejections"]
+        self._move(db, "SOL", 185.0)
+        paper_trading.check_stops(db)
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT exit_kind, realized FROM paper_trades "
+                           "WHERE side='sell' ORDER BY id DESC LIMIT 1").fetchone()
+        open_rows = conn.execute(
+            "SELECT COUNT(*) FROM paper_positions WHERE code='SOL'").fetchone()[0]
+        conn.close()
+        assert open_rows == 0
+        assert row["exit_kind"] == "stop_loss"
+        assert row["realized"] > 0, "a stop cover BELOW entry is the trail paying for itself"
 
 
 class TestRunningABook:

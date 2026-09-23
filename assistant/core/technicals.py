@@ -170,6 +170,11 @@ def trend(closes: list[float]) -> dict:
     # False and the screen falls back to the crossover, as before.)
     slow_back = sma(closes[:-FAST_MA], SLOW_MA)
     base_up = slow_back is not None and slow_back != 0 and slow > slow_back
+    # The short-side mirror of base_up, for exactly the same reason: a bounce in a
+    # downtrend drags the fast average up toward or over the slow one, so `direction`
+    # alone would read the bounce itself as an uptrend. This asks whether the trend the
+    # bounce is happening *within* is still down.
+    base_down = slow_back is not None and slow_back != 0 and slow < slow_back
 
     return {
         "direction": "up" if spread > 0.001 else "down" if spread < -0.001 else "flat",
@@ -178,6 +183,7 @@ def trend(closes: list[float]) -> dict:
         "strengthening": widening,
         # Underlying trend (slow average rising), robust to a pullback flipping `direction`.
         "base_up": base_up,
+        "base_down": base_down,
     }
 
 
@@ -270,6 +276,18 @@ CHASE_RANGE = 0.90              # at/above this much of the range, the move is m
 PULLBACK_RANGE = 0.75           # a pullback has actually pulled back off the highs
 LOW_RANGE = 0.25                # the "turning up from the low end of its range" entry
 
+# The short side's own entry rules, mirrored around each long threshold's own axis
+# (100 - x for RSI, 1 - x for position_in_range) rather than independently tuned -- the
+# point is a chart that would be the textbook long setup upside-down is the textbook
+# short setup, not a second, differently-calibrated strategy living in the same function.
+# These are already the comparison thresholds (1 - x of their long-side counterpart),
+# not a value to re-mirror again at the call site -- `position >= BOUNCE_RANGE` and
+# `position >= HIGH_RANGE` are used directly, the same way PULLBACK_RANGE/LOW_RANGE are.
+BOUNCE_RSI = (38.0, 60.0)       # mirror of PULLBACK_RSI
+CHASE_RANGE_SHORT = 0.10        # 1 - CHASE_RANGE: at/below this, the drop is missed
+BOUNCE_RANGE = 0.25             # 1 - PULLBACK_RANGE: a bounce has actually bounced
+HIGH_RANGE = 0.75               # 1 - LOW_RANGE: "turning down from the high end"
+
 
 def scan(db_path: str, codes: list[str], bucket: str = "15m",
          limit: int = 60) -> dict[str, dict]:
@@ -313,12 +331,16 @@ def scan(db_path: str, codes: list[str], bucket: str = "15m",
     return out
 
 
-def classify_setup(reading: dict) -> tuple[int, str] | None:
+def classify_setup(reading: dict) -> tuple[int, str, str] | None:
     """Which of the desk's entry patterns this chart is, or None if it is neither.
 
-    Returns (score, label) -- deliberately a label rather than a verdict, because the
-    trade decision stays the model's. This only answers "is this worth a look", which is
-    the question the movers list was answering badly.
+    Returns (score, label, direction) -- deliberately a label rather than a verdict,
+    because the trade decision stays the model's. This only answers "is this worth a
+    look", which is the question the movers list was answering badly. `direction` is
+    "long" or "short": the long branches are the desk's original entry rules, unchanged;
+    the short branches are their mirror image (see BOUNCE_RSI etc. above) -- a chart
+    filtered out of the long side for being overbought/near-highs is exactly a candidate
+    for the short side, not disqualified twice.
     """
     if not reading.get("candles"):
         return None
@@ -329,32 +351,45 @@ def classify_setup(reading: dict) -> tuple[int, str] | None:
     if rsi_value is None or position is None or direction == "unknown":
         return None
 
-    # Chasing is the one thing the desk's own record says cost it the most, so an extended
-    # chart is filtered out here rather than handed over for the model to refuse again.
-    if rsi_value >= RSI_OVERBOUGHT or position >= CHASE_RANGE:
-        return None
-
-    # A pullback in an uptrend has, by definition, ticked down off the highs, which drags
-    # the fast average toward or under the slow one -- so `direction` (the crossover) reads
-    # "flat" or even "down" on the very setup the desk is told to buy, and gating on it
-    # here rejected genuine pullbacks as non-trends (a bucket-phase away from qualifying).
-    # The underlying trend is the slow average's own slope (`base_up`); for entry purposes
-    # an uptrend is the crossover still up OR that underlying trend still up. A real
-    # downtrend fails both (slow average falling), and an extended chart has already been
-    # dropped above on RSI/position -- so widening this gate lets pullbacks through without
-    # reopening the door to chasing.
     base_up = (reading.get("trend") or {}).get("base_up")
+    base_down = (reading.get("trend") or {}).get("base_down")
+    # See classify_setup's long-side comment history: the crossover (`direction`) flips
+    # on a shallow retrace against the underlying trend, so entry purposes use the slow
+    # average's own slope (base_up/base_down) as an OR against the crossover, not instead
+    # of it. Symmetric for both sides.
     uptrend = direction == "up" or bool(base_up)
+    downtrend = direction == "down" or bool(base_down)
 
-    lo, hi = PULLBACK_RSI
-    if uptrend and lo <= rsi_value <= hi and position <= PULLBACK_RANGE:
-        return (3, "pullback in uptrend")
-    if position <= LOW_RANGE and state == "rising":
-        return (3, "turning up off the lows")
-    if uptrend and state in ("rising", "stalling") and position <= 0.85:
-        return (2, "uptrend holding")
-    if position <= LOW_RANGE and rsi_value <= RSI_OVERSOLD + 15 and state == "stalling":
-        return (1, "basing at the lows, no turn yet")
+    # Chasing is the one thing the desk's own record says cost it the most, so an extended
+    # chart is filtered out of the LONG side here rather than handed over for the model to
+    # refuse again. It says nothing about the short side -- an overbought, near-highs chart
+    # is exactly what a short-the-top setup looks like, not doubly disqualified.
+    long_ok = not (rsi_value >= RSI_OVERBOUGHT or position >= CHASE_RANGE)
+    if long_ok:
+        lo, hi = PULLBACK_RSI
+        if uptrend and lo <= rsi_value <= hi and position <= PULLBACK_RANGE:
+            return (3, "pullback in uptrend", "long")
+        if position <= LOW_RANGE and state == "rising":
+            return (3, "turning up off the lows", "long")
+        if uptrend and state in ("rising", "stalling") and position <= 0.85:
+            return (2, "uptrend holding", "long")
+        if position <= LOW_RANGE and rsi_value <= RSI_OVERSOLD + 15 and state == "stalling":
+            return (1, "basing at the lows, no turn yet", "long")
+
+    # Mirror of the chase filter: don't short something that has already crashed to the
+    # bottom of its range, or is already oversold -- that decline is spent, not starting.
+    short_ok = not (rsi_value <= RSI_OVERSOLD or position <= CHASE_RANGE_SHORT)
+    if short_ok:
+        lo_b, hi_b = BOUNCE_RSI
+        if downtrend and lo_b <= rsi_value <= hi_b and position >= BOUNCE_RANGE:
+            return (3, "bounce in downtrend", "short")
+        if position >= HIGH_RANGE and state == "falling":
+            return (3, "turning down off the highs", "short")
+        if downtrend and state in ("falling", "stalling") and position >= 0.15:
+            return (2, "downtrend holding", "short")
+        if position >= HIGH_RANGE and rsi_value >= RSI_OVERBOUGHT - 15 and state == "stalling":
+            return (1, "topping at the highs, no turn yet", "short")
+
     return None
 
 
@@ -375,8 +410,8 @@ def rank_setups(readings: dict[str, dict], exclude: set[str] | None = None,
         verdict = classify_setup(reading)
         if verdict is None:
             continue
-        score, label = verdict
-        scored.append({"code": code, "score": score, "label": label,
+        score, label, direction = verdict
+        scored.append({"code": code, "score": score, "label": label, "direction": direction,
                        "reading": reading, "rank": rank.get(code, 10_000)})
     # Best pattern first, then most liquid. A "rising but tiring" chart that still scored
     # sorts below an equally-scored one that is not tiring, since tiring is the desk's own
@@ -490,20 +525,25 @@ def desk_briefing(db_path: str, tracked: list[str], held: list[str],
 
     picks = rank_setups(readings, exclude=set(held), order=tracked, limit=shortlist)
     if picks:
+        longs = sum(1 for p in picks if p["direction"] == "long")
+        shorts = len(picks) - longs
         lines = [f"SCREENED FOR ENTRIES: {len(picks)} of {len(codes)} tracked coins match "
-                 f"an entry pattern you are asked to look for. Charts that are already "
-                 f"extended (RSI {RSI_OVERBOUGHT:.0f}+, or {CHASE_RANGE:.0%}+ of range) "
-                 f"are filtered OUT before this list is built, so nothing here is a "
-                 f"chase. The label is what the numbers say, not a recommendation, and "
-                 f"the list is a starting point for your own judgement rather than a "
-                 f"queue to work through:"]
+                 f"an entry pattern you are asked to look for ({longs} long, {shorts} "
+                 f"short). A chart extended on one side (RSI {RSI_OVERBOUGHT:.0f}+ or "
+                 f"{CHASE_RANGE:.0%}+ of range for a long; RSI {RSI_OVERSOLD:.0f}- or "
+                 f"{CHASE_RANGE_SHORT:.0%}- of range for a short) is filtered out of THAT "
+                 f"side only -- an overbought, near-highs chart is exactly a short "
+                 f"candidate, not doubly disqualified. The label is what the numbers say, "
+                 f"not a recommendation, and the list is a starting point for your own "
+                 f"judgement rather than a queue to work through:"]
         for pick in picks:
-            lines.append(f"  [{pick['label']}]")
+            lines.append(f"  [{pick['label']} · {pick['direction'].upper()}]")
             lines.append(render(pick["reading"]))
         parts.append("\n".join(lines))
     else:
         parts.append(f"SCREENED FOR ENTRIES: none of the {len(codes)} tracked coins "
-                     f"currently matches an entry pattern -- every chart is extended, "
-                     f"falling, or short of history. That is a real market condition and "
-                     f"not a missing feed, so standing down this run is the right answer.")
+                     f"currently matches a long or short entry pattern -- every chart is "
+                     f"either too extended on both sides to enter, or short of history. "
+                     f"That is a real market condition and not a missing feed, so standing "
+                     f"down this run is the right answer.")
     return "\n\n".join(parts)

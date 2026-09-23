@@ -216,6 +216,13 @@ def _pullback(scale=1.0):
     return rise + [rise[-1] - i * 0.9 * scale for i in range(30)]
 
 
+def _bounce(scale=1.0):
+    """A clean downtrend that has bounced off its lows -- the short-side mirror of
+    _pullback(): the setup a short-the-bounce entry is asked to look for."""
+    fall = [(100 - i * 0.4 - 1.5 * math.sin(i / 6.0)) * scale for i in range(200)]
+    return fall + [fall[-1] + i * 0.9 * scale for i in range(30)]
+
+
 def _extended(scale=1.0):
     """Straight up into the close: RSI pinned, sitting on the highs. This is what a coin on
     the 1h movers list looks like, and it is exactly what the rules forbid buying."""
@@ -288,6 +295,56 @@ class TestScreening:
         assert [p["code"] for p in picks] == ["BIG", "SMALL"]
 
 
+class TestShortScreening:
+    """The mirror of TestScreening, for the short side added alongside it. Same shape of
+    proof: a chart extended on the long side is not automatically disqualified on the
+    short side, and a genuine bounce-in-downtrend is what gets through."""
+
+    def test_a_bounce_in_a_downtrend_is_what_gets_through(self, db_path):
+        _seed(db_path, "FALL", _bounce())
+        verdict = technicals.classify_setup(technicals.read(db_path, "FALL", "5m"))
+        assert verdict is not None
+        assert verdict[1] == "bounce in downtrend"
+        assert verdict[2] == "short"
+
+    def test_long_branches_still_report_long(self, db_path):
+        _seed(db_path, "CALM", _pullback())
+        verdict = technicals.classify_setup(technicals.read(db_path, "CALM", "5m"))
+        assert verdict[2] == "long"
+
+    def test_a_crashed_chart_is_filtered_out_of_the_short_side_too(self, db_path):
+        """The mirror of the chase filter: a coin already at the bottom of its range with
+        no bounce yet is not a short candidate -- that decline is spent, not starting. (It
+        may still be a valid LONG basing setup, which is a separate, pre-existing branch
+        this isn't testing -- only that it never comes back labelled "short".)"""
+        crashed = [100 - i * 0.5 for i in range(200)]  # straight down, pinned at the lows
+        _seed(db_path, "DEAD", crashed)
+        verdict = technicals.classify_setup(technicals.read(db_path, "DEAD", "5m"))
+        assert verdict is None or verdict[2] != "short"
+
+    def test_the_shortlist_carries_direction_and_counts_both_sides(self, db_path):
+        _seed(db_path, "CALM", _pullback())
+        _seed(db_path, "FALL", _bounce())
+        readings = technicals.scan(db_path, ["CALM", "FALL"], "5m")
+        picks = technicals.rank_setups(readings, order=["CALM", "FALL"])
+        by_code = {p["code"]: p["direction"] for p in picks}
+        assert by_code == {"CALM": "long", "FALL": "short"}
+
+
+class TestTrendBaseDown:
+    def test_base_down_mirrors_base_up_on_a_falling_chart(self, db_path):
+        _seed(db_path, "FALL", _bounce())
+        reading = technicals.read(db_path, "FALL", "5m")
+        trend = reading["trend"]
+        assert trend["base_down"] is True
+        assert trend["base_up"] is False
+
+    def test_base_down_is_false_on_a_rising_chart(self, db_path):
+        _seed(db_path, "CALM", _pullback())
+        reading = technicals.read(db_path, "CALM", "5m")
+        assert reading["trend"]["base_down"] is False
+
+
 class TestDeskBriefing:
     def test_positions_and_candidates_both_appear(self, db_path):
         _seed(db_path, "HELD", _pullback(scale=0.5))
@@ -315,3 +372,11 @@ class TestDeskBriefing:
         out = technicals.desk_briefing(db_path, ["CALM"], [], "5m")
         assert "YOUR POSITIONS ON THE CHART" not in out
         assert "CALM" in out
+
+    def test_short_candidates_are_labelled_and_counted_separately(self, db_path):
+        _seed(db_path, "CALM", _pullback())
+        _seed(db_path, "FALL", _bounce())
+        out = technicals.desk_briefing(db_path, ["CALM", "FALL"], [], "5m")
+        assert "[pullback in uptrend · LONG]" in out
+        assert "[bounce in downtrend · SHORT]" in out
+        assert "1 long, 1 short" in out

@@ -206,7 +206,8 @@ next run. You may place SEVERAL orders in one block, and normally should.
 ```orders
 {{"orders": [
   {{"side": "buy", "code": "SOL", "usd": 70, "stop_loss": 130.0, "take_profit": 220.0, "reason": "why, in one line"}},
-  {{"side": "buy", "code": "ARB", "usd": 70, "stop_loss": 0.148, "take_profit": 0.191, "reason": "why, in one line"}}
+  {{"side": "buy", "code": "ARB", "usd": 70, "stop_loss": 0.148, "take_profit": 0.191, "reason": "why, in one line"}},
+  {{"side": "short", "code": "DOGE", "usd": 70, "stop_loss": 0.24, "take_profit": 0.19, "reason": "why, in one line"}}
 ]}}
 ```
 
@@ -237,6 +238,28 @@ limits: a stop only ever moves up, and a raised stop must stay at least
 {min_trail:g}x the original risk (entry minus your first stop) below the current price.
 Raising it to just under spot is not a trail, it is selling at market, and it is refused.
 
+YOU CAN ALSO GO SHORT -- profit when a coin falls, not just when it rises. Open one with
+`short` instead of `buy`; everything else about how a position leaves is the mirror image
+of a long, not a different set of rules:
+
+  {{"side": "short", "code": "DOGE", "usd": 70, "stop_loss": 0.24, "take_profit": 0.19, "reason": "why, in one line"}}
+
+A short's stop sits ABOVE your entry (price rising against you) and its target sits BELOW
+it (price falling your way) -- the exact opposite of a long's. Close one with `cover`, not
+`sell` -- no cash moves at all when a short opens, not even the fee (this ledger has no
+margin or collateral modeling; think of it as a notional bet, not literally borrowed
+coins), and covering is what turns the price move -- and the fee -- into real, realized
+P&L, all at once. The one thing you can still do to a working short is trail
+its stop DOWN, never up, with `lower_stop` -- the exact mirror of `raise_stop`, same fee-
+free treatment, same {min_trail:g}x-the-original-risk floor on how close it may trail:
+
+  {{"side": "lower_stop", "code": "DOGE", "stop_loss": 0.205, "reason": "why, in one line"}}
+
+A coin can be long or short, never both at once in this book -- close the one you have
+before taking the other side. Everything below (slot sizing, the reward:risk floor, the
+re-entry cooldown, the maximum hold) applies to both directions equally; where a rule
+differs by direction it says so.
+
 Why, in the desk's own numbers. Choosing your own exits freely lost money: over 92 closed
 round-trips you won 42.4% of the time with an average win of +$2.39 against an average
 loss of -$2.85, because you held winners a median of 2.0 hours and losers 8.7 hours.
@@ -249,29 +272,34 @@ target run, and walk the stop up behind it.
 {current_performance}
 
 Rules enforced in code, not by you:
-  * Buys are sized in `usd`. No single order may exceed {max_pct}% of total equity --
-    that is roughly one slot, and it is the size to work in.
-  * No single coin may exceed {max_position_pct}% of equity in total, add-ons included.
-    Capital that cannot go into one name should go into another, not into a bigger bet.
-  * You cannot spend cash you do not have.
+  * Buys and shorts are sized in `usd` (a short's is notional, not cash spent -- see
+    above). No single order may exceed {max_pct}% of total equity -- that is roughly one
+    slot, and it is the size to work in.
+  * No single coin may exceed {max_position_pct}% of equity in total, add-ons included,
+    long or short.
+  * You cannot spend cash you do not have. A short only ever needs its fee, not its
+    notional, since nothing is bought at entry.
   * Fills use the cached price, not a price you state. Do not predict your fill.
-  * Every buy MUST set both `stop_loss` and `take_profit` as real numeric prices (not a
-    percentage, not "later"). A buy missing either is refused.
-  * `stop_loss` must be below the fill price and `take_profit` above it. A stop above
-    your entry closes the position the instant it opens.
-  * The target must be at least {min_rr:g}x the distance to the stop. That floor was set
-    for a 42% win rate; your actual win rate is in the current-performance line above, and
-    if it is well below that, {min_rr:g}:1 is a floor the ratchet has to make up the rest
-    of, not a number that alone guarantees a positive book. If a trade is not worth
-    {min_rr:g}:1 to you, it is not worth taking -- that is the trade-off, and passing on
-    that one is a perfectly good answer.
+  * Every buy or short MUST set both `stop_loss` and `take_profit` as real numeric prices
+    (not a percentage, not "later"). One missing either is refused.
+  * For a long: `stop_loss` must be below the fill price and `take_profit` above it. For a
+    short: the exact mirror, `stop_loss` above the fill price and `take_profit` below it.
+    A stop on the wrong side of your entry closes the position the instant it opens.
+  * The target must be at least {min_rr:g}x the distance to the stop, either direction.
+    That floor was set for a 42% win rate; your actual win rate is in the
+    current-performance line above, and if it is well below that, {min_rr:g}:1 is a floor
+    the ratchet has to make up the rest of, not a number that alone guarantees a positive
+    book. If a trade is not worth {min_rr:g}:1 to you, it is not worth taking -- that is
+    the trade-off, and passing on that one is a perfectly good answer.
   * Adding to a position INHERITS its target, which cannot change; an add-on restating a
-    different target is refused. It may state a HIGHER stop (the same trail as above, on
-    the same terms), never a lower one. Use `raise_stop` rather than a token add-on when
-    all you want is the stop moved -- that is what it is for, and it pays no fee.
-    (Adding also does NOT restart its {max_hold_hours:g}h clock.)
-  * A coin stopped out cannot be re-bought for {cooldown_hours:g}h -- that failed thesis
-    needs to cool off, not get re-entered on the next momentum call.
+    different target is refused. It may tighten the stop (the same trail as raise_stop/
+    lower_stop, on the same terms), never loosen it. Use `raise_stop`/`lower_stop` rather
+    than a token add-on when all you want is the stop moved -- that is what they are for,
+    and neither pays a fee. (Adding also does NOT restart its {max_hold_hours:g}h clock.)
+  * A coin stopped out cannot be re-entered THE SAME DIRECTION for {cooldown_hours:g}h --
+    that failed thesis needs to cool off, not get re-entered on the next momentum call. A
+    stop on the long side does not block a short on the same coin, or the reverse -- that
+    is a reversal call, not the whipsaw this cools off.
   * Churn costs {fee_pct}% per side. That is an argument against trading the same coin
     repeatedly, not against holding several different ones.
 
@@ -365,9 +393,23 @@ def init_paper_db(db_path: str) -> None:
             # last time it was touched, which for an untouched position IS its open time.
             conn.execute("UPDATE paper_positions SET opened_at = updated_at "
                          "WHERE opened_at IS NULL")
+        if "direction" not in pos_cols:
+            # No DB-level CHECK, same as qty's sign -- validated in Python at the order
+            # gate instead, matching how this table has always enforced its invariants.
+            # Every position that existed before shorting shipped was a long; that is the
+            # correct backfill, not a guess.
+            conn.execute("ALTER TABLE paper_positions ADD COLUMN direction TEXT NOT NULL "
+                         "DEFAULT 'long'")
         trade_cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)")}
         if "exit_kind" not in trade_cols:
             conn.execute("ALTER TABLE paper_trades ADD COLUMN exit_kind TEXT")
+        if "direction" not in trade_cols:
+            # Needed so the stop-loss re-entry cooldown can be scoped per (code, direction)
+            # rather than just code -- a stop on a long and then shorting the same coin is
+            # a reversal thesis, not the whipsaw the cooldown exists to catch, and without
+            # this column that distinction isn't recoverable from history at all.
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN direction TEXT NOT NULL "
+                         "DEFAULT 'long'")
         conn.commit()
 
 
@@ -422,6 +464,20 @@ def _trail_ceiling(price: float, entry: float, initial_stop: float | None,
     return price - risk * MIN_TRAIL_RISK_FRACTION
 
 
+def _trail_floor(price: float, entry: float, initial_stop: float | None,
+                 committed_stop: float | None) -> float:
+    """The short side's mirror of _trail_ceiling(): the lowest a short's stop may be
+    lowered to right now -- far enough above the price to still be a stop, not a market
+    cover. A short's stop sits ABOVE entry, so risk is (initial stop - entry) rather than
+    (entry - initial stop), and the floor is price PLUS the guarded fraction of it rather
+    than minus."""
+    basis = initial_stop if initial_stop is not None else committed_stop
+    risk = (basis - entry) if basis is not None else 0.0
+    if risk <= 0:
+        return price                      # no usable risk basis: only the price itself binds
+    return price + risk * MIN_TRAIL_RISK_FRACTION
+
+
 def _level_moved(stated: float | None, committed: float | None) -> bool:
     """Whether an add-on's stated exit level would change the one the position committed
     when it was first opened. An omitted level (None) inherits and is never a move; a
@@ -450,10 +506,14 @@ def _held_hours(opened_at) -> float | None:
 
 
 def _classify_exit(price: float, pos, override: str | None = None) -> str:
-    """Whether a sell at `price` was a stop-loss, a take-profit, or a discretionary
+    """Whether a close at `price` was a stop-loss, a take-profit, or a discretionary
     close -- from the position's own persisted levels, never from prose. A position with
     both levels set and a price that (due to a gap) cleared both in one tick is called a
-    stop-loss: preserving capital is the one of the two that actually mattered."""
+    stop-loss: preserving capital is the one of the two that actually mattered.
+
+    A short's levels sit the opposite way round from a long's (stop above entry, target
+    below), so which comparison means "hit" flips with `pos["direction"]`.
+    """
     # A time exit is the one kind that cannot be read off the price: the position left
     # because the clock ran out, at whatever price that happened to be. The caller that
     # forced it says so, rather than this guessing from a price that cleared no level.
@@ -461,10 +521,17 @@ def _classify_exit(price: float, pos, override: str | None = None) -> str:
         return override
     stop_loss = pos["stop_loss"] if "stop_loss" in pos.keys() else None
     take_profit = pos["take_profit"] if "take_profit" in pos.keys() else None
-    if stop_loss is not None and price <= stop_loss:
-        return "stop_loss"
-    if take_profit is not None and price >= take_profit:
-        return "take_profit"
+    short = ("direction" in pos.keys()) and pos["direction"] == "short"
+    if short:
+        if stop_loss is not None and price >= stop_loss:
+            return "stop_loss"
+        if take_profit is not None and price <= take_profit:
+            return "take_profit"
+    else:
+        if stop_loss is not None and price <= stop_loss:
+            return "stop_loss"
+        if take_profit is not None and price >= take_profit:
+            return "take_profit"
     return "discretionary"
 
 
@@ -522,20 +589,34 @@ def portfolio(db_path: str, name: str = "crypto") -> dict:
         for r in rows:
             mark = marks.get(r["code"])
             price = mark["price"] if mark else None
+            short = ("direction" in r.keys()) and r["direction"] == "short"
+            cost = r["qty"] * r["avg_cost"]   # notional exposure either way
             if price is None:
-                # Delisted or dropped out of the tracked set. Valued at cost rather than
-                # zero, and flagged: silently marking it to zero would invent a loss.
+                # Delisted or dropped out of the tracked set. Valued at cost (zero
+                # unrealized) rather than zero, and flagged: silently marking it to zero
+                # would invent a loss.
                 stale.append(r["code"])
-                value = r["qty"] * r["avg_cost"]
+                value = cost
+                unrealized = 0.0
+            elif short:
+                # There is no margin/collateral modeling here (see the module docstring
+                # on the synthetic short) -- a short never had a cash value to mark to
+                # market in the first place, only an unrealized P&L. "value" for a short
+                # IS that P&L, not a market price times quantity; that is what makes
+                # `equity = cash + holdings_value` still correct with no separate
+                # liability line to track.
+                unrealized = r["qty"] * (r["avg_cost"] - price)
+                value = unrealized
             else:
                 value = r["qty"] * price
-            cost = r["qty"] * r["avg_cost"]
+                unrealized = value - cost
             holdings_value += value
             positions.append({
                 "code": r["code"], "qty": r["qty"], "avg_cost": r["avg_cost"],
+                "direction": r["direction"] if "direction" in r.keys() else "long",
                 "price": price, "value": round(value, 2), "cost": round(cost, 2),
-                "unrealized": round(value - cost, 2),
-                "unrealized_pct": round((value - cost) / cost * 100, 2) if cost else 0.0,
+                "unrealized": round(unrealized, 2),
+                "unrealized_pct": round(unrealized / cost * 100, 2) if cost else 0.0,
                 "quote_age_sec": mark["age"] if mark else None,
                 "stop_loss": r["stop_loss"], "take_profit": r["take_profit"],
             })
@@ -675,8 +756,9 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
             code = str(order.get("code") or "").strip().upper()
             side = str(order.get("side") or "").strip().lower()
             reason = str(order.get("reason") or "")[:300]
-            if side not in ("buy", "sell", "raise_stop") or not code:
-                reject(order, "order needs a side of buy, sell or raise_stop, and a coin code")
+            if side not in ("buy", "sell", "raise_stop", "short", "cover", "lower_stop") or not code:
+                reject(order, "order needs a side of buy, sell, raise_stop, short, cover "
+                              "or lower_stop, and a coin code")
                 continue
 
             mark = _prices(conn, [code]).get(code)
@@ -688,6 +770,20 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
             pos = conn.execute(
                 "SELECT * FROM paper_positions WHERE account_id = ? AND code = ?",
                 (acct["id"], code)).fetchone()
+
+            # A position row is keyed on (account_id, code) alone -- there is nowhere for
+            # a long and a short on the same coin to live at once without conflating their
+            # qty/avg_cost. Refused rather than silently merged: a directional desk has no
+            # use for holding both anyway (it is a confused, net-hedged position, not a
+            # second thesis), so the fix is "close the one you have," not a schema change.
+            if pos is not None and pos["qty"] > 0:
+                held_dir = pos["direction"] if "direction" in pos.keys() else "long"
+                if side == "short" and held_dir == "long":
+                    reject(order, f"{code} is already long; close it (sell) before shorting it")
+                    continue
+                if side == "buy" and held_dir == "short":
+                    reject(order, f"{code} is already short; cover it before buying it")
+                    continue
 
             # Equity is recomputed per order so a sequence of orders in one run cannot
             # collectively exceed the cap by each measuring against the starting figure.
@@ -704,6 +800,10 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 # phantom $0.01 "buy" in the ledger, which is how it used to be expressed.
                 if pos is None or pos["qty"] <= 0:
                     reject(order, f"no {code} position whose stop could be raised")
+                    continue
+                if (pos["direction"] if "direction" in pos.keys() else "long") == "short":
+                    reject(order, f"{code} is short; its stop only ever moves down -- use "
+                                  f"lower_stop, not raise_stop")
                     continue
                 stated_stop = _parse_level(order.get("stop_loss"))
                 if stated_stop is None:
@@ -744,12 +844,67 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                               "to_stop": stated_stop, "price": price, "reason": reason})
                 continue
 
-            if side == "buy":
+            if side == "lower_stop":
+                # The short-side mirror of raise_stop, in full: same no-fee, no-phantom-
+                # trade treatment, same "only ever tightens, never loosens" rule, just
+                # upside-down -- a short's stop starts above entry and may only move DOWN,
+                # staying above the current price rather than below it.
+                if pos is None or pos["qty"] <= 0:
+                    reject(order, f"no {code} position whose stop could be lowered")
+                    continue
+                if (pos["direction"] if "direction" in pos.keys() else "long") == "long":
+                    reject(order, f"{code} is long; its stop only ever moves up -- use "
+                                  f"raise_stop, not lower_stop")
+                    continue
+                stated_stop = _parse_level(order.get("stop_loss"))
+                if stated_stop is None:
+                    reject(order, "lower_stop needs a numeric `stop_loss` to lower the stop to")
+                    continue
+                committed = pos["stop_loss"]
+                if committed is not None and stated_stop >= committed:
+                    reject(order, f"{code} already stops at {_fmt_level(committed)}; a short's "
+                                  f"stop only ever moves down. Giving a loser more room is what "
+                                  f"cost the desk its money the first time.")
+                    continue
+                if stated_stop <= price:
+                    reject(order, f"a stop at {_fmt_level(stated_stop)} is at or below "
+                                  f"{code}'s current {_fmt_level(price)} -- that is a cover, "
+                                  f"not a stop, and exits stay mechanical")
+                    continue
+                initial = (pos["initial_stop_loss"]
+                           if "initial_stop_loss" in pos.keys() else None)
+                floor = _trail_floor(price, pos["avg_cost"], initial, committed)
+                if stated_stop < floor:
+                    reject(order, f"{_fmt_level(stated_stop)} trails {code} too close to its "
+                                  f"{_fmt_level(price)}: a lowered stop must stay at least "
+                                  f"{MIN_TRAIL_RISK_FRACTION:g}x the original risk back, so "
+                                  f"{_fmt_level(floor)} is as low as it goes right now. "
+                                  f"Pinning the stop over spot to bank a gain early is the "
+                                  f"disposition effect, not a trail.")
+                    continue
+                conn.execute("UPDATE paper_positions SET stop_loss = ?, updated_at = ? "
+                             "WHERE account_id = ? AND code = ?",
+                             (stated_stop, now, acct["id"], code))
+                conn.execute(
+                    """INSERT INTO paper_stop_raises
+                           (account_id, code, from_stop, to_stop, price, reason, staff_key, at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (acct["id"], code, committed, stated_stop, price, reason, staff_key, now))
+                conn.commit()
+                fills.append({"side": "lower_stop", "code": code, "from_stop": committed,
+                              "to_stop": stated_stop, "price": price, "reason": reason})
+                continue
+
+            if side in ("buy", "short"):
+                direction = "short" if side == "short" else "long"
+                # Scoped to (code, direction): a stop-out on the long side and then a
+                # short on the same coin is a reversal thesis, not the whipsaw this cools
+                # off -- see the migration note on paper_trades.direction above.
                 last_stop_out = conn.execute(
                     """SELECT at FROM paper_trades WHERE account_id = ? AND code = ?
-                           AND side = 'sell' AND exit_kind = 'stop_loss'
+                           AND side = 'sell' AND exit_kind = 'stop_loss' AND direction = ?
                            ORDER BY id DESC LIMIT 1""",
-                    (acct["id"], code)).fetchone()
+                    (acct["id"], code, direction)).fetchone()
                 if last_stop_out is not None:
                     stopped_at = _parse_at(last_stop_out["at"])
                     elapsed_h = ((datetime.now(timezone.utc) - stopped_at).total_seconds() / 3600
@@ -787,8 +942,16 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                                   f"put the capital into a different name instead")
                     continue
                 fee = usd * fee_pct / 100
-                if usd + fee > cash + 1e-9:
-                    reject(order, f"insufficient cash: need ${usd + fee:,.2f}, have ${cash:,.2f}")
+                # A long pays its full notional out of cash to actually own the coin. A
+                # short is synthetic here -- no margin/collateral modeling exists in this
+                # ledger, so opening one moves NO cash at all, fee included; the fee and
+                # the whole notional outcome only ever show up later, netted into
+                # `realized` when the short is covered (see the cost-basis note below).
+                # Solvency is still checked against the fee now, though -- a short that
+                # will not be able to afford its own settlement should not open.
+                cash_needed = fee if direction == "short" else usd + fee
+                if cash_needed > cash + 1e-9:
+                    reject(order, f"insufficient cash: need ${cash_needed:,.2f}, have ${cash:,.2f}")
                     continue
                 # The TARGET is committed when a position is first opened and is immutable
                 # afterward; the STOP may ratchet up. A new entry states both here; an
@@ -818,42 +981,61 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                                       f"{_fmt_level(pos['take_profit'])} and an add-on cannot "
                                       f"move it -- pulling a target in to bank early is the "
                                       f"disposition effect that cost the desk its edge. Raise "
-                                      f"the stop with a `raise_stop` order instead; the "
-                                      f"upside stays where you committed it.")
+                                      f"the stop with a `raise_stop`/`lower_stop` order "
+                                      f"instead; the upside stays where you committed it.")
                         continue
-                    # A stop stated LOWER than the committed one is a loser being given more
-                    # room, and stays refused. A stop stated higher is the trail, and is
-                    # allowed on the same terms as a raise_stop order -- an add-on placed
-                    # after the stop has already been trailed should not have to pretend it
-                    # has not been.
+                    # A stop stated in the direction that gives a loser more room is
+                    # refused (higher for a long's committed stop, lower for a short's). A
+                    # stop stated the tightening way is the trail, and is allowed on the
+                    # same terms as a raise_stop/lower_stop order -- an add-on placed after
+                    # the stop has already been trailed should not have to pretend it has
+                    # not been.
                     stop_loss = pos["stop_loss"]
                     take_profit = pos["take_profit"]
                     if _level_moved(stated_stop, pos["stop_loss"]):
                         initial = (pos["initial_stop_loss"]
                                    if "initial_stop_loss" in pos.keys() else None)
-                        ceiling = _trail_ceiling(price, pos["avg_cost"], initial, pos["stop_loss"])
-                        if (pos["stop_loss"] is not None and stated_stop < pos["stop_loss"]):
-                            reject(order, f"{code} already stops at "
-                                          f"{_fmt_level(pos['stop_loss'])}; an add-on cannot "
-                                          f"widen it. Letting a loser run is what lost the "
-                                          f"money -- size the add-on or let it stop out.")
-                            continue
-                        if stated_stop >= price or stated_stop > ceiling:
-                            reject(order, f"{_fmt_level(stated_stop)} trails {code} too close "
-                                          f"to its {_fmt_level(price)}; "
-                                          f"{_fmt_level(ceiling)} is as high as the stop goes "
-                                          f"right now")
-                            continue
+                        if direction == "short":
+                            bound = _trail_floor(price, pos["avg_cost"], initial, pos["stop_loss"])
+                            if pos["stop_loss"] is not None and stated_stop > pos["stop_loss"]:
+                                reject(order, f"{code} already stops at "
+                                              f"{_fmt_level(pos['stop_loss'])}; an add-on "
+                                              f"cannot widen it. Letting a loser run is what "
+                                              f"lost the money -- size the add-on or let it "
+                                              f"stop out.")
+                                continue
+                            if stated_stop <= price or stated_stop < bound:
+                                reject(order, f"{_fmt_level(stated_stop)} trails {code} too "
+                                              f"close to its {_fmt_level(price)}; "
+                                              f"{_fmt_level(bound)} is as low as the stop "
+                                              f"goes right now")
+                                continue
+                        else:
+                            bound = _trail_ceiling(price, pos["avg_cost"], initial, pos["stop_loss"])
+                            if pos["stop_loss"] is not None and stated_stop < pos["stop_loss"]:
+                                reject(order, f"{code} already stops at "
+                                              f"{_fmt_level(pos['stop_loss'])}; an add-on "
+                                              f"cannot widen it. Letting a loser run is what "
+                                              f"lost the money -- size the add-on or let it "
+                                              f"stop out.")
+                                continue
+                            if stated_stop >= price or stated_stop > bound:
+                                reject(order, f"{_fmt_level(stated_stop)} trails {code} too "
+                                              f"close to its {_fmt_level(price)}; "
+                                              f"{_fmt_level(bound)} is as high as the stop "
+                                              f"goes right now")
+                                continue
                         stop_loss = stated_stop
                 else:
                     stop_loss = _parse_level(order.get("stop_loss"))
                     take_profit = _parse_level(order.get("take_profit"))
 
-                # Every position here is LONG, so a coherent plan is
-                # stop_loss < fill price < take_profit. _parse_level only ever checked
-                # "is it a positive number", which let a stop ABOVE the entry through --
-                # and check_stops() then closed the position on its very next tick, at a
-                # price that had not moved, for the cost of two fees.
+                # A coherent LONG plan is stop_loss < fill price < take_profit; a coherent
+                # SHORT plan is the mirror, take_profit < fill price < stop_loss.
+                # _parse_level only ever checked "is it a positive number", which let a
+                # long's stop ABOVE the entry through -- and check_stops() then closed the
+                # position on its very next tick, at a price that had not moved, for the
+                # cost of two fees.
                 #
                 # This actually happened: TAO was bought at $235.13 with a stop of $250
                 # and was stopped out in the same minute (2026-09-14T07:52), turning a
@@ -864,48 +1046,76 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 # it to something "sensible" would invent a risk decision the model never
                 # made. A rejection is also the only one of the three the model is told
                 # about -- rejections are counted back to it in its own briefing.
-                if stop_loss is not None and stop_loss >= price:
-                    reject(order, f"stop_loss ${stop_loss:,.6g} is at or above the "
-                                  f"${price:,.6g} fill price -- a long's stop must sit "
-                                  f"below it, or the position is closed the moment it opens")
-                    continue
-                if take_profit is not None and take_profit <= price:
-                    reject(order, f"take_profit ${take_profit:,.6g} is at or below the "
-                                  f"${price:,.6g} fill price -- a long's target must sit "
-                                  f"above it, or the position is closed the moment it opens")
-                    continue
+                if direction == "short":
+                    if stop_loss is not None and stop_loss <= price:
+                        reject(order, f"stop_loss ${stop_loss:,.6g} is at or below the "
+                                      f"${price:,.6g} fill price -- a short's stop must sit "
+                                      f"above it, or the position is closed the moment it opens")
+                        continue
+                    if take_profit is not None and take_profit >= price:
+                        reject(order, f"take_profit ${take_profit:,.6g} is at or above the "
+                                      f"${price:,.6g} fill price -- a short's target must sit "
+                                      f"below it, or the position is closed the moment it opens")
+                        continue
+                else:
+                    if stop_loss is not None and stop_loss >= price:
+                        reject(order, f"stop_loss ${stop_loss:,.6g} is at or above the "
+                                      f"${price:,.6g} fill price -- a long's stop must sit "
+                                      f"below it, or the position is closed the moment it opens")
+                        continue
+                    if take_profit is not None and take_profit <= price:
+                        reject(order, f"take_profit ${take_profit:,.6g} is at or below the "
+                                      f"${price:,.6g} fill price -- a long's target must sit "
+                                      f"above it, or the position is closed the moment it opens")
+                        continue
 
                 # Exits are mechanical (see MIN_REWARD_RISK), so BOTH levels are now
                 # mandatory rather than "one or the other": a position the model cannot
                 # close itself, with only half a plan, has no defined way out on one side.
                 if stop_loss is None or take_profit is None:
                     missing = "stop_loss" if stop_loss is None else "take_profit"
-                    reject(order, f"every buy needs both stop_loss and take_profit as "
+                    reject(order, f"every {side} needs both stop_loss and take_profit as "
                                   f"numeric prices -- {missing} is missing, and exits are "
                                   f"mechanical now, so an open position with no committed "
                                   f"level on one side has no way out on that side")
                     continue
 
-                # The payoff ratio is set here, at entry, or it is not set at all. At the
-                # desk's measured 42.4% win rate a 2:1 target turns a losing book into a
-                # winning one on arithmetic alone -- and unlike a win rate, this is
-                # something the model can actually be held to.
-                risk, reward = price - stop_loss, take_profit - price
+                # The payoff ratio is set here, at entry, or it is not set at all --
+                # unlike a win rate, this is something the model can actually be held to.
+                # See CURRENT MEASURED PERFORMANCE in the prompt for the desk's live win
+                # rate rather than a fixed assumption baked in here.
+                if direction == "short":
+                    risk, reward = stop_loss - price, price - take_profit
+                else:
+                    risk, reward = price - stop_loss, take_profit - price
                 if reward < risk * MIN_REWARD_RISK:
                     reject(order, f"target is only {reward / risk:.2f}x the risk "
                                   f"(${reward:,.6g} up vs ${risk:,.6g} down); "
                                   f"{MIN_REWARD_RISK:g}x is the minimum -- either move the "
-                                  f"target out or bring the stop closer, but a trade you "
-                                  f"win 42% of the time has to pay more than it risks")
+                                  f"target out or bring the stop closer, but a trade with a "
+                                  f"low win rate has to pay more than it risks")
                     continue
 
                 # Cash moves only once the order is known to be fillable -- every refusal
                 # above this line must leave the balance untouched.
                 qty = usd / price
                 new_qty = (pos["qty"] if pos else 0.0) + qty
-                # Fees fold into cost basis, so realised P&L is the round-trip result.
-                new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd + fee) / new_qty
-                cash -= usd + fee
+                if direction == "short":
+                    # The fee still folds into cost basis, same reasoning as a long -- but
+                    # SUBTRACTED, not added: a short profits on (avg_cost - price), so a
+                    # higher avg_cost is MORE favorable to it, and adding the fee the way
+                    # a long does would inflate avg_cost and hide the fee's cost instead of
+                    # charging it. Subtracting makes the effective entry look very slightly
+                    # worse, which correctly eats into the eventual spread. No cash moves
+                    # at open at all -- unlike a long, nothing has actually settled yet;
+                    # the fee (and the notional's whole outcome) show up together in
+                    # `realized` at cover, the same single-number-covers-the-round-trip
+                    # convention a long's `realized` already has.
+                    new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd - fee) / new_qty
+                else:
+                    # Fees fold into cost basis, so realised P&L is the round-trip result.
+                    new_cost = ((pos["qty"] * pos["avg_cost"] if pos else 0.0) + usd + fee) / new_qty
+                    cash -= usd + fee
 
                 # Adding to a position must NOT restart its clock, or a position could be
                 # kept alive past the maximum hold indefinitely by topping it up.
@@ -921,26 +1131,31 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 conn.execute(
                     """INSERT INTO paper_positions (account_id, code, qty, avg_cost,
                                                      stop_loss, take_profit, initial_stop_loss,
-                                                     opened_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)
+                                                     opened_at, updated_at, direction)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(account_id, code) DO UPDATE SET
                            qty = excluded.qty, avg_cost = excluded.avg_cost,
                            stop_loss = excluded.stop_loss, take_profit = excluded.take_profit,
                            initial_stop_loss = excluded.initial_stop_loss,
                            opened_at = excluded.opened_at,
-                           updated_at = excluded.updated_at""",
+                           updated_at = excluded.updated_at,
+                           direction = excluded.direction""",
                     (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, initial_stop,
-                     opened_at, now))
+                     opened_at, now, direction))
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
-                                                 quote_age_sec, at)
-                       VALUES (?,?,'buy',?,?,?,?,NULL,?,?,?,?,?)""",
-                    (acct["id"], code, qty, price, fee, usd, cash, reason, staff_key, age, now))
-                fills.append({"side": "buy", "code": code, "qty": qty, "price": price,
+                                                 quote_age_sec, at, direction)
+                       VALUES (?,?,'buy',?,?,?,?,NULL,?,?,?,?,?,?)""",
+                    (acct["id"], code, qty, price, fee, usd, cash, reason, staff_key, age, now,
+                     direction))
+                fills.append({"side": side, "code": code, "qty": qty, "price": price,
                               "usd": round(usd, 2), "fee": round(fee, 2), "reason": reason})
 
             else:
+                # side is "sell" or "cover" here (the gate above admits nothing else to
+                # this branch). Both close a position; which verb is valid depends on
+                # which direction is actually open, checked below.
                 if not allow_exit:
                     reject(order, "exits are mechanical: a position closes on the "
                                   "stop_loss or take_profit you committed at entry, or "
@@ -952,7 +1167,14 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                                   .format(MAX_HOLD_HOURS))
                     continue
                 if pos is None or pos["qty"] <= 0:
-                    reject(order, f"no {code} position to sell")
+                    reject(order, f"no {code} position to {side}")
+                    continue
+                held_dir = pos["direction"] if "direction" in pos.keys() else "long"
+                if side == "sell" and held_dir == "short":
+                    reject(order, f"{code} is short; close it with cover, not sell")
+                    continue
+                if side == "cover" and held_dir == "long":
+                    reject(order, f"{code} is long; close it with sell, not cover")
                     continue
                 raw = order.get("qty", "all")
                 if isinstance(raw, str) and raw.strip().lower() in ("all", "max", "everything"):
@@ -961,22 +1183,30 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                     try:
                         qty = float(raw)
                     except (TypeError, ValueError):
-                        reject(order, "sell needs a numeric `qty` or \"all\"")
+                        reject(order, f"{side} needs a numeric `qty` or \"all\"")
                         continue
                 if qty <= 0:
-                    reject(order, "sell quantity must be positive")
+                    reject(order, f"{side} quantity must be positive")
                     continue
                 if qty > pos["qty"] + 1e-12:
-                    reject(order, f"holds {pos['qty']:.8f} {code}, cannot sell {qty:.8f}")
+                    reject(order, f"holds {pos['qty']:.8f} {code}, cannot {side} {qty:.8f}")
                     continue
                 gross = qty * price
                 fee = gross * fee_pct / 100
-                realized = gross - fee - qty * pos["avg_cost"]
-                cash += gross - fee
+                if held_dir == "short":
+                    # No proceeds were ever received at open (see the buy/short branch's
+                    # cash note) -- the realized figure below IS the round trip's entire
+                    # cash effect, not a net-of-cost-basis figure layered on top of a
+                    # separate `gross - fee` cash credit the way a long's is.
+                    realized = qty * (pos["avg_cost"] - price) - fee
+                    cash += realized
+                else:
+                    realized = gross - fee - qty * pos["avg_cost"]
+                    cash += gross - fee
                 realized_total += realized
                 # Classified from the position's own stored levels vs. the actual fill
                 # price -- never parsed from prose -- so the re-entry cooldown above has
-                # something real to key off regardless of whether this sell was the
+                # something real to key off regardless of whether this close was the
                 # model's own discretionary call or check_stops' automatic one.
                 exit_kind = _classify_exit(price, pos, order.get("exit_kind"))
                 remaining = pos["qty"] - qty
@@ -990,11 +1220,11 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
-                                                 quote_age_sec, exit_kind, at)
-                       VALUES (?,?,'sell',?,?,?,?,?,?,?,?,?,?,?)""",
+                                                 quote_age_sec, exit_kind, at, direction)
+                       VALUES (?,?,'sell',?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (acct["id"], code, qty, price, fee, gross, realized, cash, reason,
-                     staff_key, age, exit_kind, now))
-                fills.append({"side": "sell", "code": code, "qty": qty, "price": price,
+                     staff_key, age, exit_kind, now, held_dir))
+                fills.append({"side": side, "code": code, "qty": qty, "price": price,
                               "usd": round(gross, 2), "fee": round(fee, 2),
                               "realized": round(realized, 2), "reason": reason})
 
@@ -1035,16 +1265,28 @@ def check_stops(db_path: str, name: str = "crypto") -> dict:
         if mark is None:
             continue  # can't check what can't be priced; execute_orders would reject it anyway
         price = mark["price"]
-        if p["stop_loss"] is not None and price <= p["stop_loss"]:
-            orders.append({"side": "sell", "code": p["code"], "qty": "all",
-                           "reason": f"Automatic stop-loss: price ${price:,.6g} <= stop ${p['stop_loss']:,.6g}"})
-        elif p["take_profit"] is not None and price >= p["take_profit"]:
-            orders.append({"side": "sell", "code": p["code"], "qty": "all",
-                           "reason": f"Automatic take-profit: price ${price:,.6g} >= target ${p['take_profit']:,.6g}"})
+        short = ("direction" in p.keys()) and p["direction"] == "short"
+        close_side = "cover" if short else "sell"
+        # A short's levels sit the opposite way round from a long's -- stop above entry,
+        # target below -- so both comparisons flip with direction.
+        if short:
+            hit_stop = p["stop_loss"] is not None and price >= p["stop_loss"]
+            hit_target = p["take_profit"] is not None and price <= p["take_profit"]
+        else:
+            hit_stop = p["stop_loss"] is not None and price <= p["stop_loss"]
+            hit_target = p["take_profit"] is not None and price >= p["take_profit"]
+        if hit_stop:
+            cmp = ">=" if short else "<="
+            orders.append({"side": close_side, "code": p["code"], "qty": "all",
+                           "reason": f"Automatic stop-loss: price ${price:,.6g} {cmp} stop ${p['stop_loss']:,.6g}"})
+        elif hit_target:
+            cmp = "<=" if short else ">="
+            orders.append({"side": close_side, "code": p["code"], "qty": "all",
+                           "reason": f"Automatic take-profit: price ${price:,.6g} {cmp} target ${p['take_profit']:,.6g}"})
         else:
             held_h = _held_hours(p["opened_at"] if "opened_at" in p.keys() else None)
             if held_h is not None and held_h >= MAX_HOLD_HOURS:
-                orders.append({"side": "sell", "code": p["code"], "qty": "all",
+                orders.append({"side": close_side, "code": p["code"], "qty": "all",
                                "exit_kind": "timeout",
                                "reason": f"Automatic time exit: held {held_h:.1f}h, "
                                          f"past the {MAX_HOLD_HOURS:g}h maximum"})

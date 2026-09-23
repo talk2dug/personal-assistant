@@ -887,13 +887,18 @@ def _apply_paper_orders(db_path: str, output: str, staff_key: str) -> tuple[str,
 
     lines = ["\n\n--- EXECUTION REPORT (by the ledger, not the employee) ---"]
     for f in result["fills"]:
-        if f["side"] == "raise_stop":
+        if f["side"] in ("raise_stop", "lower_stop"):
             # Not a trade. Nothing changed hands, so it carries no qty, usd or fee --
             # that is the whole point of giving the ratchet its own side rather than
             # expressing it as a phantom $0.01 buy. It still belongs in the report: an
             # employee who cannot see that the stop actually moved proposes the same
-            # raise again next run and reads the rejection as the desk refusing it.
-            lines.append(f"STOP RAISED {f['code']} {_fmt_price(f['from_stop'])} -> "
+            # raise/lower again next run and reads the rejection as the desk refusing it.
+            # A run that reaches the `f['usd']`/`f['fee']` line below for one of these
+            # crashes with a KeyError -- that exact bug ran silently for two days
+            # (2026-09-20 to 09-22) before it was caught; lower_stop gets the same
+            # branch from the moment it ships rather than repeating that history.
+            verb = "STOP RAISED" if f["side"] == "raise_stop" else "STOP LOWERED"
+            lines.append(f"{verb} {f['code']} {_fmt_price(f['from_stop'])} -> "
                          f"{_fmt_price(f['to_stop'])} (spot {_fmt_price(f['price'])})")
             continue
         realized = f" realised ${f['realized']:+,.2f}" if "realized" in f else ""

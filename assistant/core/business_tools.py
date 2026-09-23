@@ -20,7 +20,7 @@ import json
 import threading
 from datetime import date, timedelta
 
-from . import agents, business_db, market_data, ops_plans, paper_trading, staff
+from . import agents, business_db, market_data, ops_plans, paper_trading, pipelines, staff
 
 # Split out from BUSINESS_TOOLS (rather than just another entry in that one big list) so
 # staff.py's execute-tier employees can be handed exactly this narrow set alongside
@@ -429,6 +429,35 @@ BUSINESS_TOOLS = [
             "lead_id": {"type": "integer"},
             "status": {"type": "string", "enum": ["new", "interested", "applied", "booked", "rejected", "passed"]},
         }, "required": ["lead_id", "status"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_pipelines",
+        "description": (
+            "Every product idea and how far it has actually got — trend, concept, art, "
+            "listing, social — one line each: which stage it has reached, how many "
+            "approvals are waiting on it, and which sales track (local or automated) it's "
+            "on. This is the trend-to-revenue pipeline state as a whole, the same summary "
+            "the Pipelines board shows. Use this for 'what's in the pipeline' or 'what's "
+            "waiting on me across products' rather than list_product_concepts, which has "
+            "no stage or approval information. Follow up with get_pipeline for one "
+            "product's full chain."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "market": {"type": "string", "enum": ["local", "automated"],
+                       "description": "Only pipelines on this sales track."},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "get_pipeline",
+        "description": (
+            "One product's whole chain, start to finish: the trend that started it (if "
+            "any), the concept, every art brief, every listing, every social post — each "
+            "with what's already been decided and what's still waiting on an approval. "
+            "Get the concept_id from list_pipelines or list_product_concepts first."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "concept_id": {"type": "integer"},
+        }, "required": ["concept_id"]},
     }},
     {"type": "function", "function": {
         "name": "list_trend_leads",
@@ -1313,6 +1342,14 @@ class BusinessClient:
         if name == "set_market_lead_status":
             return {"ok": business_db.set_market_lead_status(
                 db_path, owner, arguments["lead_id"], arguments["status"])}
+
+        if name == "list_pipelines":
+            return {"pipelines": pipelines.list_pipelines(db_path, owner, arguments.get("market"))}
+        if name == "get_pipeline":
+            pipeline = pipelines.get_pipeline(db_path, owner, arguments["concept_id"])
+            if pipeline is None:
+                return {"error": f"no pipeline for concept {arguments['concept_id']}"}
+            return pipeline
 
         if name == "list_trend_leads":
             return {"leads": business_db.list_trend_leads(db_path, owner, arguments.get("status"))}

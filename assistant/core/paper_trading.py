@@ -25,7 +25,7 @@ import json
 import re
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Taker fee per side. Roughly a retail exchange's rate; the point is that it is not zero.
 DEFAULT_FEE_PCT = 0.10
@@ -246,6 +246,8 @@ closed ABOVE their entry -- losers cut to scratches, winners left alone. When th
 frozen as well for two days, the win rate fell to 44% and the book went flat. So: let the
 target run, and walk the stop up behind it.
 
+{current_performance}
+
 Rules enforced in code, not by you:
   * Buys are sized in `usd`. No single order may exceed {max_pct}% of total equity --
     that is roughly one slot, and it is the size to work in.
@@ -257,10 +259,12 @@ Rules enforced in code, not by you:
     percentage, not "later"). A buy missing either is refused.
   * `stop_loss` must be below the fill price and `take_profit` above it. A stop above
     your entry closes the position the instant it opens.
-  * The target must be at least {min_rr:g}x the distance to the stop. At a 42% win rate
-    that ratio is what turns this book positive on arithmetic alone. If a trade is not
-    worth {min_rr:g}:1 to you, it is not worth taking -- that is the trade-off, and
-    passing on that one is a perfectly good answer.
+  * The target must be at least {min_rr:g}x the distance to the stop. That floor was set
+    for a 42% win rate; your actual win rate is in the current-performance line above, and
+    if it is well below that, {min_rr:g}:1 is a floor the ratchet has to make up the rest
+    of, not a number that alone guarantees a positive book. If a trade is not worth
+    {min_rr:g}:1 to you, it is not worth taking -- that is the trade-off, and passing on
+    that one is a perfectly good answer.
   * Adding to a position INHERITS its target, which cannot change; an add-on restating a
     different target is refused. It may state a HIGHER stop (the same trail as above, on
     the same terms), never a lower one. Use `raise_stop` rather than a token add-on when
@@ -279,13 +283,48 @@ in prose above the block.
 """
 
 
-def render_order_instructions() -> str:
+# The window _current_performance_line measures over. Short enough to reflect the current
+# regime rather than smearing in a dead one (an all-time figure would still be diluted by
+# the pre-mechanical-exit era years from now), long enough that a couple of quiet hours
+# can't swing it -- see expectancy()'s own docstring on trusting the sample size.
+CURRENT_PERFORMANCE_WINDOW_DAYS = 7
+
+
+def _current_performance_line(db_path: str | None, name: str = "crypto") -> str:
+    """The 42.4%/+$61.83/etc figures above are dated history -- true the day they were
+    measured, silently wrong once the regime changed. This is the antidote: a
+    freshly-computed line every run, from expectancy(), so the model is never reasoning
+    from a stale snapshot of its own edge."""
+    if db_path is None:
+        return ("CURRENT MEASURED PERFORMANCE: not available for this render -- treat the "
+                "history above as context, not your current odds.")
+    stats = expectancy(db_path, name, days=CURRENT_PERFORMANCE_WINDOW_DAYS)
+    if not stats["closed_trades"]:
+        return "CURRENT MEASURED PERFORMANCE: no closed round-trips yet -- nothing to measure."
+    rr = f"{stats['reward_risk_realized']:.1f}x" if stats["reward_risk_realized"] else "n/a"
+    return (
+        f"CURRENT MEASURED PERFORMANCE, last {CURRENT_PERFORMANCE_WINDOW_DAYS:g} days: over "
+        f"your last {stats['closed_trades']} closed round-trips ({stats['span_days']:.1f} "
+        f"days), {stats['win_rate_pct']:g}% win rate, average win +${stats['avg_win']:.2f} "
+        f"against average loss ${stats['avg_loss']:.2f} (realized payoff {rr}), expectancy "
+        f"${stats['expectancy_per_trade']:.3f}/trade, projected ${stats['projected_daily_pnl']:.2f}/day "
+        f"at current frequency. That is what to trust over the history above if the two "
+        f"disagree -- the history explains why the rules exist, this is whether they are "
+        f"still working."
+    )
+
+
+def render_order_instructions(db_path: str | None = None) -> str:
     """ORDER_INSTRUCTIONS with this module's own limits filled in.
 
     The caller used to assemble these seven keyword arguments itself, and so did two
     tests, so adding one placeholder to the template broke all three at once with a
     KeyError far from the edit. The values are this module's to know; nobody else should
     have to keep a list of them in sync.
+
+    `db_path` is optional so a caller with no live account yet (a fresh test, a dry render)
+    still gets valid instructions -- just without the current-performance line, which needs
+    real closed trades to say anything.
     """
     return ORDER_INSTRUCTIONS.format(
         fee_pct=DEFAULT_FEE_PCT,
@@ -295,7 +334,8 @@ def render_order_instructions() -> str:
         cooldown_hours=STOP_LOSS_COOLDOWN_HOURS,
         min_rr=MIN_REWARD_RISK,
         min_trail=MIN_TRAIL_RISK_FRACTION,
-        max_hold_hours=MAX_HOLD_HOURS)
+        max_hold_hours=MAX_HOLD_HOURS,
+        current_performance=_current_performance_line(db_path))
 
 
 def init_paper_db(db_path: str) -> None:
@@ -1107,6 +1147,73 @@ def performance(db_path: str, name: str = "crypto") -> dict:
         "orders_rejected": rejected,
     })
     return snap
+
+
+def expectancy(db_path: str, name: str = "crypto", days: int | None = None) -> dict:
+    """Win rate, average win/loss, and per-trade expectancy from actual closed round-trips
+    -- the number every claim about the desk's edge should be checked against instead of
+    trusted from memory.
+
+    Before this, every number ever quoted about the desk's performance (the 42.4%/+$2.39/
+    -$2.85 figures baked into ORDER_INSTRUCTIONS, the "+$61.83 over 09-17/18" one) was
+    hand-run SQL pasted into a prompt or a commit message once and left there -- accurate
+    the day it was measured, silently wrong the moment the regime it described changed.
+    This is meant to be called, not remembered.
+
+    A "win" is realized > 0, same convention as performance() above -- NOT
+    exit_kind == 'take_profit'. The stop ratchet routinely turns a stop-loss exit into a
+    profitable one (the stop rose above entry before a pullback hit it), and counting only
+    take_profit exits as wins would undercount exactly the behaviour the ratchet exists to
+    produce.
+
+    `days` narrows to a trailing window (e.g. 7 for "the last week"); None uses every
+    closed round-trip the account has.
+    """
+    acct = ensure_account(db_path, name)
+    query = ("SELECT realized, at FROM paper_trades WHERE account_id = ? AND side = 'sell' "
+             "AND realized IS NOT NULL")
+    params: list = [acct["id"]]
+    if days:
+        query += " AND at >= ?"
+        params.append((datetime.now(timezone.utc) - timedelta(days=days)).isoformat())
+    with closing(_connect(db_path)) as conn:
+        rows = [dict(r) for r in conn.execute(query, params)]
+
+    empty = {
+        "closed_trades": 0, "win_rate_pct": None, "avg_win": None, "avg_loss": None,
+        "reward_risk_realized": None, "expectancy_per_trade": None,
+        "trades_per_day": None, "projected_daily_pnl": None, "span_days": None,
+        "first_trade_at": None, "last_trade_at": None,
+    }
+    if not rows:
+        return empty
+
+    wins = [r["realized"] for r in rows if r["realized"] > 0]
+    losses = [r["realized"] for r in rows if r["realized"] <= 0]
+    total = sum(r["realized"] for r in rows)
+    first_at, last_at = min(r["at"] for r in rows), max(r["at"] for r in rows)
+    # Floored at an hour so a burst of same-minute closes (e.g. a stop-loss cascade) can't
+    # divide by a near-zero span and report an absurd trades-per-day figure.
+    span_days = max((datetime.fromisoformat(last_at) - datetime.fromisoformat(first_at))
+                     .total_seconds() / 86400, 1 / 24)
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    expectancy_per_trade = total / len(rows)
+    trades_per_day = len(rows) / span_days
+
+    return {
+        "closed_trades": len(rows),
+        "win_rate_pct": round(len(wins) / len(rows) * 100, 1),
+        "avg_win": round(avg_win, 3),
+        "avg_loss": round(avg_loss, 3),
+        "reward_risk_realized": round(avg_win / abs(avg_loss), 2) if avg_loss else None,
+        "expectancy_per_trade": round(expectancy_per_trade, 3),
+        "trades_per_day": round(trades_per_day, 1),
+        "projected_daily_pnl": round(expectancy_per_trade * trades_per_day, 2),
+        "span_days": round(span_days, 1),
+        "first_trade_at": first_at,
+        "last_trade_at": last_at,
+    }
 
 
 def reset(db_path: str, name: str = "crypto",

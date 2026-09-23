@@ -551,6 +551,109 @@ class TestPerCoinPerformance:
         assert paper_trading.last_buy_at(db, "SOL") == opened
 
 
+class TestExpectancy:
+    """The number every claim about the desk's edge should be checked against, rather than
+    a hand-run SQL snapshot pasted into a comment and left to go stale -- see the 42.4%
+    figure baked into ORDER_INSTRUCTIONS until this existed to replace it.
+    """
+
+    def _move(self, db, code, rate):
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = ? WHERE code = ?", (rate, code))
+        conn.commit(); conn.close()
+
+    def test_no_closed_trades_is_none_not_zero(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 1000)])
+        stats = paper_trading.expectancy(db)
+        assert stats["closed_trades"] == 0
+        assert stats["win_rate_pct"] is None
+        assert stats["expectancy_per_trade"] is None
+
+    def test_a_win_is_realized_greater_than_zero_not_exit_kind(self, db):
+        """A stop-loss exit can still be a win -- the ratchet routinely raises the stop
+        above entry before a pullback hits it. Classifying by exit_kind instead of by the
+        sign of realized would undercount exactly the behaviour the ratchet exists to
+        produce, which is the mistake worth pinning a test against."""
+        paper_trading.execute_orders(db, [buy("SOL", 1000, stop=190.0, target=260.0)])
+        self._move(db, "SOL", 220.0)          # runs up, so the stop has room to trail
+        paper_trading.execute_orders(db, [{
+            "side": "raise_stop", "code": "SOL", "stop_loss": 205.0, "reason": "trailing"}])
+        self._move(db, "SOL", 204.0)          # pulls back through the raised stop, above entry
+        r = paper_trading.check_stops(db)
+        assert r["fills"] and r["fills"][0]["reason"].startswith("Automatic stop-loss")
+
+        stats = paper_trading.expectancy(db)
+        assert stats["closed_trades"] == 1
+        assert stats["win_rate_pct"] == 100.0
+        assert stats["avg_win"] > 0
+
+    def test_wins_and_losses_blend_into_one_expectancy(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 1000)])
+        self._move(db, "SOL", 260.0)          # hits the 1.3x take_profit default
+        paper_trading.check_stops(db)
+        paper_trading.execute_orders(db, [buy("BTC", 1000)])
+        self._move(db, "BTC", 72_000.0)       # hits the 0.9x stop_loss default
+        paper_trading.check_stops(db)
+
+        stats = paper_trading.expectancy(db)
+        assert stats["closed_trades"] == 2
+        assert stats["win_rate_pct"] == 50.0
+        assert stats["avg_win"] > 0 and stats["avg_loss"] < 0
+        # Expectancy is the plain mean of realized P&L, not a win_rate*avg_win formula
+        # recomputed a second way that could drift from it.
+        assert stats["expectancy_per_trade"] == pytest.approx(
+            (stats["avg_win"] + stats["avg_loss"]) / 2, abs=0.01)
+
+    def test_days_narrows_to_a_trailing_window(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 1000)])
+        self._move(db, "SOL", 260.0)
+        paper_trading.check_stops(db)
+        conn = sqlite3.connect(db)
+        old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        conn.execute("UPDATE paper_trades SET at = ? WHERE side = 'sell'", (old,))
+        conn.commit(); conn.close()
+
+        assert paper_trading.expectancy(db, days=7)["closed_trades"] == 0
+        assert paper_trading.expectancy(db, days=30)["closed_trades"] == 1
+        assert paper_trading.expectancy(db)["closed_trades"] == 1   # no window = all time
+
+    def test_projected_daily_pnl_is_expectancy_times_frequency(self, db):
+        for code, target in (("SOL", 260.0), ("BTC", 104_000.0)):
+            paper_trading.execute_orders(db, [buy(code, 1000)])
+            self._move(db, code, target)
+            paper_trading.check_stops(db)
+        stats = paper_trading.expectancy(db)
+        assert stats["projected_daily_pnl"] == pytest.approx(
+            stats["expectancy_per_trade"] * stats["trades_per_day"], abs=0.01)
+
+
+class TestOrderInstructionsCurrentPerformance:
+    """The prompt used to state its win rate as a fixed 42.4% forever. This is what
+    replaced that: a live number, computed the same way expectancy() is tested above,
+    so the model is reasoning from today's regime rather than a September snapshot."""
+
+    def test_with_no_db_path_it_says_so_rather_than_lying(self):
+        out = paper_trading.render_order_instructions()
+        assert "not available for this render" in out
+        assert "CURRENT MEASURED PERFORMANCE" in out
+
+    def test_with_no_closed_trades_it_says_so(self, db):
+        out = paper_trading.render_order_instructions(db)
+        assert "no closed round-trips yet" in out
+
+    def test_a_closed_trade_produces_a_live_number(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 1000)])
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = 260.0 WHERE code = 'SOL'")
+        conn.commit(); conn.close()
+        paper_trading.check_stops(db)
+
+        out = paper_trading.render_order_instructions(db)
+        assert "100% win rate" in out or "100.0% win rate" in out
+        # The stale hardcoded figure must not still be presented as the current rate.
+        assert "At a 42% win rate" not in out
+
+
 class TestFencedBlockScanning:
     """A real bug with teeth, found the moment a second fenced block joined the reply.
 

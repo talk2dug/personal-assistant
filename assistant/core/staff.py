@@ -1032,7 +1032,7 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             prompt += crypto_journal.build_prior_context(obsidian, emp["title"], role=role)
         if "paper" in feeds:
             from . import paper_trading
-            prompt += paper_trading.render_order_instructions()
+            prompt += paper_trading.render_order_instructions(db_path)
         if journaling:
             # Last, so the output-order note it ends with (prose, journal, orders, verdict)
             # is the final instruction the model reads about how to lay its reply out.

@@ -866,6 +866,22 @@ BUSINESS_TOOLS = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
     {"type": "function", "function": {
+        "name": "paper_expectancy",
+        "description": (
+            "Win rate, average win/loss, and per-trade expectancy computed live from "
+            "actual closed round-trips -- not a hand-run number pasted into a comment "
+            "and left to go stale. Use this for 'is the crypto desk actually working', "
+            "'is it on track for $X a day', or any question about its real edge rather "
+            "than one day's P&L, which is dominated by variance at this trade volume. "
+            "A 'win' is any closed trade with positive realized P&L, including a stop-loss "
+            "exit whose stop had been trailed above entry -- not only take-profit exits."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "days": {"type": "integer",
+                     "description": "Trailing window in days. Omit for all-time."},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "paper_reset",
         "description": (
             "Wipe the paper portfolio back to a cash balance, deleting all positions and "
@@ -1651,6 +1667,9 @@ class BusinessClient:
 
         if name == "paper_performance":
             return paper_trading.performance(db_path)
+
+        if name == "paper_expectancy":
+            return paper_trading.expectancy(db_path, days=arguments.get("days"))
 
         if name == "paper_reset":
             return paper_trading.reset(

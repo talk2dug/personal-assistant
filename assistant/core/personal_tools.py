@@ -18,7 +18,8 @@ the owner explicitly confirms the recipient, the letter text, and the quoted cos
 """
 import logging
 
-from . import business_db, db, finance, kitchen_tools, meal_plan_db, personal_db
+from . import (business_db, db, finance, kitchen_tools, meal_plan_db, owner_requests,
+               personal_db)
 
 logger = logging.getLogger(__name__)
 
@@ -1212,12 +1213,38 @@ class PersonalClient:
         if name == "import_leonardo_art":
             from . import leonardo
 
-            key = getattr(self, "leonardo_api_key", None)
+            # The board first, config second -- the same precedence the Printify and
+            # Shopify clients use. He should be able to paste a key into a screen rather
+            # than edit a file he has never opened.
+            try:
+                owner_requests.init_owner_requests(db_path)
+                from_board = owner_requests.secret(db_path, "leonardo_api_key")
+            except Exception:                                    # noqa: BLE001
+                from_board = None
+            key = from_board or getattr(self, "leonardo_api_key", None)
             if not key:
-                return {"error": "No Leonardo API key is configured. He needs to make "
-                                 "one on Leonardo's API Access page and put it in "
-                                 "config.json as leonardo_api_key. Note the API is "
-                                 "billed separately from his web subscription."}
+                # Raise it on the board rather than only answering in chat: a blocker
+                # mentioned once in conversation is a blocker he scrolls past, and this
+                # one sat unmentioned for a day because of exactly that.
+                owner_requests.raise_request(
+                    db_path, owner,
+                    title="Leonardo.Ai API key, to import the art he already made",
+                    kind="secret", name="leonardo_api_key",
+                    why=("He asked to pull the hundreds of images he has already made in "
+                         "Leonardo into his design catalogue rather than downloading them "
+                         "one at a time. Everything is built and waiting on this key."),
+                    instructions=(
+                        "Leonardo.Ai -> User menu -> API Access -> create a key, and paste "
+                        "it here. The API is billed on its own track (a web subscription "
+                        "does not pay for it), but every account gets $5 of non-expiring "
+                        "API credit and credits are spent GENERATING, not listing or "
+                        "downloading — so importing what already exists should cost "
+                        "nothing."),
+                    blocks="importing his Leonardo artwork", priority=2)
+                return {"error": "No Leonardo API key yet — I have put it on his Needs "
+                                 "You board. He makes one on Leonardo's API Access page "
+                                 "and pastes it there. Tell him it is waiting, and that "
+                                 "importing spends no Leonardo credits."}
             client = leonardo.LeonardoClient(key)
             if arguments.get("check_only"):
                 return leonardo.probe(client)

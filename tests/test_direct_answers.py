@@ -8,7 +8,7 @@ What has to be right is mostly the REFUSALS. A wrong instant answer is worse tha
 right one: it is confidently wrong and it steals the turn from the model that would have
 got it right. So most of this file is about the questions it must decline.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -143,7 +143,7 @@ class TestTheAgenda:
                      local_date))
 
     def test_todays_meetings_are_answered_from_the_table(self, path):
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = date.today().isoformat()
         self._feed(path, [(today, "08:00", "Weekly Standup"), (today, "16:00", "Local Meetup")])
         out = direct_answers.try_direct_answer(path, "what do i have on the agenda today")
         assert "Weekly Standup" in out and "Local Meetup" in out
@@ -151,14 +151,14 @@ class TestTheAgenda:
     def test_the_day_reads_in_clock_order(self, path):
         """The agenda groups by kind, which put a 16:00 meetup above an 08:00 standup --
         fine in a column, wrong when it is read aloud or arrives as a text."""
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = date.today().isoformat()
         self._feed(path, [(today, "16:00", "Late thing"), (today, "08:00", "Early thing")])
         out = direct_answers.try_direct_answer(path, "whats on my agenda today")
         assert out.index("Early thing") < out.index("Late thing")
 
     def test_asking_about_today_does_not_return_tomorrow(self, path):
         from datetime import timedelta
-        today = datetime.now(timezone.utc).date()
+        today = date.today()
         self._feed(path, [(today.isoformat(), "09:00", "Today thing"),
                           ((today + timedelta(days=1)).isoformat(), "09:00", "Tomorrow thing")])
         out = direct_answers.try_direct_answer(path, "what do i have today")
@@ -166,7 +166,7 @@ class TestTheAgenda:
 
     def test_tomorrow_returns_tomorrow_only(self, path):
         from datetime import timedelta
-        today = datetime.now(timezone.utc).date()
+        today = date.today()
         self._feed(path, [(today.isoformat(), "09:00", "Today thing"),
                           ((today + timedelta(days=1)).isoformat(), "09:00", "Tomorrow thing")])
         out = direct_answers.try_direct_answer(path, "whats on tomorrow")
@@ -175,7 +175,7 @@ class TestTheAgenda:
     def test_a_week_question_covers_the_week(self, path):
         """'what does MY week look like' once answered with today alone."""
         from datetime import timedelta
-        today = datetime.now(timezone.utc).date()
+        today = date.today()
         self._feed(path, [((today + timedelta(days=3)).isoformat(), "10:00", "Thursday thing")])
         assert "Thursday thing" in direct_answers.try_direct_answer(
             path, "what does my week look like")
@@ -184,7 +184,7 @@ class TestTheAgenda:
         """Jack: "Two tasks due tomorrow. Then I can ask about them if I want." His task
         titles are whole paragraphs, and four of them bury the two meetings that are the
         actual answer."""
-        today = datetime.now(timezone.utc).date()
+        today = date.today()
         self._feed(path, [(today.isoformat(), "09:00", "Standup")])
         for i in range(2):
             personal_db.create_task(
@@ -196,14 +196,14 @@ class TestTheAgenda:
         assert "explanatory" not in out, "the paragraph must not be in the answer"
 
     def test_one_of_something_is_singular(self, path):
-        today = datetime.now(timezone.utc).date()
+        today = date.today()
         self._feed(path, [(today.isoformat(), "09:00", "Standup")])
         personal_db.create_task(path, 1, "Just the one", due_at=today.isoformat())
         assert "plus 1 task due" in direct_answers.try_direct_answer(path, "whats on today")
 
     def test_a_day_with_nothing_timed_drops_the_plus(self, path):
         """"- plus 2 tasks due" with nothing before it reads as a fragment."""
-        today = datetime.now(timezone.utc).date()
+        today = date.today()
         self._feed(path, [])
         personal_db.create_task(path, 1, "Only a task", due_at=today.isoformat())
         out = direct_answers.try_direct_answer(path, "whats on today")
@@ -211,7 +211,7 @@ class TestTheAgenda:
 
     def test_an_all_day_meeting_is_still_named(self, path):
         """It has no clock but it is still an appointment, not a countable."""
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = date.today().isoformat()
         self._feed(path, [(today, None, "Offsite")])
         assert "Offsite" in direct_answers.try_direct_answer(path, "whats on today")
 
@@ -220,7 +220,7 @@ class TestTheAgenda:
         assert "Nothing on today" in direct_answers.try_direct_answer(path, "whats on today")
 
     def test_asking_to_ADD_something_still_reaches_the_model(self, path):
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = date.today().isoformat()
         self._feed(path, [(today, "08:00", "Standup")])
         assert direct_answers.try_direct_answer(
             path, "add a meeting to my calendar tomorrow at 3") is None

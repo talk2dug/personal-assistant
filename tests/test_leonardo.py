@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from assistant.core import db as core_db, design_assets, leonardo
+from assistant.core import db as core_db, design_assets, leonardo, owner_requests
 
 
 @pytest.fixture
@@ -17,6 +17,8 @@ def path(tmp_path):
     p = str(tmp_path / "leo.db")
     core_db.init_db(p)
     design_assets.init_design_assets(p)
+    # Asking without a key now files the ask on his board, so it needs somewhere to go.
+    owner_requests.init_owner_requests(p)
     return p
 
 
@@ -170,3 +172,63 @@ class TestImporting:
         out = leonardo.import_generations(path, 1, client, str(tmp_path / "media"),
                                           download=lambda u, t: None)
         assert out["ok"] is True and out["imported"] == 0
+
+
+class TestTheKeyHeHasNotGivenYet:
+    """What happens before there is a key matters more than it looks: this sat built and
+    unused for a day because the ask lived in one chat message rather than on the board
+    where his blockers live."""
+
+    def _client(self, db):
+        from assistant.core import personal_tools
+
+        return personal_tools.PersonalClient(db, 1)
+
+    def test_it_raises_the_ask_on_his_board(self, path):
+        from assistant.core import owner_requests
+
+        self._client(path).call_tool("import_leonardo_art", {"check_only": True})
+        asks = [r for r in owner_requests.list_requests(path, 1, status="open")
+                if r["name"] == "leonardo_api_key"]
+        assert len(asks) == 1
+
+    def test_asking_twice_does_not_grow_the_board(self, path):
+        from assistant.core import owner_requests
+
+        client = self._client(path)
+        for _ in range(3):
+            client.call_tool("import_leonardo_art", {"check_only": True})
+        asks = [r for r in owner_requests.list_requests(path, 1, status="open")
+                if r["name"] == "leonardo_api_key"]
+        assert len(asks) == 1, "a board that grows a row per run is one he stops reading"
+
+    def test_the_ask_says_it_costs_nothing(self, path):
+        """The obvious reason not to bother: 'another paid API'. It is not — credits are
+        spent generating, not listing."""
+        from assistant.core import owner_requests
+
+        self._client(path).call_tool("import_leonardo_art", {"check_only": True})
+        ask = [r for r in owner_requests.list_requests(path, 1, status="open")
+               if r["name"] == "leonardo_api_key"][0]
+        assert "cost" in (ask["instructions"] or "").lower()
+
+    def test_a_key_pasted_into_the_board_is_used(self, path, monkeypatch):
+        """He should be able to paste it into a screen rather than edit config.json, a
+        file he has never opened."""
+        from assistant.core import owner_requests, personal_tools
+
+        ask = owner_requests.raise_request(path, 1, title="k", kind="secret",
+                                           name="leonardo_api_key")
+        owner_requests.provide(path, 1, ask, "board-key")
+
+        seen = {}
+
+        class Fake:
+            def __init__(self, key):
+                seen["key"] = key
+
+        monkeypatch.setattr(leonardo, "LeonardoClient", Fake)
+        monkeypatch.setattr(leonardo, "probe", lambda c: {"ok": True})
+        personal_tools.PersonalClient(path, 1, leonardo_api_key="config-key").call_tool(
+            "import_leonardo_art", {"check_only": True})
+        assert seen["key"] == "board-key", "the board wins over config"

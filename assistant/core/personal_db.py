@@ -155,6 +155,56 @@ CREATE TABLE IF NOT EXISTS task_details (
 );
 CREATE INDEX IF NOT EXISTS idx_task_details_task ON task_details(task_id, position);
 
+-- Freeform items captured in passing -- something worth keeping but not yet worth the
+-- ceremony of turning into a full task. Sorted into a real task later via sort_capture,
+-- or left as a plain record of what came up during the day.
+CREATE TABLE IF NOT EXISTS day_capture (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    on_date TEXT NOT NULL,
+    text TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    sorted_into_task_id INTEGER REFERENCES personal_tasks(id)
+);
+CREATE INDEX IF NOT EXISTS idx_day_capture_date ON day_capture(owner_user_id, on_date);
+
+-- A dated scratchpad, separate from task_details: a note here is about the DAY, not about
+-- any one task -- "press ran hot on the black pass" belongs to today, not to a task id.
+CREATE TABLE IF NOT EXISTS day_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_user_id INTEGER NOT NULL,
+    on_date TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_day_notes_date ON day_notes(owner_user_id, on_date);
+
+-- A task's own checklist -- distinct from task_blockers (another task) and task_details
+-- (what it needs): a step is work inside the task itself, ticked off one at a time.
+CREATE TABLE IF NOT EXISTS task_steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    done_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id, position);
+
+-- What happened to a task, in order. update_task overwrites status in place, so without
+-- this "started Tuesday, deferred Thursday, picked again Friday" survives nowhere.
+-- Append-only, same discipline as debt_observations: a row is never edited, only added to.
+CREATE TABLE IF NOT EXISTS task_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES personal_tasks(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,   -- 'created' | 'picked' | 'unpicked' | 'status' | 'deferred'
+    detail TEXT,
+    source TEXT NOT NULL DEFAULT 'dashboard',
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, at);
+
 -- "I can't book the trip until Ghost has a vet and a boarding place." A task that is
 -- waiting on another one is not a task he can pick up today, and showing it to him as
 -- though it were is how a list stops being trustworthy.
@@ -604,7 +654,12 @@ def create_task(
             (owner_user_id, project_id, text, priority, due_at, track, now, now),
         )
         conn.commit()
-        return cur.lastrowid
+        task_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, detail, source, at) VALUES (?, 'created', ?, 'dashboard', ?)",
+            (task_id, text, now))
+        conn.commit()
+        return task_id
 
 
 def list_tasks(db_path: str, owner_user_id: int, status: str | None = None,
@@ -657,7 +712,14 @@ def update_task(db_path: str, owner_user_id: int, task_id: int, **fields) -> boo
             [*allowed.values(), _now(), task_id, owner_user_id],
         )
         conn.commit()
-        return cur.rowcount > 0
+        changed = cur.rowcount > 0
+        if changed and "status" in allowed:
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, detail, source, at)"
+                " VALUES (?, 'status', ?, 'dashboard', ?)",
+                (task_id, allowed["status"], _now()))
+            conn.commit()
+        return changed
 
 
 # --- what a task needs in order to be done ---------------------------------------
@@ -847,6 +909,10 @@ def pick_for_day(db_path: str, owner_user_id: int, task_id: int, on_date: str) -
                 "INSERT INTO day_picks (owner_user_id, task_id, on_date, picked_at)"
                 " VALUES (?, ?, ?, ?)",
                 (owner_user_id, task_id, on_date, _now()))
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, detail, source, at)"
+                " VALUES (?, 'picked', ?, 'dashboard', ?)",
+                (task_id, on_date, _now()))
             conn.commit()
             return True
         except sqlite3.IntegrityError:
@@ -859,7 +925,14 @@ def unpick_for_day(db_path: str, owner_user_id: int, task_id: int, on_date: str)
             "DELETE FROM day_picks WHERE owner_user_id = ? AND task_id = ? AND on_date = ?",
             (owner_user_id, task_id, on_date))
         conn.commit()
-        return cur.rowcount > 0
+        removed = cur.rowcount > 0
+        if removed:
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, detail, source, at)"
+                " VALUES (?, 'unpicked', ?, 'dashboard', ?)",
+                (task_id, on_date, _now()))
+            conn.commit()
+        return removed
 
 
 def picks_for_day(db_path: str, owner_user_id: int, on_date: str) -> list[int]:
@@ -867,6 +940,130 @@ def picks_for_day(db_path: str, owner_user_id: int, on_date: str) -> list[int]:
         return [r["task_id"] for r in conn.execute(
             "SELECT task_id FROM day_picks WHERE owner_user_id = ? AND on_date = ?"
             " ORDER BY picked_at", (owner_user_id, on_date))]
+
+
+# --- quick capture, daily notes, task steps, task history --------------------
+
+def add_capture(db_path: str, owner_user_id: int, text: str, on_date: str) -> int:
+    """A freeform item jotted down in passing -- not yet worth the ceremony of a task."""
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "INSERT INTO day_capture (owner_user_id, on_date, text, captured_at)"
+            " VALUES (?, ?, ?, ?)",
+            (owner_user_id, on_date, text.strip(), _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_capture(db_path: str, owner_user_id: int, on_date: str, unsorted_only: bool = False):
+    query = "SELECT * FROM day_capture WHERE owner_user_id = ? AND on_date = ?"
+    params: list = [owner_user_id, on_date]
+    if unsorted_only:
+        query += " AND sorted_into_task_id IS NULL"
+    query += " ORDER BY captured_at"
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(query, params))
+
+
+def sort_capture(db_path: str, owner_user_id: int, capture_id: int, task_id: int) -> bool:
+    """Turns a captured item into a link to a real task, once one exists for it."""
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "UPDATE day_capture SET sorted_into_task_id = ? WHERE id = ? AND owner_user_id = ?",
+            (task_id, capture_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_capture(db_path: str, owner_user_id: int, capture_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "DELETE FROM day_capture WHERE id = ? AND owner_user_id = ?",
+            (capture_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def add_day_note(db_path: str, owner_user_id: int, on_date: str, text: str) -> int:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "INSERT INTO day_notes (owner_user_id, on_date, text, created_at) VALUES (?, ?, ?, ?)",
+            (owner_user_id, on_date, text.strip(), _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_day_notes(db_path: str, owner_user_id: int, on_date: str):
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(
+            "SELECT * FROM day_notes WHERE owner_user_id = ? AND on_date = ? ORDER BY created_at",
+            (owner_user_id, on_date)))
+
+
+def delete_day_note(db_path: str, owner_user_id: int, note_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "DELETE FROM day_notes WHERE id = ? AND owner_user_id = ?", (note_id, owner_user_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def add_task_step(db_path: str, task_id: int, text: str) -> int:
+    with closing(_connect(db_path)) as conn:
+        position = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS n FROM task_steps WHERE task_id = ?",
+            (task_id,)).fetchone()["n"]
+        cur = conn.execute(
+            "INSERT INTO task_steps (task_id, text, position, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, text.strip(), position, _now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_task_steps(db_path: str, task_ids: list[int]) -> dict:
+    if not task_ids:
+        return {}
+    marks = ",".join("?" for _ in task_ids)
+    out: dict[int, list[dict]] = {}
+    with closing(_connect(db_path)) as conn:
+        for row in conn.execute(
+                f"SELECT * FROM task_steps WHERE task_id IN ({marks}) ORDER BY task_id, position",
+                task_ids):
+            out.setdefault(row["task_id"], []).append(dict(row))
+    return out
+
+
+def toggle_task_step(db_path: str, step_id: int, done: bool) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute(
+            "UPDATE task_steps SET done = ?, done_at = ? WHERE id = ?",
+            (1 if done else 0, _now() if done else None, step_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_task_step(db_path: str, step_id: int) -> bool:
+    with closing(_connect(db_path)) as conn:
+        cur = conn.execute("DELETE FROM task_steps WHERE id = ?", (step_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def record_task_event(db_path: str, task_id: int, kind: str, detail: str | None = None,
+                      source: str = "dashboard") -> None:
+    """Appends one line of a task's history. Never edited, never deleted -- see the
+    schema comment on task_events for why."""
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, detail, source, at) VALUES (?, ?, ?, ?, ?)",
+            (task_id, kind, detail, source, _now()))
+        conn.commit()
+
+
+def list_task_events(db_path: str, task_id: int):
+    with closing(_connect(db_path)) as conn:
+        return _rows(conn.execute(
+            "SELECT * FROM task_events WHERE task_id = ? ORDER BY at DESC", (task_id,)))
 
 
 def due_tasks(db_path: str, as_of: str | None = None):

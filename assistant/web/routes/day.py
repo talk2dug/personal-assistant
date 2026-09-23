@@ -130,3 +130,158 @@ async def update_rhythm(rhythm_id: int, request: Request):
     if not changed:
         raise HTTPException(404, "no such rhythm, or nothing to change")
     return {"ok": True}
+
+
+@router.get("/week")
+async def week(request: Request, start: str | None = None, days: int = 7):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    start_date = _today(request, start)
+    return {"week": routine.week_shape(cfg.db_path, owner["id"], start_date, days=days)}
+
+
+@router.get("/brief")
+async def brief(request: Request, on_date: str | None = None):
+    """Tomorrow's brief, relative to `on_date` (defaults to today)."""
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    return routine.tomorrow_brief(cfg.db_path, owner["id"], _today(request, on_date),
+                                  tz_name=cfg.timezone)
+
+
+@router.get("/capture")
+async def list_capture(request: Request, on_date: str | None = None, unsorted_only: bool = False):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    when = _today(request, on_date).isoformat()
+    return {"capture": personal_db.list_capture(cfg.db_path, owner["id"], when, unsorted_only)}
+
+
+@router.post("/capture")
+async def add_capture(request: Request):
+    """A freeform item jotted down in passing -- something worth keeping that isn't yet
+    worth the ceremony of a task."""
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    on_date = _today(request, body.get("on_date")).isoformat()
+    capture_id = personal_db.add_capture(cfg.db_path, owner["id"], text, on_date)
+    return {"ok": True, "id": capture_id}
+
+
+@router.post("/capture/{capture_id}/sort")
+async def sort_capture(capture_id: int, request: Request):
+    """Turns a captured item into a link to a real task."""
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    body = await request.json()
+    task_id = body.get("task_id")
+    if not task_id:
+        raise HTTPException(400, "task_id is required")
+    ok = personal_db.sort_capture(cfg.db_path, owner["id"], capture_id, task_id)
+    if not ok:
+        raise HTTPException(404, "no such capture")
+    return {"ok": True}
+
+
+@router.delete("/capture/{capture_id}")
+async def delete_capture(capture_id: int, request: Request):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    removed = personal_db.delete_capture(cfg.db_path, owner["id"], capture_id)
+    return {"ok": True, "removed": removed}
+
+
+@router.get("/notes")
+async def list_notes(request: Request, on_date: str | None = None):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    when = _today(request, on_date).isoformat()
+    return {"notes": personal_db.list_day_notes(cfg.db_path, owner["id"], when)}
+
+
+@router.post("/notes")
+async def add_note(request: Request):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    on_date = _today(request, body.get("on_date")).isoformat()
+    note_id = personal_db.add_day_note(cfg.db_path, owner["id"], on_date, text)
+    return {"ok": True, "id": note_id}
+
+
+@router.delete("/notes/{note_id}")
+async def delete_note(note_id: int, request: Request):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    removed = personal_db.delete_day_note(cfg.db_path, owner["id"], note_id)
+    return {"ok": True, "removed": removed}
+
+
+def _own_task(cfg, owner_id: int, task_id: int) -> bool:
+    """Same ownership-check-before-write discipline as log_rhythm above -- task_steps and
+    task_events key on task_id alone, so without this any signed-in caller could write
+    against another user's task."""
+    return any(t["id"] == task_id for t in personal_db.list_tasks(cfg.db_path, owner_id))
+
+
+@router.get("/tasks/{task_id}/steps")
+async def list_steps(task_id: int, request: Request):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    if not _own_task(cfg, owner["id"], task_id):
+        raise HTTPException(404, "no such task")
+    return {"steps": personal_db.list_task_steps(cfg.db_path, [task_id]).get(task_id, [])}
+
+
+@router.post("/tasks/{task_id}/steps")
+async def add_step(task_id: int, request: Request):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    if not _own_task(cfg, owner["id"], task_id):
+        raise HTTPException(404, "no such task")
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    step_id = personal_db.add_task_step(cfg.db_path, task_id, text)
+    return {"ok": True, "id": step_id}
+
+
+@router.post("/tasks/{task_id}/steps/{step_id}/toggle")
+async def toggle_step(task_id: int, step_id: int, request: Request):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    if not _own_task(cfg, owner["id"], task_id):
+        raise HTTPException(404, "no such task")
+    body = await request.json() if await request.body() else {}
+    done = bool(body.get("done", True))
+    ok = personal_db.toggle_task_step(cfg.db_path, step_id, done)
+    if not ok:
+        raise HTTPException(404, "no such step")
+    return {"ok": True, "done": done}
+
+
+@router.delete("/tasks/{task_id}/steps/{step_id}")
+async def delete_step(task_id: int, step_id: int, request: Request):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    if not _own_task(cfg, owner["id"], task_id):
+        raise HTTPException(404, "no such task")
+    removed = personal_db.delete_task_step(cfg.db_path, step_id)
+    return {"ok": True, "removed": removed}
+
+
+@router.get("/tasks/{task_id}/history")
+async def task_history(task_id: int, request: Request):
+    owner = require_owner(request)
+    cfg = request.app.state.cfg
+    if not _own_task(cfg, owner["id"], task_id):
+        raise HTTPException(404, "no such task")
+    return {"history": personal_db.list_task_events(cfg.db_path, task_id)}

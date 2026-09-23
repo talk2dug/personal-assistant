@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS design_assets (
     added_at TEXT NOT NULL
 );
 
+-- Format facet from docs/asset-taxonomy-schema.md's §4 -- deterministic from the file
+-- itself, so it needs no AI pass to be useful. The six-facet tagging layer that document
+-- also designs (subject/style/color/medium/product-fit, with their own vocab tables) is
+-- NOT implemented here -- tag_status stays 'untagged' until that pass exists; this only
+-- carries what can be known about a file without looking at what it depicts.
+
 CREATE INDEX IF NOT EXISTS idx_design_assets_status
     ON design_assets(status, id DESC);
 """
@@ -76,6 +82,21 @@ def init_design_assets(db_path: str) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(design_assets)")}
         if "external_id" not in cols:
             conn.execute("ALTER TABLE design_assets ADD COLUMN external_id TEXT")
+        # The format facet, added the same additive way once the Design Library needed
+        # somewhere to show "is this print-ready" without an AI pass.
+        for column, ddl in (
+            ("file_format", "TEXT"),
+            ("is_vector", "INTEGER"),
+            ("print_ready", "INTEGER"),
+            ("print_ready_note", "TEXT"),
+            ("resolution_dpi", "INTEGER"),
+            ("orientation", "TEXT"),
+            ("tag_status", "TEXT NOT NULL DEFAULT 'untagged'"),
+            ("tagged_at", "TEXT"),
+            ("reviewed_at", "TEXT"),
+        ):
+            if column not in cols:
+                conn.execute(f"ALTER TABLE design_assets ADD COLUMN {column} {ddl}")
         conn.executescript(EXTERNAL_INDEX)
         conn.commit()
 

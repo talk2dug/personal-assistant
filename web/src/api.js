@@ -320,6 +320,32 @@ export const api = {
     request(`/api/media/archives?unreadable=${unreadable}`),
   mediaDuplicates: () => request('/api/media/duplicates'),
 
+  // The Design Library: everything that isn't the drive-scan triage above. 'design' routes
+  // to design_assets.py under the hood, every other category to library_assets.py's shared
+  // table -- the split is a backend detail the frontend never has to know about.
+  libraryAssets: ({ category = '', status = '', search = '', limit = 100, offset = 0 } = {}) =>
+    request(`/api/library/assets?${new URLSearchParams({
+        ...(category ? { category } : {}),
+        ...(status ? { status } : {}),
+        ...(search ? { search } : {}),
+        limit, offset,
+      })}`),
+  libraryCategories: () => request('/api/library/categories'),
+  addLibraryAsset: (asset) =>
+    request('/api/library/assets', { method: 'POST', body: JSON.stringify(asset) }),
+  decideLibraryAsset: (id, category, status) =>
+    request(`/api/library/assets/${id}/decide`, {
+      method: 'POST', body: JSON.stringify({ category, status }),
+    }),
+  decideLibraryAssetsBulk: (ids, category, status) =>
+    request('/api/library/assets/decide-bulk', {
+      method: 'POST', body: JSON.stringify({ ids, category, status }),
+    }),
+  generateMockup: (designAssetId, prompt) =>
+    request('/api/library/mockups/generate', {
+      method: 'POST', body: JSON.stringify({ design_asset_id: designAssetId, prompt }),
+    }),
+
   financeSummary: () => request('/api/finance/summary'),
   financeProjection: (horizonDays = 180) =>
     request(`/api/finance/projection?horizon_days=${horizonDays}`),
@@ -375,6 +401,42 @@ export const api = {
   clearRhythmLog: (rhythmId, onDate) =>
     request(`/api/day/rhythm/${rhythmId}/log${onDate ? `?on_date=${onDate}` : ''}`,
             { method: 'DELETE' }),
+
+  // The week strip and tomorrow's brief -- both relative to a date, both read-only.
+  weekShape: (start, days) => request('/api/day/week'
+    + (start || days ? `?${new URLSearchParams({
+        ...(start ? { start } : {}),
+        ...(days ? { days } : {}),
+      })}` : '')),
+  tomorrowBrief: (onDate) => request('/api/day/brief' + (onDate ? `?on_date=${onDate}` : '')),
+
+  // The quick-capture inbox: jot it down now, sort it into a real task later.
+  dayCapture: (onDate, unsortedOnly) => request('/api/day/capture'
+    + `?${new URLSearchParams({
+        ...(onDate ? { on_date: onDate } : {}),
+        ...(unsortedOnly ? { unsorted_only: 'true' } : {}),
+      })}`),
+  addCapture: (text, onDate) =>
+    request('/api/day/capture', { method: 'POST', body: JSON.stringify({ text, on_date: onDate }) }),
+  sortCapture: (captureId, taskId) =>
+    request(`/api/day/capture/${captureId}/sort`, { method: 'POST', body: JSON.stringify({ task_id: taskId }) }),
+  deleteCapture: (captureId) => request(`/api/day/capture/${captureId}`, { method: 'DELETE' }),
+
+  // A dated scratchpad -- about the day, not about any one task.
+  dayNotes: (onDate) => request('/api/day/notes' + (onDate ? `?on_date=${onDate}` : '')),
+  addDayNote: (text, onDate) =>
+    request('/api/day/notes', { method: 'POST', body: JSON.stringify({ text, on_date: onDate }) }),
+  deleteDayNote: (noteId) => request(`/api/day/notes/${noteId}`, { method: 'DELETE' }),
+
+  // A task's own checklist and its history.
+  taskSteps: (taskId) => request(`/api/day/tasks/${taskId}/steps`),
+  addTaskStep: (taskId, text) =>
+    request(`/api/day/tasks/${taskId}/steps`, { method: 'POST', body: JSON.stringify({ text }) }),
+  toggleTaskStep: (taskId, stepId, done) =>
+    request(`/api/day/tasks/${taskId}/steps/${stepId}/toggle`, { method: 'POST', body: JSON.stringify({ done }) }),
+  deleteTaskStep: (taskId, stepId) =>
+    request(`/api/day/tasks/${taskId}/steps/${stepId}`, { method: 'DELETE' }),
+  taskHistory: (taskId) => request(`/api/day/tasks/${taskId}/history`),
 
   // The whole credit picture in one call: the answers are related -- a dispute deadline
   // changes what is worth doing this week -- and fetching them apart lets the page show

@@ -60,6 +60,7 @@ from .routes.finance import router as finance_router
 from .routes.grocery import router as grocery_router
 from .routes.infra import router as infra_router
 from .routes.kitchen import router as kitchen_router
+from .routes.library import router as library_router
 from .routes.media import router as media_router
 from .routes.openai_compat import router as openai_compat_router
 from .routes.personal_tasks import router as personal_tasks_router
@@ -123,6 +124,7 @@ def create_app(
     app.include_router(devices_router)
     app.include_router(notifications_router)
     app.include_router(media_router)
+    app.include_router(library_router)
     app.include_router(schedule_router)
     app.include_router(weather_router)
     app.include_router(personal_tasks_router)

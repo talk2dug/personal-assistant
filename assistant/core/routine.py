@@ -309,6 +309,77 @@ def plan_day(db_path: str, owner_user_id: int, tz_name: str = "America/New_York"
     }
 
 
+# --- the week, and tomorrow --------------------------------------------------------
+
+def week_shape(db_path: str, owner_user_id: int, start: date, days: int = 7) -> list[dict]:
+    """One row per day in the strip: how loaded it is and what's on it, so a day can be
+    picked without leaving today's view. Loops rhythm_status rather than a single wider
+    query -- same multi-day-grouped shape as agenda.upcoming(), and rhythm_status already
+    does the "what's due, what's slipping" work per day; a week is seven of those."""
+    out = []
+    for i in range(days):
+        day = start + timedelta(days=i)
+        rhythm = rhythm_status(db_path, owner_user_id, day)
+        anchors = [a for a in rhythm["anchors"] if a["due_today"]]
+        out.append({
+            "date": day.isoformat(),
+            "weekday": day.strftime("%a"),
+            "day_num": day.day,
+            "anchor_count": len(anchors),
+            "hard_count": sum(1 for a in anchors if a.get("hard")),
+            "done_count": sum(1 for a in anchors if a.get("today_state") == "done"),
+            "slipping_count": sum(1 for h in rhythm["habits"] if h["slipping"]),
+        })
+    return out
+
+
+def tomorrow_brief(db_path: str, owner_user_id: int, today: date,
+                   tz_name: str = "America/New_York") -> dict:
+    """First-up, cannot-slip, carries-over, prep-tonight -- everything tomorrow already
+    knows before it arrives.
+
+    Carries over is today's picks that never got marked done, diffed against tomorrow's
+    own plan so nothing shows up twice. Prep tonight reuses task_details: a 'note' detail
+    labelled 'Prep tonight' on a task carrying into tomorrow, the same convention
+    task_note() already uses for labelled detail lines -- no schema change needed for one
+    more label.
+    """
+    from . import personal_db
+    tomorrow = today + timedelta(days=1)
+    brief = plan_day(db_path, owner_user_id, tz_name=tz_name, today=tomorrow)
+
+    today_picks = personal_db.picks_for_day(db_path, owner_user_id, today.isoformat())
+    with closing(_connect(db_path)) as conn:
+        undone = [dict(r) for r in conn.execute(
+            f"SELECT * FROM personal_tasks WHERE id IN "
+            f"({','.join('?' * len(today_picks))}) AND status NOT IN ('done', 'dropped')",
+            today_picks)] if today_picks else []
+    # Only dedupe against what's explicitly picked for tomorrow already -- pick_from is
+    # the ranked shortlist of every open task, which would include this one trivially and
+    # hide it from "carries over" for no reason.
+    already_tomorrow = {t["id"] for t in brief["picked"]}
+    carries_over = [t for t in undone if t["id"] not in already_tomorrow]
+
+    prep = []
+    all_ids = [t["id"] for t in brief["picked"] + carries_over]
+    if all_ids:
+        details = personal_db.list_task_details(db_path, all_ids)
+        for task_id, items in details.items():
+            for d in items:
+                if d["kind"] == "note" and (d.get("label") or "").strip().lower() == "prep tonight":
+                    prep.append({"task_id": task_id, "text": d["value"]})
+
+    hard_anchors = [a for a in brief["anchors"] if a.get("hard")]
+    return {
+        "date": brief["date"],
+        "weekday": brief["weekday"],
+        "anchors": brief["anchors"],
+        "cannot_slip": hard_anchors,
+        "carries_over": carries_over,
+        "prep_tonight": prep,
+    }
+
+
 # --- what to text, and when -------------------------------------------------------
 
 def due_nudges(db_path: str, owner_user_id: int, tz_name: str = "America/New_York",

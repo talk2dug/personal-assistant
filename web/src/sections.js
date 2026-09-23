@@ -14,6 +14,7 @@ import Agents from './pages/Agents'
 import Company from './pages/Company'
 import Credit from './pages/Credit'
 import Day from './pages/Day'
+import DesignLibrary from './pages/DesignLibrary'
 import Crypto from './pages/Crypto'
 import Email from './pages/Email'
 import Finance from './pages/Finance'
@@ -80,6 +81,11 @@ export const SECTIONS = [
       + 'at each stage' },
   { key: 'media', label: 'Media', element: Media, wide: true,
     context: 'the Media section, showing the catalogue by kind and volume' },
+  { key: 'library', label: 'Design Library', element: DesignLibrary, wide: true,
+    context: 'the Design Library, browsing the print business\'s creative asset shelf by '
+      + 'category -- Designs and Local imports hold real data today; Decal icons, Cut '
+      + 'files, Footage, Mockups, Backgrounds, Human models, Rooms and STL models are '
+      + 'real empty shelves waiting to be filled, not invented content' },
   { key: 'agents', label: 'Office', element: Agents, wide: true,
     context: 'the Office, showing the full staff roster and what each agent is doing' },
   { key: 'rf', label: 'RF / Around the House', element: RfAround, wide: true,

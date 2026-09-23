@@ -1,0 +1,230 @@
+/* The Design Library. Reuses .media-table / .media-bulk / .media-empty / .media-error /
+   .chip from index.css rather than re-deriving the same table and bulk-bar look a second
+   time -- this file only covers what's actually new: the three-pane layout, the category
+   rail, the grid cards, and the inspector. */
+
+.dl-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 2px 4px 20px;
+  height: 100%;
+  min-height: 0;
+}
+
+.dl-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+
+.dl-header h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.04em;
+  color: var(--steel-bright);
+}
+
+.dl-sub { margin: 2px 0 0; font-size: 11.5px; color: var(--text-faint); }
+
+.dl-view-toggle { display: flex; }
+.dl-view-toggle button {
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+}
+.dl-view-toggle button + button { border-left: 0; }
+.dl-view-toggle button.is-on { color: var(--steel-bright); background: var(--bg-inset); border-color: var(--steel-mid); }
+
+.dl-toolbar { display: flex; align-items: center; gap: 14px; }
+.dl-search {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-dim);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+}
+.dl-search:focus { border-bottom-color: var(--steel-mid); }
+.dl-search:disabled { opacity: 0.4; }
+.dl-toolbar select {
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-dim);
+  color: var(--text);
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.dl-body { display: flex; gap: 16px; flex: 1; min-height: 0; align-items: flex-start; }
+
+/* --- category rail ------------------------------------------------------- */
+
+.dl-rail { flex: 0 0 210px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+
+.dl-rail-item {
+  appearance: none;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 6px 8px;
+  font-size: 12.5px;
+  text-align: left;
+}
+.dl-rail-item:hover { color: var(--text); background: var(--bg-inset); }
+.dl-rail-item.is-active { color: var(--steel-bright); border-left-color: var(--amber); background: var(--bg-inset); }
+.dl-rail-count { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
+
+/* --- main browser ---------------------------------------------------------- */
+
+.dl-main { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+
+.dl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.dl-card { border: 1px solid var(--border-dim); display: flex; flex-direction: column; }
+.dl-card.is-selected { border-color: var(--steel-mid); }
+
+.dl-card-thumb {
+  position: relative;
+  aspect-ratio: 1;
+  background: var(--bg-inset);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dl-card-tag {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  color: var(--border);
+}
+.dl-card-thumb input[type='checkbox'] { position: absolute; top: 6px; left: 6px; }
+
+.dl-card-badge {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  padding: 1px 6px;
+  font-family: var(--font-display);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-dim);
+  color: var(--text-faint);
+}
+.dl-card-badge.is-available, .dl-card-badge.is-import, .dl-card-badge.is-imported { color: var(--cyan); border-color: var(--cyan-dim); }
+.dl-card-badge.is-used { color: var(--steel-mid); }
+.dl-card-badge.is-retired, .dl-card-badge.is-skip { color: var(--text-faint); opacity: 0.7; }
+.dl-card-badge.is-undecided { color: var(--amber); border-color: var(--amber-dim); }
+
+.dl-card-body {
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  padding: 7px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dl-card-title {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dl-card-body:hover .dl-card-title { color: var(--steel-bright); }
+.dl-card-meta { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-faint); }
+
+.dl-list-name {
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+}
+.dl-list-name:hover { color: var(--steel-bright); }
+.dl-list-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+
+/* --- inspector -------------------------------------------------------------- */
+
+.dl-inspector { flex: 0 0 300px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; }
+
+.dl-inspector-empty { font-size: 12px; color: var(--text-dim); padding: 8px; }
+
+.dl-inspector-top { display: flex; align-items: center; }
+.dl-inspector-kind {
+  font-family: var(--font-display);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--steel-mid);
+}
+
+.dl-inspector-title {
+  margin: 4px 0 0;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 17px;
+  line-height: 1.25;
+  color: var(--steel-bright);
+}
+
+.dl-inspector-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
+.dl-inspector-sub { font-size: 11.5px; color: var(--text-faint); }
+
+.dl-inspector-status { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+.dl-inspector-label {
+  font-family: var(--font-display);
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.dl-inspector-status-btns { display: flex; flex-wrap: wrap; gap: 5px; }
+.dl-inspector-status-btns .chip.is-on { border-color: var(--amber); color: var(--amber); background: rgba(232, 163, 61, 0.1); }
+
+.dl-inspector-actions { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.dl-inspector-actions button {
+  appearance: none;
+  cursor: pointer;
+  height: 30px;
+  background: rgba(232, 163, 61, 0.08);
+  border: 1px solid var(--amber-dim);
+  color: var(--amber);
+  font-family: var(--font-display);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.dl-inspector-actions button:hover:not(:disabled) { background: rgba(232, 163, 61, 0.16); }
+.dl-inspector-actions button:disabled { opacity: 0.4; cursor: default; }
+.dl-inspector-hint { font-size: 10.5px; line-height: 1.4; color: var(--text-faint); }
+
+@media (max-width: 1000px) {
+  .dl-body { flex-direction: column; }
+  .dl-rail { flex: none; width: 100%; flex-direction: row; flex-wrap: wrap; }
+  .dl-inspector { flex: none; width: 100%; }
+}

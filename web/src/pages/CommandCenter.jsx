@@ -73,6 +73,9 @@ export default function CommandCenter() {
   const pendingReview = Number(
     (snapshot?.readouts || []).find((r) => r.label === 'Review queue')?.value ?? 0,
   )
+  const needsYou = Number(
+    (snapshot?.readouts || []).find((r) => r.label === 'Needs you')?.value ?? 0,
+  )
   const stale = !!snapshotError || (lastUpdate ? now - lastUpdate.getTime() > STALE_MS : false)
 
   return (
@@ -83,6 +86,7 @@ export default function CommandCenter() {
       <Header
         weather={weather}
         pendingReview={pendingReview}
+        needsYou={needsYou}
         onOpenSection={openSection}
         lastUpdate={lastUpdate}
         stale={stale}

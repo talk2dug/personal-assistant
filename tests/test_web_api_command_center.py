@@ -113,7 +113,9 @@ def test_an_empty_install_still_returns_every_section(db_path):
     assert snap["tasks"]["items"] == []
     assert snap["events"] == []
     assert len(snap["pipelines"]) == 2
-    assert len(snap["readouts"]) == 8
+    # Nine since "Needs you" joined them: an ask that is blocking the team is
+    # front-screen news, not something he has to open a section to discover.
+    assert len(snap["readouts"]) == 9
 
 
 # --- resilience --------------------------------------------------------------

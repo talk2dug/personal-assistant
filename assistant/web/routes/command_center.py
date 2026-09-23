@@ -147,7 +147,13 @@ def _pipelines(conn) -> list[dict]:
          "note": "proposed", "k": "warn"},
         {"label": "Listings", "count": _count(conn, "SELECT COUNT(*) FROM store_listings WHERE status = 'draft'"),
          "note": "unlisted", "k": "base"},
-        {"label": "Live", "count": _count(conn, "SELECT COUNT(*) FROM store_listings WHERE status = 'approved'"),
+        # Live means a storefront agrees, not that our own pipeline finished with it:
+        # 'approved' is a status this system sets on itself, and counting it here said
+        # products were live while nothing was for sale anywhere.
+        {"label": "Live", "count": _count(conn, "SELECT COUNT(*) FROM store_listings "
+                                                "WHERE status IN ('published','on_sale') "
+                                                "AND external_id IS NOT NULL "
+                                                "AND trim(external_id) <> ''"),
          "note": "on the shelf", "k": "dim"},
     ]
     development = [
@@ -307,6 +313,13 @@ def _readouts(conn, owner_id: int | None, tasks: dict) -> list[dict]:
     pending = _count(conn, "SELECT COUNT(*) FROM review_items WHERE status = 'pending'")
     out.append({"label": "Review queue", "value": str(pending), "sub": "needs your call",
                 "k": "warn" if pending else "dim"})
+
+    # The needs-you board, on the front screen. An ask that is blocking real work was
+    # only visible to someone who opened a section called "Projects" and knew to look --
+    # which is how a finished Leonardo importer sat idle for a day waiting on one key.
+    asks = _count(conn, "SELECT COUNT(*) FROM owner_requests WHERE status = 'open'")
+    out.append({"label": "Needs you", "value": str(asks), "sub": "blocking the team",
+                "k": "warn" if asks else "dim"})
 
     # "Low" is per-item: an item carries its own low_threshold, and one that has never
     # been given a threshold is only low when it has actually run out.

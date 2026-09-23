@@ -14,7 +14,7 @@ import { SECTIONS } from '../../sections'
  * reachable by clicking the panel or readout it belongs to — the menu is the
  * completeness guarantee, not the primary route.
  */
-export default function Header({ weather, pendingReview, onOpenSection, lastUpdate, stale }) {
+export default function Header({ weather, pendingReview, needsYou = 0, onOpenSection, lastUpdate, stale }) {
   const { user, logout } = useAuth()
   const [now, setNow] = useState(() => new Date())
   const [menuOpen, setMenuOpen] = useState(false)
@@ -107,6 +107,12 @@ export default function Header({ weather, pendingReview, onOpenSection, lastUpda
                   {s.label}
                   {s.key === 'review' && pendingReview > 0 && (
                     <span className="cc-launcher-badge">{pendingReview}</span>
+                  )}
+                  {/* Same badge as the review queue, for the same reason: something is
+                      stopped and waiting on him, and he should not have to open it to
+                      find that out. */}
+                  {s.key === 'needs' && needsYou > 0 && (
+                    <span className="cc-launcher-badge">{needsYou}</span>
                   )}
                 </button>
               ))}

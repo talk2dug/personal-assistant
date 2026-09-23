@@ -627,6 +627,44 @@ class TestExpectancy:
             stats["expectancy_per_trade"] * stats["trades_per_day"], abs=0.01)
 
 
+class TestDeposit:
+    """Topping an account up, as distinct from reset()'s wipe-and-restart."""
+
+    def test_cash_and_equity_both_rise_by_the_deposit(self, db):
+        before = paper_trading.portfolio(db)
+        after = paper_trading.deposit(db, amount=500.0)
+        assert after["cash"] == pytest.approx(before["cash"] + 500.0)
+        assert after["equity"] == pytest.approx(before["equity"] + 500.0)
+
+    def test_the_deposit_does_not_count_itself_as_a_gain(self, db):
+        """starting_cash has to move with the deposit, or total_return jumps by exactly
+        the deposit the moment it lands -- indistinguishable from a windfall trade."""
+        before = paper_trading.portfolio(db)
+        after = paper_trading.deposit(db, amount=500.0)
+        assert after["total_return"] == pytest.approx(before["total_return"])
+        assert after["starting_cash"] == before["starting_cash"] + 500.0
+
+    def test_positions_and_history_are_untouched(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 1000)])
+        before_positions = paper_trading.portfolio(db)["positions"]
+        before_trades = paper_trading.performance(db)["closed_trades"]
+        paper_trading.deposit(db, amount=500.0)
+        after = paper_trading.portfolio(db)
+        assert [p["code"] for p in after["positions"]] == [p["code"] for p in before_positions]
+        assert paper_trading.performance(db)["closed_trades"] == before_trades
+
+    def test_a_non_positive_amount_is_refused(self, db):
+        with pytest.raises(ValueError):
+            paper_trading.deposit(db, amount=0)
+        with pytest.raises(ValueError):
+            paper_trading.deposit(db, amount=-100)
+
+    def test_deposits_accumulate(self, db):
+        paper_trading.deposit(db, amount=500.0)
+        after = paper_trading.deposit(db, amount=250.0)
+        assert after["starting_cash"] == 10_000.0 + 750.0
+
+
 class TestOrderInstructionsCurrentPerformance:
     """The prompt used to state its win rate as a fixed 42.4% forever. This is what
     replaced that: a live number, computed the same way expectancy() is tested above,

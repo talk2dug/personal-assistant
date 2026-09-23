@@ -1216,6 +1216,24 @@ def expectancy(db_path: str, name: str = "crypto", days: int | None = None) -> d
     }
 
 
+def deposit(db_path: str, name: str = "crypto", amount: float = 0.0) -> dict:
+    """Adds fresh capital to a running account -- cash and starting_cash move together, so
+    total_return in portfolio() keeps meaning "P&L from trading" rather than a deposit
+    quietly counting itself as a gain the day it lands. Unlike reset(), positions and the
+    full trade history are untouched: this is topping the account up, not restarting it.
+    """
+    if amount <= 0:
+        raise ValueError("deposit amount must be positive")
+    acct = ensure_account(db_path, name)
+    now = _now()
+    with closing(_connect(db_path)) as conn:
+        conn.execute(
+            "UPDATE paper_accounts SET cash = cash + ?, starting_cash = starting_cash + ?, "
+            "updated_at = ? WHERE id = ?", (amount, amount, now, acct["id"]))
+        conn.commit()
+    return portfolio(db_path, name)
+
+
 def reset(db_path: str, name: str = "crypto",
           starting_cash: float = DEFAULT_STARTING_CASH) -> dict:
     """Wipe the account back to cash. Destructive, so it is never called automatically."""

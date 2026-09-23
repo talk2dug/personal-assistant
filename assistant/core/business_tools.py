@@ -882,6 +882,18 @@ BUSINESS_TOOLS = [
         }, "required": []},
     }},
     {"type": "function", "function": {
+        "name": "paper_deposit",
+        "description": (
+            "Adds fresh cash to the running paper account -- only on an explicit request "
+            "to top it up. Unlike paper_reset this touches nothing else: positions and the "
+            "full trade history are untouched, and the deposit does not count itself as a "
+            "gain (starting_cash moves with it, so total_return still means P&L only)."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "amount": {"type": "number", "description": "How much cash to add."},
+        }, "required": ["amount"]},
+    }},
+    {"type": "function", "function": {
         "name": "paper_reset",
         "description": (
             "Wipe the paper portfolio back to a cash balance, deleting all positions and "
@@ -1670,6 +1682,12 @@ class BusinessClient:
 
         if name == "paper_expectancy":
             return paper_trading.expectancy(db_path, days=arguments.get("days"))
+
+        if name == "paper_deposit":
+            try:
+                return paper_trading.deposit(db_path, amount=float(arguments["amount"]))
+            except ValueError as e:
+                return {"error": str(e)}
 
         if name == "paper_reset":
             return paper_trading.reset(

@@ -59,3 +59,16 @@ def test_days_argument_passes_through(client, db_path):
     paper_trading.ensure_account(db_path)
     result = client.call_tool("paper_expectancy", {"days": 7})
     assert result["closed_trades"] == 0
+
+
+def test_paper_deposit_tops_up_the_account(client, db_path):
+    paper_trading.ensure_account(db_path, starting_cash=500.0)
+    result = client.call_tool("paper_deposit", {"amount": 500.0})
+    assert result["starting_cash"] == 1000.0
+    assert result["cash"] == 1000.0
+
+
+def test_paper_deposit_refuses_a_bad_amount(client, db_path):
+    paper_trading.ensure_account(db_path)
+    result = client.call_tool("paper_deposit", {"amount": -50})
+    assert "error" in result

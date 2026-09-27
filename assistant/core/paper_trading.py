@@ -260,6 +260,15 @@ before taking the other side. Everything below (slot sizing, the reward:risk flo
 re-entry cooldown, the maximum hold) applies to both directions equally; where a rule
 differs by direction it says so.
 
+Shorting is NOT the same bet as a long pointed the other way, whatever the mirrored rules
+above suggest. A market drifts up more often than it drifts down, so a bounce you are
+shorting is fighting the tape in a way a pullback you are buying is not, and a short's
+downside is structurally unbounded while a long's is capped at zero -- a real short squeeze
+is a faster, harder move than an ordinary breakdown. Once you have enough closed shorts for
+it to mean anything, CURRENT MEASURED PERFORMANCE below breaks your short results out on
+their own -- read that line, not just the pooled one, before deciding your short entries
+are working.
+
 Why, in the desk's own numbers. Choosing your own exits freely lost money: over 92 closed
 round-trips you won 42.4% of the time with an average win of +$2.39 against an average
 loss of -$2.85, because you held winners a median of 2.0 hours and losers 8.7 hours.
@@ -300,6 +309,14 @@ Rules enforced in code, not by you:
     that failed thesis needs to cool off, not get re-entered on the next momentum call. A
     stop on the long side does not block a short on the same coin, or the reverse -- that
     is a reversal call, not the whipsaw this cools off.
+  * A whole DIRECTION cools off the same way: once {min_direction_trades} or more closed
+    round-trips on one side (long or short) in the current-performance window show negative
+    expectancy, every NEW open on that side is refused -- not just the one coin, the whole
+    direction -- until the losing sample ages out of the window on its own. This does not
+    lift early for a winner; there is no order that reopens it sooner. If your shorts (or
+    longs) are being refused with "circuit-broken" as the reason, that is why -- say so
+    plainly rather than guessing at a different cause, and manage what is already open
+    instead of trying another entry on that side.
   * Churn costs {fee_pct}% per side. That is an argument against trading the same coin
     repeatedly, not against holding several different ones.
 
@@ -318,11 +335,28 @@ in prose above the block.
 CURRENT_PERFORMANCE_WINDOW_DAYS = 7
 
 
+# Below this many closed short round-trips, a win-rate figure is closer to a coin flip
+# than a measurement -- 3 losses in a row is unremarkable noise at n=5 and a real pattern
+# at n=50. Set from the actual incident this guards: pooling 14 losing-heavy shorts into
+# 262 mostly-long round-trips diluted a -$12.98/14 problem into an invisible rounding
+# error on the combined win rate.
+MIN_TRADES_FOR_DIRECTION_LINE = 5
+
+
 def _current_performance_line(db_path: str | None, name: str = "crypto") -> str:
     """The 42.4%/+$61.83/etc figures above are dated history -- true the day they were
     measured, silently wrong once the regime changed. This is the antidote: a
     freshly-computed line every run, from expectancy(), so the model is never reasoning
-    from a stale snapshot of its own edge."""
+    from a stale snapshot of its own edge.
+
+    Also breaks out the short side on its own once there is enough of it to say anything.
+    Real incident: shorting shipped 2026-09-24, and by 2026-09-26 its 14 closed trades were
+    28.6% win rate / -$12.98 total -- more than half of everything the account had lost
+    since a $500 top-up two days earlier -- while the POOLED win-rate figure this line
+    already showed stayed near the desk's long-standing ~50%, because 14 bad trades don't
+    move a number averaged over 262. A trader who could only see the pooled figure had no
+    way to notice its newest, worst-performing behaviour was even happening.
+    """
     if db_path is None:
         return ("CURRENT MEASURED PERFORMANCE: not available for this render -- treat the "
                 "history above as context, not your current odds.")
@@ -330,7 +364,7 @@ def _current_performance_line(db_path: str | None, name: str = "crypto") -> str:
     if not stats["closed_trades"]:
         return "CURRENT MEASURED PERFORMANCE: no closed round-trips yet -- nothing to measure."
     rr = f"{stats['reward_risk_realized']:.1f}x" if stats["reward_risk_realized"] else "n/a"
-    return (
+    line = (
         f"CURRENT MEASURED PERFORMANCE, last {CURRENT_PERFORMANCE_WINDOW_DAYS:g} days: over "
         f"your last {stats['closed_trades']} closed round-trips ({stats['span_days']:.1f} "
         f"days), {stats['win_rate_pct']:g}% win rate, average win +${stats['avg_win']:.2f} "
@@ -340,6 +374,26 @@ def _current_performance_line(db_path: str | None, name: str = "crypto") -> str:
         f"disagree -- the history explains why the rules exist, this is whether they are "
         f"still working."
     )
+
+    short_stats = expectancy(db_path, name, days=CURRENT_PERFORMANCE_WINDOW_DAYS, direction="short")
+    if short_stats["closed_trades"] >= MIN_TRADES_FOR_DIRECTION_LINE:
+        short_rr = (f"{short_stats['reward_risk_realized']:.1f}x"
+                   if short_stats["reward_risk_realized"] else "n/a")
+        line += (
+            f"\nSHORTS SPECIFICALLY, same window: {short_stats['closed_trades']} closed, "
+            f"{short_stats['win_rate_pct']:g}% win rate, average win +${short_stats['avg_win']:.2f} "
+            f"against average loss ${short_stats['avg_loss']:.2f} (payoff {short_rr}), "
+            f"expectancy ${short_stats['expectancy_per_trade']:.3f}/trade. If this number is "
+            f"meaningfully worse than the pooled figure above, your short entries need a "
+            f"real reason the bounce is failing (the momentum state shown per chart says "
+            f"'rising but tiring' or worse, not a fresh 'rising' bounce you are betting will "
+            f"turn), and the stop needs real room against the visible recent high/low, not "
+            f"just enough to sit barely above entry -- a short's downside is structurally "
+            f"unbounded while a long's is capped at zero, so it is the one side where a stop "
+            f"with no breathing room gets found by ordinary noise before the thesis is even "
+            f"wrong."
+        )
+    return line
 
 
 def render_order_instructions(db_path: str | None = None) -> str:
@@ -363,6 +417,7 @@ def render_order_instructions(db_path: str | None = None) -> str:
         min_rr=MIN_REWARD_RISK,
         min_trail=MIN_TRAIL_RISK_FRACTION,
         max_hold_hours=MAX_HOLD_HOURS,
+        min_direction_trades=MIN_TRADES_FOR_DIRECTION_LINE,
         current_performance=_current_performance_line(db_path))
 
 
@@ -897,6 +952,41 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
 
             if side in ("buy", "short"):
                 direction = "short" if side == "short" else "long"
+                # Circuit breaker: a direction with a proven, measured negative edge over a
+                # large-enough recent sample stops opening NEW positions until it earns the
+                # right back. The SHORTS SPECIFICALLY line in _current_performance_line below
+                # is advisory text, and advisory text was already tried and failed here: it
+                # shipped 2026-09-26 showing 14 short trades at -$12.98, visible every single
+                # run, and shorting kept opening new losers anyway -- 20 trades at -$18.21 by
+                # 09-27, because a stateless model call is free to decide "this one's
+                # different" every cycle with nothing in the code to stop it. This check is
+                # symmetric (it applies to 'long' too, not just a one-off short ban) and it is
+                # a cool-off, not a permanent kill switch -- but it cannot be traded out of:
+                # every new open in the direction is refused while it is tripped, so there is
+                # no way to place the one lucky winner that waves it off early (which would
+                # just recreate "this one's different" with extra steps). It only clears once
+                # the losing sample ages out of the CURRENT_PERFORMANCE_WINDOW_DAYS window on
+                # its own -- go quiet in that direction for the window's length and the gate
+                # re-evaluates empty, below MIN_TRADES_FOR_DIRECTION_LINE, and opens again. It
+                # only blocks opening a brand-new position; managing or closing one already
+                # held is unaffected.
+                if pos is None or pos["qty"] <= 0:
+                    dir_stats = expectancy(
+                        db_path, name, days=CURRENT_PERFORMANCE_WINDOW_DAYS, direction=direction)
+                    if (dir_stats["closed_trades"] >= MIN_TRADES_FOR_DIRECTION_LINE
+                            and dir_stats["expectancy_per_trade"] is not None
+                            and dir_stats["expectancy_per_trade"] < 0):
+                        reject(order, (
+                            f"{direction} entries are circuit-broken right now: over the last "
+                            f"{dir_stats['closed_trades']} closed {direction} round-trips in "
+                            f"the last {CURRENT_PERFORMANCE_WINDOW_DAYS:g} days, expectancy is "
+                            f"${dir_stats['expectancy_per_trade']:.3f}/trade at "
+                            f"{dir_stats['win_rate_pct']:g}% win rate -- a real, measured "
+                            f"negative edge, not noise. No new {direction} opens until this "
+                            f"window's expectancy turns non-negative again; managing existing "
+                            f"positions is unaffected."
+                        ))
+                        continue
                 # Scoped to (code, direction): a stop-out on the long side and then a
                 # short on the same coin is a reversal thesis, not the whipsaw this cools
                 # off -- see the migration note on paper_trades.direction above.
@@ -1391,7 +1481,8 @@ def performance(db_path: str, name: str = "crypto") -> dict:
     return snap
 
 
-def expectancy(db_path: str, name: str = "crypto", days: int | None = None) -> dict:
+def expectancy(db_path: str, name: str = "crypto", days: int | None = None,
+               direction: str | None = None) -> dict:
     """Win rate, average win/loss, and per-trade expectancy from actual closed round-trips
     -- the number every claim about the desk's edge should be checked against instead of
     trusted from memory.
@@ -1409,12 +1500,20 @@ def expectancy(db_path: str, name: str = "crypto", days: int | None = None) -> d
     produce.
 
     `days` narrows to a trailing window (e.g. 7 for "the last week"); None uses every
-    closed round-trip the account has.
+    closed round-trip the account has. `direction` narrows to 'long' or 'short' alone --
+    pooling both together is how the short side's real underperformance stayed invisible
+    for two days after shipping (a handful of losing shorts is noise inside 262 pooled
+    trades; it is not noise inside 14).
     """
+    if direction is not None and direction not in ("long", "short"):
+        raise ValueError("direction must be 'long', 'short', or None for both")
     acct = ensure_account(db_path, name)
     query = ("SELECT realized, at FROM paper_trades WHERE account_id = ? AND side = 'sell' "
              "AND realized IS NOT NULL")
     params: list = [acct["id"]]
+    if direction is not None:
+        query += " AND direction = ?"
+        params.append(direction)
     if days:
         query += " AND at >= ?"
         params.append((datetime.now(timezone.utc) - timedelta(days=days)).isoformat())

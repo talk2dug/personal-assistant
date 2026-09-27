@@ -679,6 +679,27 @@ class TestExpectancy:
         assert stats["projected_daily_pnl"] == pytest.approx(
             stats["expectancy_per_trade"] * stats["trades_per_day"], abs=0.01)
 
+    def test_direction_filters_to_just_that_side(self, db):
+        """Real incident this guards: pooling long and short together hid a losing short
+        streak inside an otherwise-healthy overall win rate -- a caller has to be able to
+        ask for one side alone to see it."""
+        paper_trading.execute_orders(db, [buy("SOL", 1000)])
+        self._move(db, "SOL", 260.0)               # long wins
+        paper_trading.check_stops(db)
+        paper_trading.execute_orders(db, [short("BTC", 1000)])
+        self._move(db, "BTC", 88_000.0)            # short loses (price rose against it)
+        paper_trading.check_stops(db)
+
+        assert paper_trading.expectancy(db, direction="long")["closed_trades"] == 1
+        assert paper_trading.expectancy(db, direction="long")["win_rate_pct"] == 100.0
+        assert paper_trading.expectancy(db, direction="short")["closed_trades"] == 1
+        assert paper_trading.expectancy(db, direction="short")["win_rate_pct"] == 0.0
+        assert paper_trading.expectancy(db)["closed_trades"] == 2
+
+    def test_direction_rejects_an_unknown_value(self, db):
+        with pytest.raises(ValueError):
+            paper_trading.expectancy(db, direction="sideways")
+
 
 class TestDeposit:
     """Topping an account up, as distinct from reset()'s wipe-and-restart."""
@@ -743,6 +764,161 @@ class TestOrderInstructionsCurrentPerformance:
         assert "100% win rate" in out or "100.0% win rate" in out
         # The stale hardcoded figure must not still be presented as the current rate.
         assert "At a 42% win rate" not in out
+
+    def test_the_short_breakdown_is_absent_below_the_minimum_sample(self, db):
+        """A single bad short must not trigger a scary-looking breakout line -- that is
+        exactly the noise-at-small-n this line exists to avoid producing itself."""
+        paper_trading.execute_orders(db, [short("SOL", 1000)])
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = 220.0 WHERE code = 'SOL'")
+        conn.commit(); conn.close()
+        paper_trading.check_stops(db)
+
+        out = paper_trading.render_order_instructions(db)
+        assert "SHORTS SPECIFICALLY" not in out
+
+    def test_the_short_breakdown_appears_once_the_sample_is_big_enough(self, db, monkeypatch):
+        """Real incident this is the fix for: 14 losing-heavy shorts were invisible inside
+        a 262-trade pooled win rate. Once there are enough closed shorts to mean something,
+        they get their own line rather than staying averaged away."""
+        # Five short round-trips, all losers (price rises against a short) -- enough to
+        # clear MIN_TRADES_FOR_DIRECTION_LINE, re-using SOL since only its qty/price differ
+        # per round-trip, not the coin. The stop-loss re-entry cooldown would otherwise
+        # block round-trip 2 onward on the same coin/direction.
+        monkeypatch.setattr(paper_trading, "STOP_LOSS_COOLDOWN_HOURS", 0.0)
+        for _ in range(5):
+            paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = 220.0 WHERE code = 'SOL'")
+            conn.commit(); conn.close()
+            paper_trading.check_stops(db)
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = 200.0 WHERE code = 'SOL'")
+            conn.commit(); conn.close()
+
+        out = paper_trading.render_order_instructions(db)
+        assert "SHORTS SPECIFICALLY" in out
+        assert "5 closed" in out
+        assert "0% win rate" in out or "0.0% win rate" in out
+
+
+class TestDirectionCircuitBreaker:
+    """The SHORTS SPECIFICALLY line above is advisory text a model is free to override --
+    and it was: it shipped 2026-09-26 showing 14 losing shorts, stayed visible every run,
+    and shorting kept opening new losers anyway (20 trades/-$18.21 by 09-27). This is the
+    enforced version: execute_orders itself refuses a brand-new open in a direction whose
+    trailing expectancy has gone negative over a real sample, symmetric across long/short,
+    and it lifts itself the moment that direction earns a positive expectancy back.
+    """
+
+    def _lose_five_shorts(self, db, monkeypatch, code="SOL"):
+        monkeypatch.setattr(paper_trading, "STOP_LOSS_COOLDOWN_HOURS", 0.0)
+        for _ in range(5):
+            paper_trading.execute_orders(db, [short(code, 500, stop=220.0, target=140.0)])
+            conn = sqlite3.connect(db)
+            conn.execute(f"UPDATE market_coins SET rate = 220.0 WHERE code = '{code}'")
+            conn.commit(); conn.close()
+            paper_trading.check_stops(db)
+            conn = sqlite3.connect(db)
+            conn.execute(f"UPDATE market_coins SET rate = 200.0 WHERE code = '{code}'")
+            conn.commit(); conn.close()
+
+    def test_a_new_short_is_refused_once_short_expectancy_is_proven_negative(self, db, monkeypatch):
+        self._lose_five_shorts(db, monkeypatch)
+
+        result = paper_trading.execute_orders(db, [short("BTC", 500)])
+
+        assert result["fills"] == []
+        assert len(result["rejections"]) == 1
+        assert "circuit-broken" in result["rejections"][0]["reason"]
+        assert "short" in result["rejections"][0]["reason"]
+        assert paper_trading.portfolio(db)["positions"] == []
+
+    def test_the_breaker_does_not_block_the_other_direction(self, db, monkeypatch):
+        """A negative short expectancy says nothing about longs -- the gate is per
+        direction, not a whole-desk kill switch."""
+        self._lose_five_shorts(db, monkeypatch)
+
+        result = paper_trading.execute_orders(db, [buy("BTC", 500)])
+
+        assert len(result["fills"]) == 1
+        assert result["rejections"] == []
+
+    def test_the_breaker_does_not_block_managing_an_existing_position(self, db, monkeypatch):
+        """Only opening NEW risk in a proven-bad direction is refused -- a position already
+        held keeps working normally (raising its stop, covering it, etc.)."""
+        paper_trading.execute_orders(db, [short("PEPE", 500)])   # opens before the breaker trips
+        self._lose_five_shorts(db, monkeypatch, code="SOL")
+
+        result = paper_trading.execute_orders(
+            db, [{"side": "lower_stop", "code": "PEPE", "stop_loss": 0.0000128}])
+
+        assert len(result["fills"]) == 1
+        assert result["fills"][0]["side"] == "lower_stop"
+
+    def test_the_breaker_requires_the_minimum_sample_first(self, db, monkeypatch):
+        """One or two bad shorts are noise, not a measured edge -- same
+        MIN_TRADES_FOR_DIRECTION_LINE threshold the prompt line already uses."""
+        monkeypatch.setattr(paper_trading, "STOP_LOSS_COOLDOWN_HOURS", 0.0)
+        paper_trading.execute_orders(db, [short("SOL", 500, stop=220.0, target=140.0)])
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = 220.0 WHERE code = 'SOL'")
+        conn.commit(); conn.close()
+        paper_trading.check_stops(db)
+
+        result = paper_trading.execute_orders(db, [short("BTC", 500)])
+        assert len(result["fills"]) == 1
+
+    def test_long_side_trips_the_same_breaker_symmetrically(self, db, monkeypatch):
+        """Not a hardcoded short ban -- the same rule applies to longs the moment their
+        own trailing expectancy goes negative."""
+        monkeypatch.setattr(paper_trading, "STOP_LOSS_COOLDOWN_HOURS", 0.0)
+        for _ in range(5):
+            paper_trading.execute_orders(db, [buy("SOL", 500)])   # default stop 180, target 260
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = 180.0 WHERE code = 'SOL'")
+            conn.commit(); conn.close()
+            paper_trading.check_stops(db)
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = 200.0 WHERE code = 'SOL'")
+            conn.commit(); conn.close()
+
+        result = paper_trading.execute_orders(db, [buy("BTC", 500)])
+
+        assert result["fills"] == []
+        assert "circuit-broken" in result["rejections"][0]["reason"]
+        assert "long" in result["rejections"][0]["reason"]
+
+    def test_the_breaker_cannot_be_traded_out_of_by_a_lucky_winner(self, db, monkeypatch):
+        """It has to be a real cool-off, not a gate a model can talk its way past with one
+        good guess -- every new short stays refused while it's tripped, including the very
+        trade that would otherwise "prove" the direction again. Placing a winner is not a
+        path out (see the next test for what actually is)."""
+        self._lose_five_shorts(db, monkeypatch)
+        blocked = paper_trading.execute_orders(db, [short("BTC", 500)])
+        assert blocked["fills"] == []
+
+        # Even a would-be big winner never gets the chance to open and prove itself.
+        result = paper_trading.execute_orders(db, [short("PEPE", 1000, stop=0.000014, target=0.000002)])
+        assert result["fills"] == []
+        assert "circuit-broken" in result["rejections"][0]["reason"]
+
+    def test_the_breaker_clears_once_the_losing_sample_ages_out_of_the_window(self, db, monkeypatch):
+        """The only way out: go quiet in that direction until the losses fall outside
+        CURRENT_PERFORMANCE_WINDOW_DAYS, the same trailing window expectancy() itself
+        uses. Mirrors test_days_narrows_to_a_trailing_window's exact technique."""
+        self._lose_five_shorts(db, monkeypatch)
+        blocked = paper_trading.execute_orders(db, [short("BTC", 500)])
+        assert blocked["fills"] == []
+
+        conn = sqlite3.connect(db)
+        old = (datetime.now(timezone.utc)
+               - timedelta(days=paper_trading.CURRENT_PERFORMANCE_WINDOW_DAYS + 1)).isoformat()
+        conn.execute("UPDATE paper_trades SET at = ? WHERE direction = 'short'", (old,))
+        conn.commit(); conn.close()
+
+        result = paper_trading.execute_orders(db, [short("BTC", 500)])
+        assert len(result["fills"]) == 1
 
 
 class TestFencedBlockScanning:

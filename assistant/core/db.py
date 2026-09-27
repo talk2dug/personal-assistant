@@ -129,6 +129,17 @@ CREATE TABLE IF NOT EXISTS savings_goals (
     name TEXT NOT NULL,
     target_amount REAL NOT NULL,
     target_date TEXT,
+    -- What is actually in it. Kept here because the money can live somewhere no
+    -- aggregator can see it: his SoFi Vaults are internal allocations of the Savings
+    -- account, so Era is shown one balance and never the split. A goal with a target and
+    -- no current figure is an aspiration, not a tracker.
+    current_amount REAL NOT NULL DEFAULT 0,
+    -- 'saving' is money he is accumulating for himself; 'earmarked' is money already
+    -- spoken for, like a debt settlement fund. They must not be added together and
+    -- called savings -- see finance_brief.
+    kind TEXT NOT NULL DEFAULT 'saving' CHECK (kind IN ('saving', 'earmarked')),
+    funded_from TEXT,
+    updated_at TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -246,6 +257,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conversation_cols = {row[1] for row in conn.execute("PRAGMA table_info(conversations)")}
     if "source" not in conversation_cols:
         conn.execute("ALTER TABLE conversations ADD COLUMN source TEXT")
+
+    # Goals gained a balance, a kind and a source account when he opened SoFi Vaults that
+    # no aggregator can see into. Existing rows default to 0 saved and 'saving', which is
+    # what they were: targets with no progress recorded anywhere.
+    goal_cols = {row[1] for row in conn.execute("PRAGMA table_info(savings_goals)")}
+    if "current_amount" not in goal_cols:
+        conn.execute("ALTER TABLE savings_goals ADD COLUMN current_amount REAL NOT NULL DEFAULT 0")
+    if "kind" not in goal_cols:
+        # No CHECK on the added column: SQLite cannot add a constrained column to an
+        # existing table, and the writer validates. Fresh databases get the constraint.
+        conn.execute("ALTER TABLE savings_goals ADD COLUMN kind TEXT NOT NULL DEFAULT 'saving'")
+    if "funded_from" not in goal_cols:
+        conn.execute("ALTER TABLE savings_goals ADD COLUMN funded_from TEXT")
+    if "updated_at" not in goal_cols:
+        conn.execute("ALTER TABLE savings_goals ADD COLUMN updated_at TEXT")
 
     _migrate_users_role_guest(conn)
 
@@ -803,12 +829,32 @@ def resolve_pending_action(db_path: str, action_id: int, status: str) -> None:
 
 # --- savings goals (ours, not Era's) ---------------------------------------------
 
-def create_savings_goal(db_path: str, owner_user_id: int, name: str, target_amount: float, target_date: str | None = None) -> int:
+GOAL_KINDS = ("saving", "earmarked")
+
+
+def create_savings_goal(db_path: str, owner_user_id: int, name: str, target_amount: float,
+                        target_date: str | None = None, current_amount: float = 0.0,
+                        kind: str = "saving", funded_from: str | None = None) -> int:
+    """A pot he is filling.
+
+    `kind` separates money he is building for himself ('saving') from money already owed
+    to someone else ('earmarked') -- a debt settlement fund is not savings, and adding the
+    two together would flatter the only number the payoff plan turns on.
+
+    `funded_from` names where it physically sits, e.g. "SoFi Vault — Emergency". That
+    matters because the money can be somewhere no aggregator reports: a SoFi Vault is an
+    internal allocation of the Savings account, so Era is shown one balance and never the
+    split.
+    """
+    if kind not in GOAL_KINDS:
+        raise ValueError(f"kind must be one of {GOAL_KINDS}")
     with closing(_connect(db_path)) as conn:
         cur = conn.execute(
-            """INSERT INTO savings_goals (owner_user_id, name, target_amount, target_date, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (owner_user_id, name, target_amount, target_date, _now()),
+            """INSERT INTO savings_goals (owner_user_id, name, target_amount, target_date,
+                                          current_amount, kind, funded_from, updated_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (owner_user_id, name, target_amount, target_date, float(current_amount or 0),
+             kind, funded_from, _now(), _now()),
         )
         conn.commit()
         return cur.lastrowid
@@ -817,7 +863,8 @@ def create_savings_goal(db_path: str, owner_user_id: int, name: str, target_amou
 def list_savings_goals(db_path: str, owner_user_id: int):
     with closing(_connect(db_path)) as conn:
         rows = conn.execute(
-            """SELECT id, owner_user_id, name, target_amount, target_date, created_at
+            """SELECT id, owner_user_id, name, target_amount, target_date, created_at,
+                      COALESCE(current_amount, 0), COALESCE(kind, 'saving'), funded_from, updated_at
                FROM savings_goals WHERE owner_user_id = ? ORDER BY target_date IS NULL, target_date ASC""",
             (owner_user_id,),
         ).fetchall()
@@ -826,9 +873,12 @@ def list_savings_goals(db_path: str, owner_user_id: int):
 
 def update_savings_goal(
     db_path: str, goal_id: int, name: str | None = None, target_amount: float | None = None,
-    target_date: str | None = "__unset__",
+    target_date: str | None = "__unset__", current_amount: float | None = None,
+    kind: str | None = None, funded_from: str | None = None,
 ) -> bool:
     """Only non-None (or explicitly-passed target_date) fields are updated. Returns False if not found."""
+    if kind is not None and kind not in GOAL_KINDS:
+        raise ValueError(f"kind must be one of {GOAL_KINDS}")
     with closing(_connect(db_path)) as conn:
         row = conn.execute("SELECT id FROM savings_goals WHERE id = ?", (goal_id,)).fetchone()
         if row is None:
@@ -840,6 +890,18 @@ def update_savings_goal(
         if target_amount is not None:
             fields.append("target_amount = ?")
             params.append(target_amount)
+        if current_amount is not None:
+            fields.append("current_amount = ?")
+            params.append(float(current_amount))
+        if kind is not None:
+            fields.append("kind = ?")
+            params.append(kind)
+        if funded_from is not None:
+            fields.append("funded_from = ?")
+            params.append(funded_from)
+        if fields:
+            fields.append("updated_at = ?")
+            params.append(_now())
         if target_date != "__unset__":
             fields.append("target_date = ?")
             params.append(target_date)
@@ -858,9 +920,13 @@ def delete_savings_goal(db_path: str, goal_id: int) -> bool:
 
 
 def _goal_row(r):
+    target, current = r[3] or 0, r[6] or 0
     return {
         "id": r[0], "owner_user_id": r[1], "name": r[2],
         "target_amount": r[3], "target_date": r[4], "created_at": r[5],
+        "current_amount": current, "kind": r[7], "funded_from": r[8], "updated_at": r[9],
+        "remaining": round(max(0.0, target - current), 2),
+        "progress": round(current / target, 4) if target else None,
     }
 
 

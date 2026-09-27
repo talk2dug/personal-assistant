@@ -697,21 +697,36 @@ PERSONAL_TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "create_savings_goal",
-        "description": "Start tracking a new savings goal he names, with the amount he wants to save toward.",
+        "description": (
+            "Start tracking a new savings goal he names, with the amount he wants to save "
+            "toward. Use funded_from when the money sits somewhere no bank feed reports, "
+            "such as a SoFi Vault -- those are internal allocations of his Savings account, "
+            "so Era only ever sees one combined balance. Use kind='earmarked' for money "
+            "already owed to someone (a debt settlement fund); it is reported apart from "
+            "savings and must never be added into the savings total."),
         "parameters": {"type": "object", "properties": {
             "name": {"type": "string", "description": "What he's saving for, e.g. 'Japan trip'."},
             "target_amount": {"type": "number"},
             "target_date": {"type": "string", "description": "Optional local ISO date he's aiming for."},
+            "current_amount": {"type": "number", "description": "How much is in it already."},
+            "kind": {"type": "string", "enum": ["saving", "earmarked"]},
+            "funded_from": {"type": "string", "description": "Where it physically sits, e.g. 'SoFi Vault - Emergency'."},
         }, "required": ["name", "target_amount"]},
     }},
     {"type": "function", "function": {
         "name": "update_savings_goal",
-        "description": "Change a savings goal's name, target amount, or target date.",
+        "description": (
+            "Change a savings goal's name, target, date, or how much is in it. Use this "
+            "when he says he moved money into or out of a vault -- current_amount is the "
+            "new BALANCE, not the amount added."),
         "parameters": {"type": "object", "properties": {
             "goal_id": {"type": "integer"},
             "name": {"type": "string"},
             "target_amount": {"type": "number"},
             "target_date": {"type": "string", "description": "Local ISO date, or empty string to clear it."},
+            "current_amount": {"type": "number", "description": "The new balance in it, not a delta."},
+            "kind": {"type": "string", "enum": ["saving", "earmarked"]},
+            "funded_from": {"type": "string"},
         }, "required": ["goal_id"]},
     }},
     {"type": "function", "function": {
@@ -1355,10 +1370,14 @@ class PersonalClient:
             return {"goals": db.list_savings_goals(db_path, owner)}
         if name == "create_savings_goal":
             goal_id = db.create_savings_goal(
-                db_path, owner, arguments["name"], arguments["target_amount"], arguments.get("target_date"))
+                db_path, owner, arguments["name"], arguments["target_amount"],
+                arguments.get("target_date"), current_amount=arguments.get("current_amount") or 0.0,
+                kind=arguments.get("kind") or "saving", funded_from=arguments.get("funded_from"))
             return {"ok": True, "goal_id": goal_id}
         if name == "update_savings_goal":
-            kwargs = {"name": arguments.get("name"), "target_amount": arguments.get("target_amount")}
+            kwargs = {"name": arguments.get("name"), "target_amount": arguments.get("target_amount"),
+                      "current_amount": arguments.get("current_amount"),
+                      "kind": arguments.get("kind"), "funded_from": arguments.get("funded_from")}
             if "target_date" in arguments:
                 kwargs["target_date"] = arguments["target_date"] or None
             ok = db.update_savings_goal(db_path, arguments["goal_id"], **kwargs)

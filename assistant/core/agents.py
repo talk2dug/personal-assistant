@@ -23,7 +23,8 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from . import agent_notes, art_render, business_db, review_examples, store_retract
+from . import (agent_notes, art_render, business_db, fulfilment, pipelines,
+               review_examples, store_policy, store_retract)
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,70 @@ def _profile_text(profile) -> str:
     if profile.notes:
         lines.append("Context: " + profile.notes)
     return "\n".join(lines)
+
+
+def _advance(db_path: str, owner_user_id: int, ref_table: str, ref_id: int) -> None:
+    """Mark one pipeline artefact approved, whichever table it lives in.
+
+    Mirrors business_tools.apply_review_decision's mapping, which is what happens when he
+    approves a card by hand. The art_briefs case there also adopts the prompt behind the
+    rendered option he picked; there is no pick here, and the brief already carries the
+    first direction's prompt, so nothing extra is needed.
+    """
+    if ref_table == "product_concepts":
+        business_db.set_concept_status(db_path, owner_user_id, ref_id, "approved")
+    elif ref_table == "art_briefs":
+        business_db.set_art_brief_status(db_path, owner_user_id, ref_id, "approved")
+    elif ref_table == "store_listings":
+        business_db.update_store_listing(db_path, owner_user_id, ref_id, status="approved")
+    elif ref_table == "social_posts":
+        business_db.update_social_post(db_path, owner_user_id, ref_id, status="approved")
+
+
+def file_for_review(db_path: str, owner_user_id: int, *, market: str | None,
+                    ref_table: str, ref_id: int, **card) -> bool:
+    """Put a stage in front of him, or don't, according to his own policy.
+
+    Every stage of the creative pipeline used to file a review card unconditionally, and
+    each stage only picks up what the one before it had APPROVED. So the "fully automated"
+    pipeline stopped dead at whichever stage he had not clicked through, four times over.
+    store_policy.autopublish existed to say he did not want that -- and was wired to
+    nothing, read only by store_policy's own current() and set_autopublish().
+
+    Market decides how far the policy goes. 'automated' is the print-on-demand store, the
+    one he asked to run without him, so nothing is filed at all. 'local' is made on his own
+    equipment and costs him an evening, so the card is still written -- it just does not
+    block, and it says so. That distinction is not decoration: the first run after this
+    went in, he let both automated items through untouched and rejected both local ones
+    with "Not looking to make tumblers ATM".
+
+    Returns True if the artefact was advanced without waiting for him.
+    """
+    auto = store_policy.autopublish(db_path)
+    if auto and market == "automated":
+        _advance(db_path, owner_user_id, ref_table, ref_id)
+        return True
+
+    detail = card.pop("detail", None)
+    if auto:
+        detail = ("ALREADY APPROVED AND IN PRODUCTION — this card is here so you can see "
+                  "what is being made with your own materials, not because anything is "
+                  "waiting on you. Reject it to stop it.\n\n" + (detail or ""))
+    business_db.create_review_item(
+        db_path, owner_user_id, detail=detail, ref_table=ref_table, ref_id=ref_id, **card)
+    if auto:
+        _advance(db_path, owner_user_id, ref_table, ref_id)
+    return auto
+
+
+def concept_market_of(db_path: str, owner_user_id: int, concept_id) -> str | None:
+    """The market of the concept a downstream artefact belongs to."""
+    if not concept_id:
+        return None
+    for concept in business_db.list_product_concepts(db_path, owner_user_id, limit=200):
+        if concept["id"] == concept_id:
+            return concept.get("market") or pipelines.default_market(concept.get("product_type"))
+    return None
 
 
 def run_market_agent(db_path: str, llm, owner_user_id: int, profile, obsidian=None) -> dict:
@@ -351,8 +416,14 @@ def _concept_detail(concept: dict) -> str:
 
 
 def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: int = 4,
-                        obsidian=None) -> dict:
-    """Turns the best unworked trend leads into concrete, makeable product concepts."""
+                        obsidian=None, printify=None) -> dict:
+    """Turns the best unworked trend leads into concrete, makeable product concepts.
+
+    `printify` is a PrintifyClient, used only to answer "can the fulfiller actually make
+    this" before a concept is created. Jack: *"if it can't be made there's no point going
+    through the process."* Without one the check is skipped rather than failed -- see
+    fulfilment, which fails open on purpose.
+    """
     run_id = business_db.start_agent_run(db_path, "product_creator")
     try:
         leads = business_db.list_trend_leads(db_path, owner_user_id, status="new", limit=limit)
@@ -369,10 +440,13 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
         # notes reads "I already have this created. No need to make it again" -- a rule
         # about his workshop no title list could ever convey.
         verdicts = review_examples.build_verdict_briefing(db_path, owner_user_id, "product_creator")
+        # Telling it what the fulfiller stocks is the cheap half of the feasibility fix;
+        # rejecting a bad concept afterwards still wastes the call that produced it.
+        makeable = fulfilment.catalogue_briefing(db_path, printify, profile.product_lines)
 
         prompt = (
             f"{_profile_text(profile)}\n\n"
-            f"Trend signals to work from:\n{lead_text}{avoid}{verdicts}\n\n"
+            f"Trend signals to work from:\n{lead_text}{avoid}{verdicts}{makeable}\n\n"
             f"Propose up to {limit} specific products this shop could actually make and sell. "
             f"Each must be one concrete item, not a category — 'RVA skyline die-cut vinyl "
             f"decal, 4in, matte white' not 'local pride stickers'.\n\n"
@@ -392,8 +466,22 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
 
         lead_by_topic = {lead["topic"]: lead["id"] for lead in leads}
         new_count = 0
+        auto_approved = 0
+        unmakeable = []
         for concept in concepts:
             if not isinstance(concept, dict) or not concept.get("name"):
+                continue
+            # Before anything else. A concept that cannot be fulfilled still costs a GPU
+            # render, a listing, social copy and a slot in his one-a-day rate before
+            # failing at the publish -- the only step that would ever have caught it.
+            verdict = fulfilment.can_be_made(
+                db_path, str(concept["name"]), concept.get("product_type"),
+                printify=printify, product_lines=profile.product_lines)
+            if not verdict["ok"]:
+                # Recorded, not silently dropped: four concepts vanishing with no trace
+                # is the same class of invisible stall this pipeline just came out of.
+                unmakeable.append(f"{concept['name']} — {verdict['why']}")
+                logger.info("rejected unmakeable concept %r: %s", concept["name"], verdict["why"])
                 continue
             price = concept.get("price_estimate")
             concept_id, created = business_db.create_product_concept(
@@ -403,23 +491,20 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
                 concept.get("production_notes"), source="trend",
                 trend_lead_id=lead_by_topic.get(concept.get("trend_topic")),
             )
+            concept_market = pipelines.default_market(concept.get("product_type"))
             if created:
                 new_count += 1
-                # Without this the whole creative pipeline deadlocks, silently and
-                # indefinitely: a concept lands at status 'proposed', art_director and
-                # store_manager both only pick up APPROVED concepts, and nothing ever put
-                # the concept in front of him to approve. It ran that way for eight days
-                # and produced 60 unreachable concepts while every downstream agent
-                # reported "no approved concepts waiting" and looked idle rather than
-                # blocked. source_agent is not decoration -- review_examples filters on it
-                # to feed his past verdicts back into the next run's prompt.
-                business_db.create_review_item(
-                    db_path, owner_user_id, str(concept["name"]), kind="concept",
-                    summary=concept.get("description"),
-                    detail=_concept_detail(concept),
-                    source_agent="product_creator",
-                    ref_table="product_concepts", ref_id=concept_id,
-                )
+                # See file_for_review: his policy decides whether this waits on him.
+                if file_for_review(
+                        db_path, owner_user_id, market=concept_market,
+                        ref_table="product_concepts", ref_id=concept_id,
+                        title=str(concept["name"]), kind="concept",
+                        summary=concept.get("description"),
+                        detail=_concept_detail(concept),
+                        # source_agent is not decoration -- review_examples filters on it
+                        # to feed his past verdicts into the next run's prompt.
+                        source_agent="product_creator"):
+                    auto_approved += 1
 
         # Retire the leads this run worked from, or the feed never advances. Nothing ever
         # wrote this status: list_trend_leads returns the top `limit` by score and the
@@ -437,7 +522,13 @@ def run_product_creator(db_path: str, llm, owner_user_id: int, profile, limit: i
             business_db.set_trend_lead_status(
                 db_path, owner_user_id, lead["id"], "made" if lead["id"] in made else "passed")
 
-        summary = f"Product creator: {new_count} new concepts proposed."
+        summary = (f"Product creator: {new_count} new concepts proposed"
+                   + (f", {auto_approved} auto-approved" if auto_approved else "")
+                   + (f"; {len(unmakeable)} dropped as unmakeable" if unmakeable else "") + ".")
+        if unmakeable:
+            # On the run record, so "why did only one thing get made today" has an answer
+            # on the dashboard instead of looking like the agent underperformed.
+            summary += " Dropped: " + "; ".join(unmakeable[:4])
         business_db.finish_agent_run(db_path, run_id, "ok", summary, json.dumps(concepts)[:4000])
         agent_notes.write_journal(obsidian, "product_creator", summary, reasoning=raw)
         return {"status": "ok", "new": new_count, "summary": summary}
@@ -553,8 +644,11 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                 # product from a prompt.
                 media_path=options[0].get("media_path"),
             )
-            business_db.create_review_item(
-                db_path, owner_user_id, f"Art direction: {concept['name']}", kind="art",
+            file_for_review(
+                db_path, owner_user_id,
+                market=concept.get("market") or pipelines.default_market(concept.get("product_type")),
+                ref_table="art_briefs", ref_id=brief_id,
+                title=f"Art direction: {concept['name']}", kind="art",
                 summary=brief.get("style_direction"),
                 detail="\n\n".join(p for p in (
                     f"Aspect: {aspect}" if aspect else None,
@@ -563,7 +657,7 @@ def run_art_director(db_path: str, llm, owner_user_id: int, profile, limit: int 
                     # it says three directions needs to say why, or it reads as a bug.
                     ("Could not render:\n" + "\n".join(failures)) if failures else None,
                 ) if p),
-                source_agent="art_director", ref_table="art_briefs", ref_id=brief_id,
+                source_agent="art_director",
                 options=options,
             )
             new_count += 1
@@ -657,15 +751,18 @@ def run_store_manager(db_path: str, llm, owner_user_id: int, profile, limit: int
                 price=float(price) if isinstance(price, (int, float)) else None,
                 variants=listing.get("variants"),
             )
-            business_db.create_review_item(
-                db_path, owner_user_id, f"Listing: {listing['title']}", kind="listing",
+            file_for_review(
+                db_path, owner_user_id,
+                market=concept.get("market") or pipelines.default_market(concept.get("product_type")),
+                ref_table="store_listings", ref_id=listing_id,
+                title=f"Listing: {listing['title']}", kind="listing",
                 summary=listing.get("description"),
                 detail="\n\n".join(p for p in (
                     f"Price: {price}" if price not in (None, "") else None,
                     f"SEO tags: {listing.get('seo_tags')}" if listing.get("seo_tags") else None,
                     f"Variants: {listing.get('variants')}" if listing.get("variants") else None,
                 ) if p),
-                source_agent="store_manager", ref_table="store_listings", ref_id=listing_id,
+                source_agent="store_manager",
             )
             new_count += 1
 
@@ -728,15 +825,18 @@ def run_social_director(db_path: str, llm, owner_user_id: int, profile, limit: i
                     reason=f"Launch post for '{listing['title']}'",
                     listing_id=listing["id"], concept_id=listing.get("concept_id"),
                 )
-                business_db.create_review_item(
-                    db_path, owner_user_id, f"{platform.title()} post: {listing['title']}",
+                file_for_review(
+                    db_path, owner_user_id,
+                    market=concept_market_of(db_path, owner_user_id, listing.get("concept_id")),
+                    ref_table="social_posts", ref_id=post_id,
+                    title=f"{platform.title()} post: {listing['title']}",
                     kind="post", summary=post.get("hook"),
                     detail="\n\n".join(p for p in (
                         post.get("caption"),
                         f"Hashtags: {post.get('hashtags')}" if post.get("hashtags") else None,
                         f"CTA: {post.get('call_to_action')}" if post.get("call_to_action") else None,
                     ) if p),
-                    source_agent="social_director", ref_table="social_posts", ref_id=post_id,
+                    source_agent="social_director",
                 )
                 new_count += 1
 

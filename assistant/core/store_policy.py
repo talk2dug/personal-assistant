@@ -10,6 +10,7 @@ Every change is recorded with who asked and why. That is not bookkeeping for its
 the dashboard has to be able to answer "why did we ship four things on Tuesday", and a bare
 setting cannot. A rate that changed without explanation is indistinguishable from a bug.
 """
+import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -82,7 +83,14 @@ def autopublish(db_path: str) -> bool:
     still where genuinely ambiguous calls go; this only governs the ordinary case of
     "we made a thing, it meets the rules, it goes up".
     """
-    raw = core_db.get_setting(db_path, AUTOPUBLISH_KEY)
+    # A database with no settings table at all is "unset", the same as a missing key --
+    # not a reason to take down the product pipeline. This is reachable: business_db can
+    # be initialised without core_db, and before this the first policy read raised
+    # OperationalError straight out of run_product_creator and killed the whole run.
+    try:
+        raw = core_db.get_setting(db_path, AUTOPUBLISH_KEY)
+    except sqlite3.OperationalError:
+        return True
     if raw is None:
         return True
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
@@ -108,7 +116,7 @@ def go_live(db_path: str) -> bool:
 
     So it is on unless he turns it off, and the real control is the other end: he pulls
     anything he does not want and says why, and the reason teaches the team
-    (store_retract.retract / lessons). Judgement after the fact, on real products, beats
+    (store_publish.retract / lessons). Judgement after the fact, on real products, beats
     judgement beforehand on descriptions of products.
 
     This only ever governs the AUTOMATED market -- print-on-demand, which costs him

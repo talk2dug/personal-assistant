@@ -132,7 +132,6 @@ export default function CommandCenter() {
           <SchedulePanel
             schedule={schedule}
             error={slowErrors.schedule}
-            now={now}
             onOpen={() => openSection('schedule')}
           />
           <EventLog events={snapshot?.events} onOpen={() => openSection('review')} />

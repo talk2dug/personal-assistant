@@ -2619,6 +2619,24 @@ body::after {
 /* --- schedule / reminders / weather ---------------------------------------- */
 
 .schedule-page section { margin-top: 32px; }
+
+/* The calendar is the section now; reminders and weather fold away under it so they do
+   not compete with it for the top of the modal. */
+.schedule-page .schedule-cal { margin-top: 0; }
+
+.schedule-toggle {
+  font-family: var(--font-hud, inherit);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.schedule-toggle:hover { color: var(--text); }
 .schedule-page section:first-child { margin-top: 0; }
 .schedule-page h3 {
   font-family: var(--font-hud); font-size: 13px; color: var(--text-dim);

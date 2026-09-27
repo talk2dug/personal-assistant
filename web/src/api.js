@@ -103,10 +103,16 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ account_key: accountKey || null }) }),
 
   // One calendar over bills, paydays, tasks, reminders, deadlines and CalDAV.
-  agenda: ({ days, backDays } = {}) => {
+  agenda: ({ days, backDays, start, end, exclude } = {}) => {
     const qs = new URLSearchParams()
     if (days) qs.set('days', String(days))
     if (backDays != null) qs.set('back_days', String(backDays))
+    // An absolute range for the month/week grids; without it the relative window applies.
+    if (start) qs.set('start', start)
+    if (end) qs.set('end', end)
+    // Kinds to leave out, e.g. 'reminder' -- a nudge is not a commitment with a place in
+    // the day, and showing both made the schedule read busier than it is.
+    if (exclude?.length) qs.set('exclude', [].concat(exclude).join(','))
     return request(`/api/agenda${qs.toString() ? `?${qs}` : ''}`)
   },
   company: () => request('/api/company'),

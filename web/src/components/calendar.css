@@ -1,0 +1,193 @@
+/* The calendar: month, week and day, on the app's existing HUD tokens.
+
+   Unlike the Agenda list, this one is a grid on purpose -- he asked for something that
+   "works like a regular calendar", and the whole value of a grid is that empty days are
+   visibly empty. A list cannot show you that Thursday is free. */
+
+.cal { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.cal-dim { color: var(--text-dim); font-size: 12.5px; }
+.cal-error { color: var(--red); font-family: var(--font-mono); font-size: 12px; }
+
+.cal-warn {
+  margin: 0;
+  padding: 6px 9px;
+  border-left: 3px solid var(--amber);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+/* --- the control bar ---------------------------------------------------------------- */
+
+.cal-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+.cal-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  flex: 1;
+  min-width: 140px;
+}
+
+.cal-nav, .cal-views { display: flex; gap: 4px; }
+
+.cal-nav button, .cal-views button {
+  font-family: var(--font-hud);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border: 1px solid var(--border-dim);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.cal-nav button:hover, .cal-views button:hover { color: var(--text); border-color: var(--steel); }
+.cal-views button.is-on { color: var(--cyan); border-color: var(--cyan-dim); }
+
+/* --- an entry, shared by every view -------------------------------------------------- */
+
+.cal-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11.5px;
+  line-height: 1.3;
+  padding: 1px 4px;
+  border-left: 2px solid var(--steel);
+  background: var(--bg-inset);
+  margin-bottom: 2px;
+  overflow: hidden;
+}
+
+.cal-entry-time {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.cal-entry-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-entry-amt { font-family: var(--font-mono); font-size: 10.5px; color: var(--amber); flex: none; }
+
+.cal-entry.k-event { border-left-color: var(--cyan); }
+.cal-entry.k-bill { border-left-color: var(--amber); }
+.cal-entry.k-income { border-left-color: var(--cyan); }
+.cal-entry.k-income .cal-entry-amt { color: var(--cyan); }
+.cal-entry.k-deadline { border-left-color: var(--red); }
+.cal-entry.k-task { border-left-color: var(--steel-bright); }
+
+/* --- month --------------------------------------------------------------------------- */
+
+.cal-month {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--divider);
+  border: 1px solid var(--border-dim);
+  min-height: 0;
+}
+
+.cal-month-head {
+  background: var(--bg-panel);
+  padding: 4px 6px;
+  font-family: var(--font-hud);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.cal-cell {
+  background: var(--bg-panel);
+  min-height: 92px;
+  padding: 3px 4px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.cal-cell:hover { background: var(--bg-inset); }
+.cal-cell.is-outside { opacity: 0.38; }
+.cal-cell.is-today { box-shadow: inset 0 0 0 1px var(--cyan); }
+
+.cal-cell-date {
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
+.cal-cell.is-today .cal-cell-date { color: var(--cyan-bright); }
+.cal-more { font-size: 10px; color: var(--text-dim); padding-left: 4px; }
+
+/* --- week and day -------------------------------------------------------------------- */
+
+.cal-timegrid {
+  display: grid;
+  grid-template-columns: 46px repeat(var(--cols), minmax(0, 1fr));
+  gap: 1px;
+  background: var(--divider);
+  border: 1px solid var(--border-dim);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.cal-tg-corner, .cal-tg-head, .cal-tg-allday-label, .cal-tg-allday,
+.cal-tg-hour, .cal-tg-slot { background: var(--bg-panel); }
+
+.cal-tg-head {
+  padding: 4px 6px;
+  text-align: center;
+  cursor: pointer;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.cal-tg-head.is-today { box-shadow: inset 0 -2px 0 var(--cyan); }
+.cal-tg-head:hover { background: var(--bg-inset); }
+
+.cal-tg-dow {
+  display: block;
+  font-family: var(--font-hud);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.cal-tg-num { display: block; font-family: var(--font-display); font-size: 14px; color: var(--text); }
+.cal-tg-head.is-today .cal-tg-num { color: var(--cyan-bright); }
+
+.cal-tg-allday-label, .cal-tg-hour {
+  font-family: var(--font-hud);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 3px 5px;
+  text-align: right;
+}
+
+.cal-tg-allday { padding: 2px 3px; min-height: 22px; }
+
+.cal-tg-slot { min-height: 30px; padding: 1px 3px; }
+.cal-tg-slot.is-today { background: var(--bg-inset); }
+
+@media (max-width: 720px) {
+  .cal-cell { min-height: 64px; }
+  .cal-entry-amt { display: none; }
+  .cal-timegrid { grid-template-columns: 36px repeat(var(--cols), minmax(0, 1fr)); }
+}

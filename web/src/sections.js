@@ -36,13 +36,17 @@ export const SECTIONS = [
       + 'what, and which of his regular habits are slipping' },
   { key: 'tasks', label: 'Tasks', element: Tasks, wide: true,
     context: 'the Tasks section, showing open tasks, their due dates and priorities' },
-  { key: 'agenda', label: 'Calendar', element: Agenda, wide: true,
-    context: 'the Calendar, one timeline over everything with a date on it: bills and '
+  { key: 'agenda', label: 'Agenda', element: Agenda, wide: true,
+    context: 'the Agenda — a chronological LIST (not a grid; the Schedule section holds '
+      + 'the month/week/day calendar) over everything with a date on it: bills and '
       + 'paydays projected forward, tasks due, reminders, credit dispute deadlines and '
       + 'his real calendar, with a running cash position and anything already overdue '
       + 'pinned at the top' },
   { key: 'schedule', label: 'Schedule', element: Schedule, wide: true,
-    context: 'the Schedule section, showing upcoming reminders and the weather forecast' },
+    context: 'the Schedule section: a month/week/day calendar over everything he is '
+      + 'committed to — work meetings from his Outlook feed, bills and paydays, tasks due '
+      + 'and credit dispute deadlines. Reminders are deliberately NOT on it (they are '
+      + 'nudges, not appointments) but their editor and the weather sit below it' },
   { key: 'email', label: 'Email', element: Email, wide: true,
     context: 'the Email section, showing the inbox and flagged threads' },
   { key: 'company', label: 'The Company', element: Company, wide: true,

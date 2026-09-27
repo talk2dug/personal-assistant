@@ -248,17 +248,55 @@ def _calendar(calendar_ctx, start: date, end: date) -> list:
     return out
 
 
+def _feed_events(db_path: str, owner_user_id: int, start: date, end: date) -> list:
+    """Subscribed .ics calendars — his work calendar, read-only. See calendar_feeds.
+
+    Read out of the local table rather than fetched here. The feed refreshes twice a day
+    on its own schedule; making a page render wait on a corporate Exchange endpoint would
+    put a network round-trip in front of the one screen he opens to see his morning.
+    """
+    from . import calendar_feeds
+
+    out = []
+    for event in calendar_feeds.events_between(db_path, owner_user_id, start, end):
+        when = _as_date(event["local_date"])
+        if when is None:
+            continue
+        # The time is the detail because the day is already the grouping. "09:00 · Teams"
+        # is what tells him whether he can take the school run.
+        bits = [b for b in (event.get("local_time"), event.get("location")) if b]
+        out.append(_entry("event", when, event.get("summary") or "(event)",
+                          detail=" · ".join(bits) or None,
+                          source=f"feed:{event.get('feed_name') or 'calendar'}",
+                          ref=event.get("id")))
+    return out
+
+
 def upcoming(db_path: str, owner_user_id: int, *, days: int = 45, back_days: int = 7,
-             calendar_ctx=None) -> dict:
+             calendar_ctx=None, start: date | None = None, end: date | None = None,
+             exclude_kinds=()) -> dict:
     """Every dated thing in the window, oldest first, grouped by day.
 
     `back_days` exists so a missed bill or a task that came due yesterday is still on the
     screen. A calendar that hides what was just missed is a calendar that lets it stay
     missed.
+
+    `start`/`end` override the relative window, which is what a month grid needs: browsing
+    to next March is a fixed range, not "n days from now".
+
+    `exclude_kinds` drops whole categories. Jack, on reminders: *"I dont need to see
+    reminders in my schedule, those are to just remind me."* A reminder is a nudge to do
+    something, not a commitment with a place in the day, and mixing the two made the
+    schedule read as busier than it is.
     """
     today = date.today()
-    start = today - timedelta(days=max(0, back_days))
-    end = today + timedelta(days=max(1, days))
+    if start is None:
+        start = today - timedelta(days=max(0, back_days))
+    if end is None:
+        end = today + timedelta(days=max(1, days))
+    if end < start:
+        start, end = end, start
+    exclude = {k for k in exclude_kinds if k}
 
     entries, unavailable = [], []
     sources = (
@@ -268,8 +306,15 @@ def upcoming(db_path: str, owner_user_id: int, *, days: int = 45, back_days: int
         ("email_bills", lambda: _email_bills(db_path, owner_user_id, start, end)),
         ("disputes", lambda: _credit_deadlines(db_path, owner_user_id, start, end)),
         ("calendar", lambda: _calendar(calendar_ctx, start, end)),
+        ("work_calendar", lambda: _feed_events(db_path, owner_user_id, start, end)),
     )
+    # A source whose only kind is excluded is not gathered at all: it saves the query, and
+    # it stops a flaky source he asked not to see from reporting itself as unavailable.
+    source_kind = {"tasks": "task", "reminders": "reminder", "email_bills": "bill",
+                   "disputes": "deadline", "calendar": "event", "work_calendar": "event"}
     for name, gather in sources:
+        if source_kind.get(name) in exclude:
+            continue
         try:
             entries.extend(gather())
         except Exception as exc:                          # noqa: BLE001
@@ -277,6 +322,11 @@ def upcoming(db_path: str, owner_user_id: int, *, days: int = 45, back_days: int
             # week than the one he actually has.
             logger.warning("agenda source %s failed: %s", name, exc)
             unavailable.append({"source": name, "error": f"{type(exc).__name__}: {exc}"[:160]})
+
+    # 'recurring' produces both bill and income entries, so it cannot be skipped wholesale
+    # above -- filter what it returned instead.
+    if exclude:
+        entries = [e for e in entries if e["kind"] not in exclude]
 
     entries.sort(key=lambda e: (e["date"], _KIND_RANK.get(e["kind"], 99), e["title"]))
 

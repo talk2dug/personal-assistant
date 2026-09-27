@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import Calendar from '../components/Calendar'
 
 function formatLocal(iso) {
   try {
@@ -138,15 +139,37 @@ function WeatherPanel() {
   )
 }
 
+/**
+ * The Schedule section: a real calendar first, everything else under it.
+ *
+ * Reminders keep their editor here -- he still creates and cancels them -- but they are no
+ * longer part of the calendar itself. Jack: *"I dont need to see reminders in my schedule,
+ * those are to just remind me."* So the list moved below the grid and out of it: a nudge to
+ * buy milk is not an appointment, and mixing the two made every day look full.
+ */
 export default function Schedule() {
+  const [showReminders, setShowReminders] = useState(false)
+
   return (
     <div className="schedule-page">
-      <section>
-        <RemindersList />
+      <section className="schedule-cal">
+        <Calendar />
       </section>
       <section>
-        <h3>Weather</h3>
-        <WeatherPanel />
+        <button
+          type="button"
+          className="schedule-toggle"
+          onClick={() => setShowReminders((v) => !v)}
+        >
+          {showReminders ? '▾' : '▸'} Reminders &amp; weather
+        </button>
+        {showReminders && (
+          <>
+            <RemindersList />
+            <h3>Weather</h3>
+            <WeatherPanel />
+          </>
+        )}
       </section>
     </div>
   )

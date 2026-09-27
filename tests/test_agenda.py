@@ -133,3 +133,68 @@ def test_an_empty_calendar_is_not_an_error(db, owner):
     data = agenda.upcoming(db, owner, days=30)
     assert data["days"] == [] and data["unavailable"] == []
     assert data["money_in"] == 0 and data["money_out"] == 0
+
+
+class TestTheCalendarGridsQueries:
+    """What the month/week/day views and the Schedule panel actually ask for."""
+
+    def test_an_absolute_range_overrides_the_relative_window(self, db, owner):
+        """Browsing to next March is a fixed range, not "n days from now"."""
+        personal_db.create_task(db, owner, "far off", due_at="2027-03-15", track="personal")
+        data = agenda.upcoming(db, owner, start=date(2027, 3, 1), end=date(2027, 3, 31))
+        assert data["counts"]["task"] == 1
+        assert data["from"] == "2027-03-01" and data["to"] == "2027-03-31"
+
+    def test_a_backwards_range_is_corrected_rather_than_returning_nothing(self, db, owner):
+        personal_db.create_task(db, owner, "thing", due_at=day(2), track="personal")
+        data = agenda.upcoming(db, owner, start=date.today() + timedelta(days=5),
+                               end=date.today())
+        assert data["counts"]["task"] == 1
+
+    def test_reminders_can_be_left_out(self, db, owner):
+        """Jack: "I dont need to see reminders in my schedule, those are to just remind
+        me." A nudge is not a commitment with a place in the day."""
+        core_db.add_reminder(db, owner, "buy milk", day(1), "private")
+        personal_db.create_task(db, owner, "real task", due_at=day(1), track="personal")
+
+        with_them = agenda.upcoming(db, owner, days=5)
+        assert with_them["counts"]["reminder"] == 1
+
+        without = agenda.upcoming(db, owner, days=5, exclude_kinds=("reminder",))
+        assert without["counts"]["reminder"] == 0
+        assert without["counts"]["task"] == 1, "excluding one kind keeps the rest"
+        titles = [e["title"] for d in without["days"] for e in d["entries"]]
+        assert "buy milk" not in titles
+
+    def test_excluding_a_kind_also_drops_it_from_overdue(self, db, owner):
+        """Overdue is assembled separately, so it needs the filter applied too -- a
+        reminder he asked not to see must not reappear pinned to the top."""
+        core_db.add_reminder(db, owner, "old nudge", day(-2), "private")
+        data = agenda.upcoming(db, owner, days=5, back_days=7, exclude_kinds=("reminder",))
+        assert [e["title"] for e in data["overdue"]] == []
+
+    def test_an_excluded_source_cannot_report_itself_unavailable(self, db, owner, monkeypatch):
+        """If he is not looking at reminders, a broken reminders table is not a warning
+        worth showing him."""
+        monkeypatch.setattr(agenda, "_reminders",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+        data = agenda.upcoming(db, owner, days=5, exclude_kinds=("reminder",))
+        assert data["unavailable"] == []
+
+    def test_a_recurring_bill_survives_excluding_reminders(self, db, owner):
+        """'recurring' emits both bill and income, so it cannot be skipped wholesale by
+        source -- the filter has to run on the entries as well."""
+        import sqlite3
+        conn = sqlite3.connect(db)
+        conn.execute("""CREATE TABLE IF NOT EXISTS manual_recurring_charges
+                        (id INTEGER PRIMARY KEY, owner_user_id INTEGER, description TEXT,
+                         amount REAL, direction TEXT, cadence TEXT,
+                         next_expected_date TEXT, created_at TEXT)""")
+        conn.execute("""INSERT INTO manual_recurring_charges
+                        (owner_user_id, description, amount, direction, cadence,
+                         next_expected_date, created_at)
+                        VALUES (?,?,?,?,?,?,?)""",
+                     (owner, "Rent", 925.0, "expense", "monthly_on_day", day(6), "2026-01-01"))
+        conn.commit(); conn.close()
+        data = agenda.upcoming(db, owner, days=45, exclude_kinds=("reminder",))
+        assert data["counts"]["bill"] >= 1

@@ -69,7 +69,11 @@ export function useCommandCenter() {
       Promise.all([api.financeSummary(), api.financeSafeToSpend()]),
       api.financeNetWorth(),
       api.cryptoDashboard(),
-      api.scheduleReminders(),
+      // The schedule panel shows what he is COMMITTED to today and tomorrow, so it
+      // reads the agenda (work calendar, bills, paydays, tasks, deadlines) rather
+      // than the reminders table. Reminders are excluded on his instruction: they
+      // are nudges, not appointments, and mixing them made the day look fuller.
+      api.agenda({ days: 2, backDays: 0, exclude: 'reminder' }),
       api.rfDashboard(),
     ])
     const errors = {}
@@ -82,7 +86,7 @@ export function useCommandCenter() {
     take(f, ([summary, safe]) => setFinance({ ...summary, safe_to_spend: safe?.safe_to_spend ?? null }), 'finance')
     take(nw, (v) => setNetWorth(v || []), 'netWorth')
     take(c, setCrypto, 'crypto')
-    take(s, (v) => setSchedule(v || []), 'schedule')
+    take(s, setSchedule, 'schedule')
     take(r, setRf, 'rf')
     setSlowErrors(errors)
   }, [])

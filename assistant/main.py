@@ -10,7 +10,7 @@ from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_notifier,
     build_cellular_context, build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
-    build_local_llm_context, build_mail_context, build_obsidian_context, build_personal_context,
+    build_local_llm_context, build_mail_context, build_obsidian_context, build_omada_context, build_personal_context,
     build_phone_context, build_recipe_context, build_ticketmaster_context,
 )
 from .transports import telegram_bot
@@ -88,6 +88,7 @@ def main() -> None:
     personal = build_personal_context(
         cfg, owner_row["id"] if owner_row else None, letterstream=letterstream, kroger=kroger)
     git_ops = build_git_ops_context(cfg)
+    omada = build_omada_context(cfg)
     recipe = build_recipe_context(cfg)
 
     cellular_ctx = build_cellular_context(cfg)
@@ -110,7 +111,7 @@ def main() -> None:
         cfg.telegram_bot_token, cfg.db_path, llm, cfg.timezone, era=era, calendar=calendar, phone=phone, mail=mail,
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
+        git_ops=git_ops, omada=omada, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
     )
     # Routed through the user's notification policy: reminders follow the same
     # 'phone when I'm out' preference as anything else Jarvis sends unprompted.
@@ -196,7 +197,7 @@ def main() -> None:
         market_track_limit=cfg.market_track_limit,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
         personal=personal, personal_research_minutes=cfg.personal_research_interval_minutes,
-        git_ops=git_ops, recipe=recipe,
+        git_ops=git_ops, omada=omada, recipe=recipe,
         # Autonomous inbox triage: scores and moves likely junk out of INBOX on an
         # interval, independent of business_agents_enabled (see scheduler.py's
         # docstring for why this isn't gated behind that switch).
@@ -232,6 +233,10 @@ def main() -> None:
         github_watchdog_interval_seconds=cfg.github_watchdog_interval_seconds,
         local_llm=local_llm, local_llm_keepalive_interval_seconds=cfg.local_llm_keepalive_interval_seconds,
         staff_assignment_timeout_seconds=cfg.staff_assignment_timeout_seconds,
+        # Sys-admin monitoring (business_projects id 8): the mechanical health-check tick
+        # needs the same host registry ops plans already use, plus Phone MCP's URL (the
+        # one non-SSH service with no other reachability check anywhere in this process).
+        ssh_hosts=cfg.ssh_hosts, phone_mcp_url=cfg.phone_mcp_url,
     )
 
     logger.info("Jarvis core starting, polling Telegram...")

@@ -95,7 +95,8 @@ async def inbound(request: Request):
         "airbnb": request.app.state.airbnb, "ticketmaster": request.app.state.ticketmaster,
         "kroger": request.app.state.kroger, "ccxt": request.app.state.ccxt,
         "letterstream": request.app.state.letterstream,
-        "git_ops": request.app.state.git_ops, "recipe": request.app.state.recipe,
+        "git_ops": request.app.state.git_ops, "omada": request.app.state.omada,
+        "recipe": request.app.state.recipe,
         "cellular_ctx": request.app.state.cellular_ctx,
         "local_llm": request.app.state.local_llm,
     }

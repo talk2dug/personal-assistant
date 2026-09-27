@@ -269,6 +269,89 @@ def test_open_pr_calls_the_github_api(client):
     assert client._http.calls[0][0] == "POST"
 
 
+def test_open_pr_with_no_base_branch_uses_the_client_default(client):
+    """Regression test for a real, shipped bug: git_read_file/git_create_branch/
+    git_open_pr all fell back to a hardcoded 'main' whenever a call omitted branch_name,
+    which silently pointed dev-team work at a months-stale branch missing entire shipped
+    features (design_assets, the Design Library, short-selling...) -- an employee reported
+    them as never having existed at all. default_branch is now the one place that answer
+    lives, wired from config.git_default_branch in production."""
+    client.default_branch = "needs-you-board"
+    client._http = FakeHTTP()
+    client.open_pr("feature/one", "My PR", "body text")
+    _, _, payload = client._http.calls[0]
+    assert payload["base"] == "needs-you-board"
+
+
+def test_call_tool_open_pr_with_no_base_branch_uses_the_client_default(client):
+    client.default_branch = "needs-you-board"
+    client._http = FakeHTTP()
+    client.call_tool("git_open_pr", {"branch_name": "feature/one", "title": "t"})
+    _, _, payload = client._http.calls[0]
+    assert payload["base"] == "needs-you-board"
+
+
+def test_open_pr_with_an_explicit_base_branch_overrides_the_default(client):
+    client.default_branch = "needs-you-board"
+    client._http = FakeHTTP()
+    client.open_pr("feature/one", "My PR", "body text", base_branch="main")
+    _, _, payload = client._http.calls[0]
+    assert payload["base"] == "main"
+
+
+def test_create_branch_with_no_base_branch_forks_from_the_client_default(tmp_path):
+    """Same regression as above, for create_branch's local-git path: forks off
+    origin/<default_branch> when base_branch is omitted, not a hardcoded 'main'. Gives
+    'needs-you-board' a commit 'main' doesn't have, so the test actually fails if the
+    code silently falls back to main instead of the configured default."""
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git(["init", "--bare", "-b", "main"], remote)
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git(["init", "-b", "main"], seed)
+    _git(["config", "user.email", "seed@example.com"], seed)
+    _git(["config", "user.name", "Seed"], seed)
+    (seed / "README.md").write_text("hello\n")
+    _git(["add", "-A"], seed)
+    _git(["commit", "-m", "initial"], seed)
+    _git(["remote", "add", "origin", str(remote)], seed)
+    _git(["push", "origin", "main"], seed)
+
+    _git(["checkout", "-b", "needs-you-board"], seed)
+    (seed / "ONLY_ON_NYB.txt").write_text("real, deployed, shipped code\n")
+    _git(["add", "-A"], seed)
+    _git(["commit", "-m", "feature only on needs-you-board"], seed)
+    _git(["push", "origin", "needs-you-board"], seed)
+
+    workspace = tmp_path / "workspace"
+    client = GitOpsClient(repo="owner/repo", token=None, workspace_path=str(workspace),
+                          author_name="Test Bot", author_email="bot@example.com",
+                          default_branch="needs-you-board")
+    client._ensure_main_clone = lambda: _clone_local(client, remote)
+
+    client.create_branch("feature/from-default")
+
+    worktree = client._worktree_dir("feature/from-default")
+    assert (worktree / "ONLY_ON_NYB.txt").exists()
+
+
+def test_build_git_ops_context_wires_the_configured_default_branch():
+    from assistant.core.setup import build_git_ops_context
+
+    class FakeConfig:
+        github_repo = "owner/repo"
+        github_pat = "token"
+        git_workspace_path = "/tmp/does-not-matter"
+        git_author_name = "Jarvis"
+        git_author_email = "jarvis@localhost"
+        git_default_branch = "needs-you-board"
+
+    ctx = build_git_ops_context(FakeConfig())
+    assert ctx.mcp_client.default_branch == "needs-you-board"
+
+
 def test_get_pr_status_includes_check_runs(client):
     client._http = FakeHTTP()
     result = client.get_pr_status(42)

@@ -71,12 +71,19 @@ class GitOpsClient:
     def __init__(
         self, repo: str, token: str, workspace_path: str,
         author_name: str = "Jarvis", author_email: str = "jarvis@localhost",
+        default_branch: str = "main",
     ):
         self.repo = repo
         self.token = token
         self.workspace = Path(workspace_path).resolve()
         self.author_name = author_name
         self.author_email = author_email
+        # The branch a call reads/branches-off/PRs-into when it doesn't name one --
+        # config.py's git_default_branch, which production sets to whatever branch is
+        # actually deployed. Kept a plain default of 'main' here (not read from config
+        # directly) so every existing test, which builds a GitOpsClient by hand against a
+        # fake repo whose default branch is literally 'main', keeps working unchanged.
+        self.default_branch = default_branch
         self._http = httpx.Client(
             base_url=GITHUB_API,
             headers={
@@ -97,10 +104,18 @@ class GitOpsClient:
         main = self._main_clone
         if (main / ".git").exists():
             _run_git(["fetch", "origin"], cwd=main, token=self.token)
+            # Explicit checkout + hard reset, not just a fetch: this clone is long-lived
+            # across calls, so a persistent leftover checked out to a different branch
+            # (e.g. left on 'main' from before default_branch was reconfigured, or from a
+            # previous deployment) would otherwise go on silently answering every read
+            # from the wrong branch indefinitely.
+            _run_git(["checkout", self.default_branch], cwd=main, token=self.token)
+            _run_git(["reset", "--hard", f"origin/{self.default_branch}"], cwd=main, token=self.token)
             return
         main.parent.mkdir(parents=True, exist_ok=True)
         url = f"https://github.com/{self.repo}.git"
-        _run_git(["clone", url, str(main)], cwd=main.parent, token=self.token)
+        _run_git(["clone", "--branch", self.default_branch, url, str(main)],
+                 cwd=main.parent, token=self.token)
         _run_git(["config", "user.name", self.author_name], cwd=main)
         _run_git(["config", "user.email", self.author_email], cwd=main)
 
@@ -145,7 +160,8 @@ class GitOpsClient:
             return {"ok": False, "error": "binary file, cannot display as text"}
         return {"ok": True, "path": path, "content": content}
 
-    def create_branch(self, branch_name: str, base_branch: str = "main") -> dict:
+    def create_branch(self, branch_name: str, base_branch: str | None = None) -> dict:
+        base_branch = base_branch or self.default_branch
         self._ensure_main_clone()
         worktree_dir = self._worktree_dir(branch_name)
 
@@ -210,9 +226,10 @@ class GitOpsClient:
         sha = _run_git(["rev-parse", "HEAD"], cwd=worktree_dir)
         return {"ok": True, "branch": branch_name, "commit_sha": sha, "files_changed": len(files) + len(delete_paths or [])}
 
-    def open_pr(self, branch_name: str, title: str, body: str, base_branch: str = "main") -> dict:
+    def open_pr(self, branch_name: str, title: str, body: str, base_branch: str | None = None) -> dict:
         resp = self._http.post(f"/repos/{self.repo}/pulls", json={
-            "title": title, "body": body, "head": branch_name, "base": base_branch,
+            "title": title, "body": body, "head": branch_name,
+            "base": base_branch or self.default_branch,
         })
         if resp.status_code >= 400:
             return {"ok": False, "error": resp.text[:500]}
@@ -317,7 +334,7 @@ class GitOpsClient:
             if name == "git_read_file":
                 return self.read_file(arguments["path"], arguments.get("branch_name"))
             if name == "git_create_branch":
-                return self.create_branch(arguments["branch_name"], arguments.get("base_branch", "main"))
+                return self.create_branch(arguments["branch_name"], arguments.get("base_branch"))
             if name == "git_commit_and_push":
                 return self.commit_and_push(
                     arguments["branch_name"], arguments.get("files", []), arguments["commit_message"],
@@ -325,7 +342,7 @@ class GitOpsClient:
             if name == "git_open_pr":
                 return self.open_pr(
                     arguments["branch_name"], arguments["title"], arguments.get("body", ""),
-                    arguments.get("base_branch", "main"))
+                    arguments.get("base_branch"))
             if name == "git_get_pr_status":
                 return self.get_pr_status(arguments["pr_number"])
             if name == "git_merge_pr":

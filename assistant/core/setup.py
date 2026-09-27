@@ -15,7 +15,7 @@ from .claude_cli import ClaudeCLIClient
 from .engine import (
     AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, GitOpsContext,
     HomeAssistantContext, KrogerContext, LetterStreamContext, MailContext, ObsidianContext,
-    PersonalContext, PhoneContext, RecipeContext, TicketmasterContext,
+    OmadaContext, PersonalContext, PhoneContext, RecipeContext, TicketmasterContext,
 )
 from .git_ops import GitOpsClient
 from .git_tools import GIT_TOOLS
@@ -26,6 +26,8 @@ from .mail_client import MailClient
 from .mcp_client import MCPClient
 from .mcp_stdio_client import StdioMCPClient
 from .obsidian_client import ObsidianClient
+from .omada_client import OmadaClient
+from .omada_tools import OMADA_SENSITIVE_TOOLS, OMADA_TOOLS
 from .ssh_ops import SSHOpsClient
 
 logger = logging.getLogger(__name__)
@@ -92,6 +94,34 @@ def build_local_llm_context(cfg):
     return client
 
 
+def _sms_notify(cfg, text) -> bool:
+    """Queue one of Jarvis's own notifications as a text message. True if queued.
+
+    Jack, on the Home Assistant push notifications this replaces: *"i cant open them and
+    they lack enough space for the entire message."* An HA mobile-app notification is a
+    banner — it truncates, and tapping it goes nowhere useful. A text arrives in the same
+    thread every time, keeps its full body, and is readable from a lock screen or a car.
+
+    The recipient is the first allowed SMS number, which is his own: the same allow-list
+    that decides who may text Jarvis decides who Jarvis may text, so this cannot become a
+    way to message someone new.
+    """
+    numbers = list(getattr(cfg, "sms_allowed_numbers", None) or [])
+    if not numbers or not getattr(cfg, "sms_sending_enabled", False):
+        return False
+    try:
+        from . import cellular
+
+        # trim_for_sms, not the raw text: a multi-part message is billed per segment and
+        # the point here is that he can read the whole thing, not that it is complete to
+        # the character.
+        cellular.queue_outbound(cfg.db_path, numbers[0], cellular.trim_for_sms(text))
+        return True
+    except Exception:
+        logger.exception("could not queue notification SMS — falling back")
+        return False
+
+
 def build_notifier(cfg, telegram_notify, home_assistant=None):
     """Wraps the Telegram notifier so Jarvis's own outgoing messages follow the user's
     notification policy.
@@ -108,20 +138,23 @@ def build_notifier(cfg, telegram_notify, home_assistant=None):
 
     def notify(chat_id, text):
         policy = db.get_setting(cfg.db_path, NOTIFY_POLICY_KEY, DEFAULT_NOTIFY_POLICY)
-        to_phone = False
 
-        if home_assistant is not None:
-            if policy in ("phone", "both"):
-                to_phone = True
-            elif policy == "auto":
-                try:
-                    presence = home_assistant.mcp_client.presence()
-                    # Only push when we actually know he's out. Unknown presence falls
-                    # back to Telegram rather than pushing to a phone in his pocket at
-                    # 3am on a guess.
-                    to_phone = presence.get("home") is False
-                except Exception:
-                    logger.debug("presence lookup failed; falling back to Telegram")
+        # Text first. Jack asked for this directly -- the Home Assistant push he had before
+        # could not be opened and truncated the message, which for a reminder is the whole
+        # content. 'auto' means SMS too: there is no presence question to answer any more,
+        # because a text reaches him whether he is home or not.
+        if policy in ("sms", "auto", "both"):
+            if _sms_notify(cfg, text):
+                if policy != "both":
+                    return
+            elif policy == "sms":
+                # Explicitly asked for SMS and it could not be queued -- say so rather
+                # than silently delivering somewhere he is not looking.
+                logger.warning("SMS notify unavailable; falling back to Telegram")
+
+        to_phone = False
+        if home_assistant is not None and policy in ("phone", "both"):
+            to_phone = True
 
         if to_phone:
             try:
@@ -226,10 +259,27 @@ def build_git_ops_context(cfg) -> GitOpsContext | None:
     client = GitOpsClient(
         cfg.github_repo, cfg.github_pat, cfg.git_workspace_path,
         author_name=cfg.git_author_name, author_email=cfg.git_author_email,
+        default_branch=cfg.git_default_branch,
     )
-    logger.info("Git ops: targeting %s, %d tools, %d gated as sensitive",
-               cfg.github_repo, len(GIT_TOOLS), len(GIT_SENSITIVE_TOOLS))
+    logger.info("Git ops: targeting %s (%s), %d tools, %d gated as sensitive",
+               cfg.github_repo, cfg.git_default_branch, len(GIT_TOOLS), len(GIT_SENSITIVE_TOOLS))
     return GitOpsContext(mcp_client=client, git_tools=GIT_TOOLS, sensitive_tools=GIT_SENSITIVE_TOOLS)
+
+
+def build_omada_context(cfg) -> OmadaContext | None:
+    """TP-Link Omada network monitoring/control -- off unless the owner has registered an
+    Open API application on the controller and put its credentials in config.json (see
+    omada_client.py's module docstring; never a raw username/password)."""
+    if not (cfg.omada_controller_url and cfg.omada_client_id and cfg.omada_client_secret
+            and cfg.omada_id and cfg.omada_site_id):
+        return None
+    client = OmadaClient(
+        cfg.omada_controller_url, cfg.omada_client_id, cfg.omada_client_secret,
+        cfg.omada_id, cfg.omada_site_id, db_path=cfg.db_path,
+    )
+    logger.info("Omada: targeting %s, %d tools, %d gated as sensitive",
+               cfg.omada_controller_url, len(OMADA_TOOLS), len(OMADA_SENSITIVE_TOOLS))
+    return OmadaContext(mcp_client=client, omada_tools=OMADA_TOOLS, sensitive_tools=OMADA_SENSITIVE_TOOLS)
 
 
 def build_personal_context(

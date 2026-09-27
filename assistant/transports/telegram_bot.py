@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def build_application(
     token: str, db_path: str, llm, tz_name: str = "America/New_York", era=None, calendar=None, phone=None, mail=None,
     obsidian=None, home_assistant=None, business=None, personal=None, airbnb=None, ticketmaster=None, kroger=None,
-    ccxt=None, letterstream=None, git_ops=None, recipe=None, local_llm=None, cellular_ctx=None,
+    ccxt=None, letterstream=None, git_ops=None, omada=None, recipe=None, local_llm=None, cellular_ctx=None,
 ) -> Application:
     """era, phone, mail, obsidian, and home_assistant (engine.EraContext / PhoneContext /
     MailContext / ObsidianContext / HomeAssistantContext) are exposed only to users with
@@ -50,6 +50,7 @@ def build_application(
         user_ccxt = ccxt if is_owner else None
         user_letterstream = letterstream if is_owner else None
         user_git_ops = git_ops if is_owner else None
+        user_omada = omada if is_owner else None
         user_recipe = recipe if is_owner else None
         user_local_llm = local_llm if is_owner else None
         # Owner-only without exception: send_text writes from Jack's own number, so a
@@ -64,7 +65,7 @@ def build_application(
             obsidian=user_obsidian, home_assistant=user_home_assistant, business=user_business,
             personal=user_personal, airbnb=user_airbnb, ticketmaster=user_ticketmaster,
             kroger=user_kroger, ccxt=user_ccxt, letterstream=user_letterstream, git_ops=user_git_ops,
-            recipe=user_recipe, local_llm=user_local_llm, cellular_ctx=user_cellular,
+            omada=user_omada, recipe=user_recipe, local_llm=user_local_llm, cellular_ctx=user_cellular,
         )
         reply = await loop.run_in_executor(None, call)
         await update.message.reply_text(reply)

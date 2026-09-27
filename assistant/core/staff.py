@@ -571,7 +571,16 @@ def set_data_feeds(db_path: str, key: str, feeds: str) -> bool:
     # letter -- those stay behind his own confirmed tool calls. They were added to
     # infer_data_feeds without being added here, so inference could produce a feed this
     # function then rejected as unknown.
-    valid = {"market", "paper", "journal", "policy", "finance", "credit", "radio"}
+    #
+    # "health" is read-only too -- it reads host_health's table of what host_health_tick
+    # already found and, where whitelisted, already fixed this run. It grants no new
+    # power; the tick that actually probes and repairs runs on its own clock regardless
+    # of whether any employee holds this feed. See host_health.py/host_fixes.py.
+    #
+    # "architecture" is pure retrieval like "policy" -- the owner's own architecture notes
+    # read into the prompt, nothing written anywhere. See architecture_briefing.py.
+    valid = {"market", "paper", "journal", "policy", "finance", "credit", "radio",
+             "health", "architecture"}
     wanted = [f.strip().lower() for f in (feeds or "").split(",") if f.strip()]
     unknown = [f for f in wanted if f not in valid]
     if unknown:
@@ -696,7 +705,7 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
     """
     if not feeds:
         return ""
-    market_parts, paper_parts, finance_parts, credit_parts, radio_parts = [], [], [], [], []
+    market_parts, paper_parts, finance_parts, credit_parts, radio_parts, health_parts = [], [], [], [], [], []
     if "radio" in feeds:
         try:
             from . import radio
@@ -860,9 +869,33 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
             paper_parts.append(f"PAPER PORTFOLIO: unavailable ({type(e).__name__}). "
                                "Do not trade this run.")
 
+    if "health" in feeds:
+        try:
+            from . import host_health
+            hosts = host_health.all_hosts(db_path)
+            if not hosts:
+                health_parts.append("HOST HEALTH: no checks recorded yet -- the "
+                                    "host_health_tick job hasn't run since this was set up.")
+            else:
+                down = [h for h in hosts if not h["reachable"]]
+                lines = [f"HOST HEALTH ({len(hosts) - len(down)} of {len(hosts)} devices up, "
+                         f"checked every 15 minutes):"]
+                for h in down:
+                    fix = ""
+                    if h.get("last_fix_id"):
+                        fix = f" -- fix attempted ({h['last_fix_id']}): {h.get('last_fix_result')}"
+                    lines.append(f"  DOWN: {h['name']} ({h['kind']}), down since "
+                                 f"{(h.get('last_down_at') or 'unknown')[:16]}Z, "
+                                 f"{h['consecutive_failures']} consecutive check(s) failed{fix}")
+                if not down:
+                    lines.append("  everything reachable.")
+                health_parts.append("\n".join(lines))
+        except Exception as e:
+            health_parts.append(f"HOST HEALTH: unavailable ({type(e).__name__}).")
+
     # Finance first for the same reason the paper portfolio leads: an employee should
     # read its own situation before it reads anything it might react to.
-    parts = credit_parts + finance_parts + paper_parts + market_parts + radio_parts
+    parts = credit_parts + finance_parts + paper_parts + market_parts + radio_parts + health_parts
     if not parts:
         return ""
     return ("\n\n--- LIVE DATA, captured just now. These figures are exact and "
@@ -1026,6 +1059,11 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             # tool loop, so anything it needs to know has to already be in the prompt.
             from . import agent_policy
             prompt += agent_policy.build_policy_briefing(obsidian)
+        if "architecture" in feeds:
+            # Background knowledge of how the house is built, read straight out of the
+            # vault -- see architecture_briefing.py. Same pure-retrieval shape as policy.
+            from . import architecture_briefing
+            prompt += architecture_briefing.build_architecture_briefing(obsidian)
         journaling = "journal" in feeds and obsidian is not None
         if "journal" in feeds and obsidian is None:
             logger.warning("%s holds the journal feed but no vault client was wired; "
@@ -1033,6 +1071,9 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
         if "policy" in feeds and obsidian is None:
             logger.warning("%s holds the policy feed but no vault client was wired; "
                            "this run cannot see the owner's standing policy", key)
+        if "architecture" in feeds and obsidian is None:
+            logger.warning("%s holds the architecture feed but no vault client was wired; "
+                           "this run cannot see the house architecture notes", key)
         if journaling:
             prompt += crypto_journal.build_prior_context(obsidian, emp["title"], role=role)
         if "paper" in feeds:

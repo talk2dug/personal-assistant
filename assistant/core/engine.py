@@ -28,6 +28,7 @@ from .kitchen_tools import (
     KITCHEN_ALWAYS_TOOLS, KITCHEN_SYSTEM_NOTE, KITCHEN_TOOLS, _select_kitchen_gated_tools,
 )
 from .git_tools import GIT_SYSTEM_NOTE
+from .omada_tools import OMADA_SYSTEM_NOTE
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +260,21 @@ class GitOpsContext:
     @property
     def tool_names(self) -> set[str]:
         return {t["function"]["name"] for t in self.git_tools}
+
+
+@dataclass
+class OmadaContext:
+    """Network visibility (devices/clients/health) is free; reboot_omada_device is the one
+    real control action, so it's the sole sensitive_tools entry, same pending-confirmation
+    gate as git_merge_pr/Kroger/CCXT. See omada_client.py's module docstring."""
+
+    mcp_client: object
+    omada_tools: list[dict]
+    sensitive_tools: set[str]
+
+    @property
+    def tool_names(self) -> set[str]:
+        return {t["function"]["name"] for t in self.omada_tools}
 
 
 @dataclass
@@ -946,13 +962,15 @@ HOME_ASSISTANT_TOOLS = [
                 "Change where Jarvis's own outgoing notifications go — reminders and alerts he "
                 "sends unprompted. Use this when the user states a standing preference like "
                 "'send everything to my phone when I'm out'. It persists across restarts. "
-                "'auto' pushes to his phone when he's away and uses Telegram when he's home; "
-                "'phone' always pushes; 'telegram' never does; 'both' does each."
+                "'auto' (the default) and 'sms' both send a text message, which is what he "
+                "asked for: the Home Assistant push could not be opened and truncated the "
+                "message. 'phone' uses the Home Assistant push instead; 'telegram' never "
+                "leaves Telegram; 'both' sends a text AND the push."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "policy": {"type": "string", "enum": ["auto", "phone", "telegram", "both"]},
+                    "policy": {"type": "string", "enum": ["auto", "sms", "phone", "telegram", "both"]},
                 },
                 "required": ["policy"],
             },
@@ -1231,7 +1249,7 @@ SYSTEM_PROMPT = (
     "yourself, just confirm it's open or report that no camera is registered for that room. "
     "list_cameras shows what's registered, and add_camera registers a new one from a stream URL."
     "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{kitchen_note}{web_note}"
-    "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}{recipe_note}"
+    "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}{omada_note}{recipe_note}"
     "{sms_note}{radio_note}"
 )
 
@@ -1407,7 +1425,7 @@ def build_system_prompt(
     tz_name: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     now: str | None = None, web_search: bool = False, business=None, personal=None,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
-    recipe=None, cellular_ctx=None, voice_brief: bool = False,
+    omada=None, recipe=None, cellular_ctx=None, voice_brief: bool = False,
 ) -> str:
     """Builds Jarvis's system prompt with whichever integration notes apply.
 
@@ -1454,6 +1472,7 @@ def build_system_prompt(
         ccxt_note=CCXT_SYSTEM_NOTE if ccxt is not None else "",
         letterstream_note=LETTERSTREAM_SYSTEM_NOTE if letterstream is not None else "",
         git_note=GIT_SYSTEM_NOTE if git_ops is not None else "",
+        omada_note=OMADA_SYSTEM_NOTE if omada is not None else "",
         recipe_note=RECIPE_SYSTEM_NOTE if recipe is not None else "",
         sms_note=SMS_SYSTEM_NOTE if cellular_ctx is not None else "",
         # Always on: the tables exist unconditionally and the tools report a stale
@@ -1465,7 +1484,7 @@ def build_system_prompt(
 def select_tools(
     user_text: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
     route: bool = True, business=None, personal=None, airbnb=None, ticketmaster=None, kroger=None,
-    ccxt=None, letterstream=None, git_ops=None, recipe=None, cellular_ctx=None,
+    ccxt=None, letterstream=None, git_ops=None, omada=None, recipe=None, cellular_ctx=None,
 ) -> list[dict]:
     """The tool set for one turn, in Ollama's function-schema format.
 
@@ -1504,6 +1523,7 @@ def select_tools(
             + (ccxt.ccxt_tools if ccxt is not None else [])
             + (LETTERSTREAM_TOOLS if letterstream is not None else [])
             + (git_ops.git_tools if git_ops is not None else [])
+            + (omada.omada_tools if omada is not None else [])
             + (recipe.recipe_tools if recipe is not None else [])
             + (SMS_TOOLS if cellular_ctx is not None else [])
             + RADIO_TOOLS
@@ -1553,6 +1573,10 @@ def select_tools(
         # capture reliably with a keyword list, and these tools are safe to always offer
         # (branch/write/push/PR-open are all reversible; only merge is gated).
         + (git_ops.git_tools if git_ops is not None else [])
+        # Not keyword-gated: "is the network okay" or "who just joined the wifi" name no
+        # fixed keyword list reliably, and it's only 4 schemas -- nowhere near the
+        # tool-count budget that forced Era/Kroger to split.
+        + (omada.omada_tools if omada is not None else [])
         + (_select_recipe_tools(recipe, user_text) if recipe is not None else [])
         # Not keyword-gated: "ask Nadia if she's free Thursday" names no SMS keyword at
         # all, and three schemas is nowhere near the tool-count budget.
@@ -1586,6 +1610,7 @@ def _dispatch_tool_call(
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None,
     git_ops: "GitOpsContext | None" = None,
+    omada: "OmadaContext | None" = None,
     recipe: "RecipeContext | None" = None,
     cellular_ctx: "CellularContext | None" = None,
     employee_key: str | None = None,
@@ -1997,6 +2022,24 @@ def _dispatch_tool_call(
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    if omada is not None and name in omada.tool_names:
+        if name in omada.sensitive_tools:
+            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
+            return json.dumps({
+                "status": "awaiting_confirmation",
+                "message": (
+                    f"Calling {name} does not execute it — this reboots a real network "
+                    f"device and interrupts service for whatever's connected through it. "
+                    f"Describe exactly what this will do (tool: {name}, arguments: "
+                    f"{arguments}) and ask the user to explicitly confirm yes or no before "
+                    "anything happens."
+                ),
+            })
+        try:
+            return json.dumps(omada.mcp_client.call_tool(name, arguments))
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
     if ccxt is not None and name in ccxt.tool_names:
         if name in ccxt.sensitive_tools:
             create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
@@ -2221,6 +2264,7 @@ def execute_pending_action(
     mail: MailContext | None = None, home_assistant: HomeAssistantContext | None = None,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
+    omada: "OmadaContext | None" = None,
     cellular_ctx: "CellularContext | None" = None,
 ):
     """Finds whichever context owns this pending action's tool and calls it for real.
@@ -2241,6 +2285,8 @@ def execute_pending_action(
         context = letterstream
     elif git_ops is not None and pending["tool_name"] in git_ops.tool_names:
         context = git_ops
+    elif omada is not None and pending["tool_name"] in omada.tool_names:
+        context = omada
     elif cellular_ctx is not None and pending["tool_name"] in cellular_ctx.tool_names:
         context = cellular_ctx
     else:
@@ -2264,6 +2310,7 @@ def _resolve_pending_action(
     home_assistant: HomeAssistantContext | None, pending: dict, user_text: str,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
+    omada: "OmadaContext | None" = None,
     cellular_ctx: "CellularContext | None" = None,
 ) -> str:
     db.add_message(db_path, pending["user_id"], "user", user_text)
@@ -2276,7 +2323,7 @@ def _resolve_pending_action(
             result = execute_pending_action(
                 pending, era=era, phone=phone, mail=mail, home_assistant=home_assistant,
                 kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops,
-                cellular_ctx=cellular_ctx)
+                omada=omada, cellular_ctx=cellular_ctx)
             reply = f"Done. {pending['tool_name']} executed — result: {result}"
         except Exception as e:
             reply = f"I confirmed it but the call failed: {e}"
@@ -2304,6 +2351,7 @@ def handle_message(
     airbnb: AirbnbContext | None = None, ticketmaster: TicketmasterContext | None = None,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
+    omada: "OmadaContext | None" = None,
     recipe: "RecipeContext | None" = None,
     cellular_ctx: "CellularContext | None" = None,
     image_bytes: bytes | None = None, max_tool_hops: int = 6,
@@ -2336,13 +2384,14 @@ def handle_message(
     in the window as an orphan, which reads worse than either keeping or dropping the
     pair."""
     if (era is not None or phone is not None or mail is not None or home_assistant is not None
-            or kroger is not None or ccxt is not None or letterstream is not None or git_ops is not None):
+            or kroger is not None or ccxt is not None or letterstream is not None or git_ops is not None
+            or omada is not None):
         pending = db.get_pending_action(db_path, requesting_user_id)
         if pending is not None:
             return _resolve_pending_action(
                 db_path, llm, era, phone, mail, home_assistant, pending, user_text,
                 kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops,
-                cellular_ctx=cellular_ctx)
+                omada=omada, cellular_ctx=cellular_ctx)
 
     # Before anything that costs a model call, including the local fast path below: a
     # question whose answer is a row in SQLite should never cost an inference. "What is
@@ -2374,7 +2423,7 @@ def handle_message(
     tools = select_tools(
         user_text, era, phone, mail, obsidian, home_assistant, route=not agentic, business=business,
         personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-        letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+        letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
         cellular_ctx=cellular_ctx)
 
     # Agentic backends (the Claude CLI) run their own tool-calling loop against Jarvis's
@@ -2386,7 +2435,7 @@ def handle_message(
             tz_name, era, phone, mail, obsidian, home_assistant,
             web_search=getattr(llm, "web_search", False), business=business, personal=personal,
             airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-            letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+            letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
             cellular_ctx=cellular_ctx, voice_brief=voice_brief,
         )
         try:
@@ -2404,7 +2453,7 @@ def handle_message(
         {"role": "system", "content": build_system_prompt(
             tz_name, era, phone, mail, obsidian, home_assistant, now=now, business=business,
             personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-            letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+            letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
             cellular_ctx=cellular_ctx, voice_brief=voice_brief)}
     ] + history
     if image_bytes is not None and messages[-1]["role"] == "user":
@@ -2447,7 +2496,7 @@ def handle_message(
                 db_path, tz_name, requesting_user_id, fn["name"], fn.get("arguments", {}), era, calendar, phone,
                 mail=mail, obsidian=obsidian, home_assistant=home_assistant, business=business,
                 personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                letterstream=letterstream, git_ops=git_ops, recipe=recipe,
+                letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
                 cellular_ctx=cellular_ctx, llm=llm,
             )
             messages.append({"role": "tool", "content": result})

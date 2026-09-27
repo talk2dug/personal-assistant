@@ -124,6 +124,49 @@ _WORKING = re.compile(
     r"\b(what (?:are|r) you (?:working on|doing)|what have you (?:done|been doing)"
     r"|what did you do|what'?s in flight)\b", re.I)
 
+# "is jarvisbox down", "is simrig up", "is the phone mcp reachable/responding/online" --
+# host_health_tick's own words for these two states, plus a bare "up"/"down" since that's
+# how he actually asks. Deliberately narrower than _STATUS: a host name is a proper noun,
+# not a mission subject, so this only fires alongside its own up/down vocabulary rather
+# than riding on _STATUS's broader "how's X going" phrasing, which would just as happily
+# (and wrongly) match a mission name that happens to share a word with a host.
+_HOST_UP_DOWN = re.compile(r"\b(up|down|online|offline|reachable|responding|alive)\b", re.I)
+
+
+def _host_status_answer(db_path: str, text: str) -> str | None:
+    """A specific device's live reachability, straight out of host_status -- no LLM.
+
+    None whenever no registered host name appears in the text, so an unrecognised device
+    (or a word that merely resembles one) falls through to the model rather than risk a
+    confidently wrong answer -- same precision-over-recall rule as the rest of this file.
+    """
+    try:
+        from . import host_health
+        hosts = host_health.all_hosts(db_path)
+    except Exception:
+        logger.debug("direct answer: host_health read failed, falling back", exc_info=True)
+        return None
+    if not hosts:
+        return None
+
+    low = text.lower()
+    match = None
+    for h in sorted(hosts, key=lambda h: len(h["name"]), reverse=True):
+        needle = h["name"].replace("_", " ")
+        if re.search(rf"\b{re.escape(needle)}\b", low):
+            match = h
+            break
+    if match is None:
+        return None
+
+    if match["reachable"]:
+        return f"{match['name']} is up."
+    tried = (f" I tried {match['last_fix_id']} ({match['last_fix_result']})."
+             if match.get("last_fix_id") else " No pre-approved fix exists for this one.")
+    since = (match.get("last_down_at") or "")[:16].replace("T", " ")
+    return (f"{match['name']} is DOWN -- {match['consecutive_failures']} check(s) failed"
+            f"{f', since {since}Z' if since else ''}.{tried}")
+
 
 def _money(value: float) -> str:
     sign = "-" if value < 0 else ""
@@ -313,6 +356,11 @@ def try_direct_answer(db_path: str, user_text: str) -> str | None:
 
     if _AGENDA.search(text):
         answer = _agenda_answer(db_path, text)
+        if answer is not None:
+            return answer
+
+    if _HOST_UP_DOWN.search(text) or _STATUS.search(text):
+        answer = _host_status_answer(db_path, text)
         if answer is not None:
             return answer
 

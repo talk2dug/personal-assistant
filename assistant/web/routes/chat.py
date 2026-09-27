@@ -58,6 +58,7 @@ async def send_message(request: Request):
     ccxt = request.app.state.ccxt if is_owner else None
     letterstream = request.app.state.letterstream if is_owner else None
     git_ops = request.app.state.git_ops if is_owner else None
+    omada = request.app.state.omada if is_owner else None
     recipe = request.app.state.recipe if is_owner else None
     # Owner-only, like every other outward-facing capability here: a guest at a terminal
     # must not be able to send texts as Jack.
@@ -74,7 +75,7 @@ async def send_message(request: Request):
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         image_bytes=image_bytes, viewing_context=viewing_context,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
-        git_ops=git_ops, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
+        git_ops=git_ops, omada=omada, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
     )
     reply = await loop.run_in_executor(None, call)
     # show_camera (if the model called it this turn) leaves its result here rather than

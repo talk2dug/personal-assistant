@@ -261,7 +261,7 @@ def build_runtime(cfg: Config):
         build_ccxt_context, build_cellular_context, build_era_context,
         build_git_ops_context, build_gpu_bridge, build_home_assistant_context,
         build_kroger_context, build_letterstream_context, build_llm,
-        build_local_llm_context, build_mail_context, build_obsidian_context,
+        build_local_llm_context, build_mail_context, build_obsidian_context, build_omada_context,
         build_personal_context, build_phone_context, build_recipe_context,
         build_ticketmaster_context,
     )
@@ -290,6 +290,7 @@ def build_runtime(cfg: Config):
         "ccxt": build_ccxt_context(cfg),
         "letterstream": letterstream,
         "git_ops": build_git_ops_context(cfg),
+        "omada": build_omada_context(cfg),
         "recipe": build_recipe_context(cfg),
         "cellular_ctx": build_cellular_context(cfg),
         "local_llm": build_local_llm_context(cfg),

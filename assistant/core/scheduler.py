@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import (
-    agents, business_db, crypto_journal, db, github_client, kitchen_db, location,
+    agents, attention, business_db, crypto_journal, db, github_client, kitchen_db, location,
     mail_bills, mail_db, mail_debts, mail_importance, mail_triage, market_data,
     paper_trading, personal_agents, personal_db, staff, wan_failover,
 )
@@ -81,6 +81,9 @@ def start(
     speaker=None, voice_keepalive_interval_seconds: int = 420,
     mail_photo_scan_interval_seconds: int = 180, mail_photo_scan_limit: int = 20,
     mail_photo_from_address: str | None = None, generated_media_path: str = "generated",
+    ssh_hosts: dict | None = None, phone_mcp_url: str | None = None,
+    host_health_interval_seconds: int = 900,
+    omada=None, omada_health_interval_seconds: int = 900,
 ) -> BackgroundScheduler:
     """calendar is an engine.CalendarContext (skip Apple Calendar sync if None).
     era is an engine.EraContext (skip the finance cache refresh if None).
@@ -176,6 +179,50 @@ def start(
                     logger.exception("caldav sync failed for %s", calendar_url)
 
         scheduler.add_job(_caldav_tick, "interval", seconds=caldav_sync_interval_seconds, id="caldav_sync")
+
+    # Subscribed .ics calendars — his work calendar. Twice a day at the two moments he
+    # actually looks at it: 6pm, to see tomorrow before the evening is gone, and 6am, to
+    # see today before he leaves. Not an interval: a corporate feed of ~150 meetings
+    # changes a few times a week, and polling it every five minutes would be ~300 pointless
+    # fetches a day against someone else's Exchange server.
+    def _calendar_feed_tick():
+        from . import calendar_feeds
+        results = calendar_feeds.sync_all(db_path, tz_name)
+        for name, result in results.items():
+            if not result.get("ok"):
+                logger.warning("work calendar %r did not refresh: %s", name, result.get("error"))
+
+    scheduler.add_job(
+        _guarded_simple("calendar_feeds", _calendar_feed_tick), "cron", hour="6,18", minute=0,
+        timezone=tz_name, id="calendar_feed_sync",
+    )
+
+    def _calendar_feed_catchup():
+        """Fill the gap a restart leaves between the 6s, but only a real one.
+
+        A service restart is not a reason to re-fetch a calendar that synced an hour ago;
+        an empty table on a fresh install, or a box that was off all night, is.
+        """
+        from . import calendar_feeds
+
+        feeds = calendar_feeds.list_feeds(db_path)
+        stale = datetime.now(timezone.utc) - timedelta(hours=12)
+        for feed in feeds:
+            if not feed.get("enabled"):
+                continue
+            last = feed.get("last_synced_at")
+            if last and feed.get("last_status") == "ok":
+                try:
+                    if datetime.fromisoformat(last) > stale:
+                        continue
+                except ValueError:
+                    pass
+            calendar_feeds.sync_feed(db_path, feed["id"], tz_name)
+
+    scheduler.add_job(
+        _guarded_simple("calendar_feed_catchup", _calendar_feed_catchup), "date",
+        run_date=datetime.now(timezone.utc) + timedelta(minutes=1), id="calendar_feed_catchup",
+    )
 
     if era is not None:
         def _era_cache_tick():
@@ -500,7 +547,8 @@ def start(
                         era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
                         home_assistant=home_assistant, business=business, personal=personal,
                         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
-                        letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
+                        letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
+                        local_llm=local_llm,
                     )
                     if reply:
                         notify(owner["telegram_chat_id"], f"{routine['name']}: {reply}")
@@ -566,7 +614,14 @@ def start(
             pipeline_hours = business_intervals.get("pipeline_hours", 12)
 
             def _pipeline_tick():
-                agents.run_product_creator(db_path, llm, owner["id"], profile, obsidian=obsidian.mcp_client if obsidian is not None else None)
+                # The fulfiller check runs before anything is designed: a concept nobody
+                # can produce still costs a render, a listing and a slot in the one-a-day
+                # rate before failing at the publish. Built per tick rather than held,
+                # because the client resolves its token per call so a rotated key takes
+                # effect without a restart.
+                from .printify_client import PrintifyClient
+                printify = PrintifyClient(db_path)
+                agents.run_product_creator(db_path, llm, owner["id"], profile, obsidian=obsidian.mcp_client if obsidian is not None else None, printify=printify)
                 # The art director renders its options before filing them, so this tick
                 # can now sit on the GPU queue for a few minutes. That is fine here -- it
                 # runs every 12 hours and the renders respect the same reservation
@@ -894,6 +949,59 @@ def start(
             next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
         )
 
+    if ssh_hosts:
+        # Layer 1 of the sys-admin monitoring build (business_projects id 8): a
+        # mechanical, deterministic health check across every registered device, with no
+        # LLM anywhere in this loop -- see host_health.py/host_fixes.py's own docstrings
+        # for the full reasoning. Deliberately its own job on its own 15-minute clock,
+        # not folded into staff_cadence, so it keeps running whether or not
+        # business_agents_enabled is on or any employee happens to be due. Layer 2 (the
+        # systems_engineer employee's judgement) reads what this tick found via the
+        # 'health' data feed -- see staff.build_feed_briefing.
+        from . import host_health
+
+        host_health.init_host_health_db(db_path)
+        _health_owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+        # The SAME SSHOpsClient real ops plans already run through (BusinessClient.ssh_ops,
+        # built once in setup.build_business_context) -- a whitelisted fix is pre-approved,
+        # not a new credential path. business is a BusinessContext (engine.py); the
+        # BusinessClient itself, which actually holds .ssh_ops, is its .mcp_client field --
+        # a real, live-confirmed AttributeError here (business.ssh_ops instead of
+        # business.mcp_client.ssh_ops) is exactly why run_host_health_tick below is a
+        # standalone function with its own direct test rather than only a closure.
+        _health_ssh_ops = business.mcp_client.ssh_ops if business is not None else None
+        _orpheus_url = getattr(speaker, "orpheus_url", None) if speaker is not None else None
+
+        scheduler.add_job(
+            _guarded_simple("host_health", lambda: run_host_health_tick(
+                db_path, ssh_hosts, notify,
+                _health_owner["telegram_chat_id"] if _health_owner is not None else None,
+                bridge=bridge, phone_mcp_url=phone_mcp_url, orpheus_url=_orpheus_url,
+                ssh_ops=_health_ssh_ops)),
+            "interval", seconds=host_health_interval_seconds, id="host_health",
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
+    if omada is not None:
+        # The network-layer sibling of host_health above -- same "watch the
+        # infrastructure, notice what's wrong" build (business_projects id 8), one layer
+        # down the stack. No auto-remediation here (unlike host_fixes.py): a device that
+        # won't come back on its own needs the owner, not a guessed fix, and
+        # reboot_omada_device already requires his explicit confirmation via engine.py's
+        # sensitive_tools gate -- this tick only ever measures and notifies.
+        from . import omada_health
+
+        omada_health.init_omada_health_db(db_path)
+        _omada_owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+
+        scheduler.add_job(
+            _guarded_simple("omada_health", lambda: run_omada_health_tick(
+                db_path, omada.mcp_client, notify,
+                _omada_owner["telegram_chat_id"] if _omada_owner is not None else None)),
+            "interval", seconds=omada_health_interval_seconds, id="omada_health",
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
+        )
+
     if obsidian is not None:
         # Keeps the crypto desk's running-summary notes bounded. They are re-read into
         # every scheduled run's prompt, and write_note is append-only by design, so
@@ -1080,6 +1188,111 @@ def record_junk_scan_results(db_path: str, folder: str, results: list[dict]) -> 
         )
         logged += 1
     return logged
+
+
+def run_host_health_tick(db_path: str, ssh_hosts: dict, notify, owner_chat_id,
+                          bridge=None, phone_mcp_url: str | None = None,
+                          orpheus_url: str | None = None, ssh_ops=None) -> list[dict]:
+    """One pass of Layer 1 of the sys-admin monitoring build (business_projects id 8):
+    probe every registered device, record what changed, attempt a whitelisted fix on a
+    fresh outage, and notify on anything that still needs the owner. No LLM anywhere in
+    this -- see host_health.py/host_fixes.py.
+
+    A thin top-level wrapper, same pattern as run_task_watchdog above, so it's directly
+    unit-testable against fake ssh_hosts/notify/ssh_ops rather than only reachable through
+    the full scheduler.start() wiring -- the wiring itself is where a real bug shipped
+    once (business.ssh_ops instead of business.mcp_client.ssh_ops, an AttributeError that
+    only ever showed up live, since nothing exercised this function's actual object shape
+    in a test). Returns what happened to each changed host, for tests to assert against.
+    """
+    from . import host_fixes, host_health
+
+    results = host_health.check_all(
+        ssh_hosts, bridge=bridge, phone_mcp_url=phone_mcp_url, orpheus_url=orpheus_url)
+    changed = host_health.record_check(db_path, results)
+    outcomes = []
+
+    def _say(topic: str, body: str, priority: str) -> bool:
+        verdict = attention.should_say(db_path, topic, body, priority=priority)
+        if verdict["say"] and owner_chat_id is not None:
+            notify(owner_chat_id, verdict["body"])
+        return verdict["say"]
+
+    for entry in changed:
+        name = entry["name"]
+        if entry["transition"] == "recovered":
+            told = _say(f"host:{name}", f"{name} is back up.", "notice")
+            outcomes.append({"name": name, "transition": "recovered", "fix": None, "told": told})
+            continue
+
+        fix = None
+        if entry["transition"] == "down":
+            fix = host_fixes.attempt_fix(db_path, ssh_ops, name)
+            if fix and fix["outcome"] == "ok":
+                # The fix worked in the same tick that noticed the outage -- nothing left
+                # to escalate, this is "fixed it, telling you after".
+                told = _say(f"host:{name}", f"{name} was down; ran {fix['id']} and it's back.",
+                           "notice")
+                outcomes.append({"name": name, "transition": "down", "fix": fix, "told": told})
+                continue
+
+        row = host_health.get_host(db_path, name) or {}
+        if row.get("last_fix_id"):
+            tried = f" I tried {row['last_fix_id']} ({row.get('last_fix_result')})."
+        else:
+            tried = " No pre-approved fix exists for this one."
+        body = (f"{name} is down ({entry.get('consecutive_failures', 1)} check(s) "
+                f"failed).{tried}")
+        told = _say(f"host:{name}", body, "high")
+        outcomes.append({"name": name, "transition": entry["transition"], "fix": fix, "told": told})
+
+    return outcomes
+
+
+def run_omada_health_tick(db_path: str, client, notify, owner_chat_id) -> list[dict]:
+    """One pass of the network-layer sibling of run_host_health_tick: polls the Omada
+    controller for device and client state, records what changed, and notifies on a
+    device transition or a brand-new client joining the network. No auto-fix (see
+    scheduler.start's omada block for why) and no LLM anywhere in this -- see
+    omada_health.py.
+
+    A thin top-level wrapper, same reasoning as run_host_health_tick, so it's directly
+    unit-testable against a fake client/notify rather than only reachable through the
+    full scheduler.start() wiring.
+    """
+    from . import omada_health
+
+    results = omada_health.check_devices(client)
+    changed = omada_health.record_device_check(db_path, results)
+    new_clients = omada_health.check_and_record_clients(db_path, client)
+    outcomes = []
+
+    def _say(topic: str, body: str, priority: str) -> bool:
+        verdict = attention.should_say(db_path, topic, body, priority=priority)
+        if verdict["say"] and owner_chat_id is not None:
+            notify(owner_chat_id, verdict["body"])
+        return verdict["say"]
+
+    for entry in changed:
+        name = entry["name"]
+        if entry["transition"] == "recovered":
+            told = _say(f"omada_device:{entry['mac']}", f"{name} is back online.", "notice")
+            outcomes.append({"name": name, "transition": "recovered", "told": told})
+            continue
+        body = f"{name} ({entry.get('kind', 'device')}) is offline."
+        told = _say(f"omada_device:{entry['mac']}", body, "high")
+        outcomes.append({"name": name, "transition": entry["transition"], "told": told})
+
+    for client_entry in new_clients:
+        name = client_entry.get("name") or client_entry["mac"]
+        told = _say(
+            f"omada_client:{client_entry['mac']}",
+            f"A new device just joined the network: {name} ({client_entry.get('ip', 'no IP yet')}).",
+            "notice",
+        )
+        outcomes.append({"name": name, "transition": "new_client", "told": told})
+
+    return outcomes
 
 
 def run_task_watchdog(db_path: str, notify, as_of: str | None = None) -> list[dict]:

@@ -291,6 +291,16 @@ class Config:
     ccxt_exchange: str | None = None
     ccxt_api_key: str | None = None
     ccxt_api_secret: str | None = None
+    # Omada network monitoring/control (business_projects id 8's natural network-layer
+    # extension). Uses TP-Link's Open API (OAuth2 client-credentials), registered once by
+    # the owner on the controller's own admin UI -- never a raw username/password stored
+    # here. omada_id is the Open API's own per-controller namespace, issued alongside the
+    # client credentials, not something to guess or derive.
+    omada_controller_url: str | None = None
+    omada_client_id: str | None = None
+    omada_client_secret: str | None = None
+    omada_id: str | None = None
+    omada_site_id: str | None = None
     # LetterStream: physical mail (see letterstream_client.py). The return address is
     # fixed in config rather than supplied per letter by the model -- it never changes,
     # and asking the model to restate it each time is one more place a typo could put
@@ -314,6 +324,14 @@ class Config:
     git_workspace_path: str = "../jarvis-git-workspace"
     git_author_name: str = "Jarvis"
     git_author_email: str = "jarvis@localhost"
+    # The branch dev-team reads/branches-off/PRs-into by default when a call doesn't name
+    # one explicitly. Deliberately separate from GitHub's own repo-level default branch
+    # setting (which stays 'main') -- this is the branch the REAL, currently-deployed
+    # system actually runs from, found live to have drifted apart: an employee reading
+    # with no branch_name silently saw a months-stale 'main' missing entire shipped
+    # features (design_assets, the Design Library, the paper-trading desk's short
+    # selling...) and reported them as never having existed at all.
+    git_default_branch: str = "main"
     scan_ssh_password: str | None = None
     scan_ssh_users: list[str] = field(default_factory=lambda: ["pi", "jack"])
     scan_subnet: str = "192.168.0"
@@ -541,6 +559,11 @@ def load_config(path: str = "config.json") -> Config:
         ccxt_exchange=data.get("ccxt_exchange"),
         ccxt_api_key=data.get("ccxt_api_key"),
         ccxt_api_secret=data.get("ccxt_api_secret"),
+        omada_controller_url=data.get("omada_controller_url"),
+        omada_client_id=data.get("omada_client_id"),
+        omada_client_secret=data.get("omada_client_secret"),
+        omada_id=data.get("omada_id"),
+        omada_site_id=data.get("omada_site_id"),
         letterstream_api_id=data.get("letterstream_api_id"),
         letterstream_api_key=data.get("letterstream_api_key"),
         letterstream_from_name=data.get("letterstream_from_name"),
@@ -553,6 +576,7 @@ def load_config(path: str = "config.json") -> Config:
         github_pat=data.get("github_pat"),
         git_workspace_path=data.get("git_workspace_path", "../jarvis-git-workspace"),
         git_author_name=data.get("git_author_name", "Jarvis"),
+        git_default_branch=data.get("git_default_branch", "main"),
         git_author_email=data.get("git_author_email", "jarvis@localhost"),
         scan_ssh_password=data.get("scan_ssh_password"),
         scan_ssh_users=data.get("scan_ssh_users", ["pi", "jack"]),

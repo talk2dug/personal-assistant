@@ -8,12 +8,13 @@ GIT_TOOLS = [
         "description": (
             "List files under a directory of the real Jarvis repository. Use this before "
             "writing anything -- never assume a tech stack, module layout, or whether an "
-            "integration already exists; look first. Defaults to the repo root on main; "
-            "pass branch_name to look inside a branch you're already working on."
+            "integration already exists; look first. Defaults to the repo root on the "
+            "currently-deployed working branch (not necessarily called 'main' -- ask if "
+            "unsure); pass branch_name to look inside a branch you're already working on."
         ),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "Directory path relative to the repo root. Defaults to the root."},
-            "branch_name": {"type": "string", "description": "Defaults to 'main'."},
+            "branch_name": {"type": "string", "description": "Defaults to the currently-deployed working branch."},
         }},
     }},
     {"type": "function", "function": {
@@ -26,19 +27,20 @@ GIT_TOOLS = [
         ),
         "parameters": {"type": "object", "properties": {
             "path": {"type": "string", "description": "File path relative to the repo root."},
-            "branch_name": {"type": "string", "description": "Defaults to 'main'."},
+            "branch_name": {"type": "string", "description": "Defaults to the currently-deployed working branch."},
         }, "required": ["path"]},
     }},
     {"type": "function", "function": {
         "name": "git_create_branch",
         "description": (
-            "Create a new git branch off a base branch (default 'main') and check it "
-            "out into its own workspace. Always call this before writing any files or "
-            "committing — it does nothing to the real deployed code."
+            "Create a new git branch off a base branch (default: the currently-deployed "
+            "working branch) and check it out into its own workspace. Always call this "
+            "before writing any files or committing — it does nothing to the real "
+            "deployed code."
         ),
         "parameters": {"type": "object", "properties": {
             "branch_name": {"type": "string", "description": "e.g. 'feature/add-thing'."},
-            "base_branch": {"type": "string", "description": "Defaults to 'main'."},
+            "base_branch": {"type": "string", "description": "Defaults to the currently-deployed working branch."},
         }, "required": ["branch_name"]},
     }},
     {"type": "function", "function": {
@@ -68,7 +70,7 @@ GIT_TOOLS = [
             "branch_name": {"type": "string"},
             "title": {"type": "string"},
             "body": {"type": "string", "description": "PR description — what changed and why."},
-            "base_branch": {"type": "string", "description": "Defaults to 'main'."},
+            "base_branch": {"type": "string", "description": "Defaults to the currently-deployed working branch."},
         }, "required": ["branch_name", "title"]},
     }},
     {"type": "function", "function": {
@@ -88,10 +90,10 @@ GIT_TOOLS = [
     {"type": "function", "function": {
         "name": "git_merge_pr",
         "description": (
-            "Merge a pull request into main. This is the one real, consequential step "
-            "in the git workflow — it actually changes what's on main. Calling this does "
-            "not execute it immediately; it stages the action and the owner must "
-            "explicitly confirm before it happens."
+            "Merge a pull request into its base branch. This is the one real, "
+            "consequential step in the git workflow — it actually changes what's really "
+            "deployed. Calling this does not execute it immediately; it stages the "
+            "action and the owner must explicitly confirm before it happens."
         ),
         "parameters": {"type": "object", "properties": {
             "pr_number": {"type": "integer"},
@@ -103,18 +105,27 @@ GIT_TOOLS = [
 GIT_SYSTEM_NOTE = (
     " You also have real git/GitHub tools for development work. git_list_files and "
     "git_read_file show you the actual, current Jarvis codebase — use them before "
-    "writing anything. Never assume a tech stack, framework, file layout, or whether an "
-    "integration already exists; look first, every time, even if you think you already "
-    "know. Guessing wrong produces code that doesn't fit the real repo and is wasted "
-    "work. git_create_branch and git_commit_and_push let you stage real code changes on "
+    "writing anything, on every task, even one that sounds like plain infrastructure "
+    "work (a new table, a new import path) -- a real incident shipped from skipping this: "
+    "an employee reported a table, an import module and a whole preview route as not "
+    "existing anywhere in the repo, when all three were live and already running; it had "
+    "simply never read the branch that was actually deployed. Never assume a tech stack, "
+    "framework, file layout, or whether an integration already exists; look first, every "
+    "time, even if you think you already know. Guessing wrong, OR reporting something as "
+    "missing without having actually read the right branch, produces wasted work either "
+    "way. Left unspecified, branch_name/base_branch resolve to the branch that's actually "
+    "deployed right now -- which is not guaranteed to be called 'main'; if a finding "
+    "would mean rebuilding something that sounds like it should already exist (a core "
+    "table, a whole feature), say so and ask before treating it as confirmed absent. "
+    "git_create_branch and git_commit_and_push let you stage real code changes on "
     "a branch — always create a branch first, then write files to it, then git_open_pr "
-    "to put it up for CI and review. None of that touches main or anything deployed. "
+    "to put it up for CI and review. None of that touches anything deployed. "
     "git_get_pr_status shows CI results and, critically, branch_name -- if you're asked "
     "to fix an existing PR, that's the only way to find out what branch it's on; check "
     "it first, then read/write that same branch (never create a new one for a PR that "
     "already exists) so your fix lands on the PR that's already open instead of opening "
-    "a second, unrelated one. git_merge_pr is different: it actually changes "
-    "what's on main, so calling it does not execute immediately — it stages the action "
+    "a second, unrelated one. git_merge_pr is different: it actually changes what's "
+    "really deployed, so calling it does not execute immediately — it stages the action "
     "and you must clearly state which PR and describe what merging it will do, then ask "
     "the owner to explicitly confirm before it happens. Never claim a PR is merged "
     "unless you actually called git_merge_pr and it was confirmed. A PR is not 'done' "

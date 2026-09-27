@@ -40,3 +40,7 @@ jarvis.backup-*.db
 
 # baresip account file holds the SIP password -- keep it out of git
 voip_node/bare/accounts
+
+# One-off migration backups (e.g. Home Assistant pre-wipe tarballs) -- large binaries,
+# never source, never belong in the repo history.
+backups/

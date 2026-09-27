@@ -121,10 +121,19 @@ def make(db_path, home=True, fail=False, policy=None):
     return notify, ha_client, sent_telegram
 
 
-def test_auto_pushes_to_the_phone_only_when_away(db_path):
+def test_auto_no_longer_pushes_to_the_phone(db_path):
+    """'auto' used to mean "push to his phone when he is out". It now means "text him",
+    on his instruction: *"i dont like the homeassistant notifications, i cant open them
+    and they lack enough space for the entire message."*
+
+    This FakeConfig has no SMS numbers, so delivery falls back to Telegram — the point
+    being that the Home Assistant push is no longer reached either way. Text delivery
+    itself is covered in test_notifier_sms.py.
+    """
     notify, ha, telegram = make(db_path, home=False, policy="auto")
     notify("chat", "Reminder: call the vet")
-    assert ha.pushed == ["Reminder: call the vet"] and telegram == []
+    assert ha.pushed == [], "the banner he cannot open is not used any more"
+    assert telegram == ["Reminder: call the vet"], "and nothing is dropped"
 
 
 def test_auto_uses_telegram_when_home(db_path):
@@ -133,9 +142,9 @@ def test_auto_uses_telegram_when_home(db_path):
     assert ha.pushed == [] and telegram == ["Reminder"]
 
 
-def test_unknown_presence_does_not_guess(db_path):
-    """If we can't tell where he is, Telegram — not a push to a phone in his pocket at
-    3am on a guess."""
+def test_presence_no_longer_gates_delivery(db_path):
+    """Where he is stopped mattering when the channel became a text: one arrives whether
+    he is home or out, which is the whole reason 'auto' used to consult presence."""
     notify, ha, telegram = make(db_path, home=None, policy="auto")
     notify("chat", "Reminder")
     assert ha.pushed == [] and telegram == ["Reminder"]

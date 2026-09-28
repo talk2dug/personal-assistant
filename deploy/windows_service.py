@@ -20,8 +20,10 @@ own internal `import servicemanager`, done before it ever loads this module, can
 otherwise find pywin32 at all. See _fix_venv_hosting's own docstring for the full story):
     .venv\\Scripts\\python.exe deploy\\windows_service.py --variant core install
     .venv\\Scripts\\python.exe deploy\\windows_service.py --variant web install
+    .venv\\Scripts\\python.exe deploy\\windows_service.py --variant orpheus --startup auto install
     net start JarvisCore
     net start JarvisWeb
+    net start JarvisOrpheus
 
 Debug (runs in the foreground in this console -- unlike NSSM, pywin32 requires the
 service to already be installed for this to work; it does not skip SCM registration):
@@ -75,6 +77,21 @@ VARIANTS = {
     # registers or dials until credentials + the media bridge land (see voip_main.py).
     # Not installed by default; install deliberately once VoIP.ms creds are in config.
     "voip": {"module": "assistant.voip_main", "name": "JarvisVoip", "display": "Jarvis VoIP"},
+    # Orpheus, Jarvis's one voice on every surface (tts.Speaker, and the phone-line bridge
+    # on jarvisaudio1 over the LAN at :8130), with Piper as the fallback. It ran for a week
+    # as a hand-launched process and silently died with whatever session started it
+    # (2026-09-27 17:55), dropping every device to Piper -- hence a service.
+    # Not a module of the main venv: it needs the isolated .venv-tts (torch + snac).
+    # Runs as LocalSystem, so HF_HOME points it at the SNAC decoder already cached in
+    # swayze's profile, offline -- it must never try to download at boot.
+    "orpheus": {
+        "name": "JarvisOrpheus", "display": "Jarvis Voice (Orpheus TTS)",
+        "command": [str(Path(__file__).resolve().parent.parent / ".venv-tts" / "Scripts" / "python.exe"),
+                    "voip_node/orpheus_tts.py", "--port", "8130"],
+        # The repo lives in swayze's profile (...\Users\swayze\Documents\PersonalAssistant).
+        "env": {"HF_HOME": str(Path(__file__).resolve().parents[3] / ".cache" / "huggingface"),
+                "HF_HUB_OFFLINE": "1"},
+    },
 }
 
 # How long to wait after a crashed child before restarting it -- matches the Scheduled
@@ -90,7 +107,8 @@ def _make_service_class(variant_key: str):
     class _JarvisService(win32serviceutil.ServiceFramework):
         _svc_name_ = variant["name"]
         _svc_display_name_ = variant["display"]
-        _svc_description_ = f"Runs {variant['module']} as a supervised background process."
+        _svc_description_ = (f"Runs {variant.get('module') or ' '.join(variant['command'][1:])} "
+                             "as a supervised background process.")
 
         def __init__(self, args):
             win32serviceutil.ServiceFramework.__init__(self, args)
@@ -122,7 +140,9 @@ def _make_service_class(variant_key: str):
             # RestartInterval=1min -- a supervised child dying is not a reason to take
             # the whole service down, only a real SvcStop is.
             while not self._stopped():
-                self.process = subprocess.Popen([PYTHON, "-m", variant["module"]], cwd=str(REPO_ROOT))
+                command = variant.get("command") or [PYTHON, "-m", variant["module"]]
+                env = {**os.environ, **variant["env"]} if variant.get("env") else None
+                self.process = subprocess.Popen(command, cwd=str(REPO_ROOT), env=env)
                 while self.process.poll() is None:
                     if win32event.WaitForSingleObject(self.stop_event, 1000) == win32event.WAIT_OBJECT_0:
                         self.process.terminate()
@@ -207,5 +227,8 @@ if __name__ == "__main__":
     # parsing (install/remove/start/stop/debug) expects.
     sys.argv = [sys.argv[0]] + sys.argv[3:]
     win32serviceutil.HandleCommandLine(service_class)
-    if len(sys.argv) > 1 and sys.argv[1] == "install":
+    # "in", not argv[1]: options like `--startup auto` come before the command, and
+    # checking only the first argument silently skipped this on such an install, leaving
+    # a service that installs but can never start (JarvisOrpheus, 2026-09-27).
+    if "install" in sys.argv[1:]:
         _fix_venv_hosting(VARIANTS[variant_key]["name"])

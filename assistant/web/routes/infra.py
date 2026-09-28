@@ -9,7 +9,7 @@ at all -- same gate as Credit/Crypto/Personal.
 """
 from fastapi import APIRouter, Request
 
-from ...core import ssh_health
+from ...core import network_overview, ssh_health
 from ..auth import require_owner
 
 router = APIRouter(prefix="/api/infra", tags=["infra"])
@@ -20,3 +20,13 @@ async def ssh_hosts_status(request: Request):
     require_owner(request)
     cfg = request.app.state.cfg
     return {"hosts": ssh_health.check_all_hosts(cfg.ssh_hosts or {})}
+
+
+@router.get("/network")
+async def network(request: Request):
+    """The Network section: recorded host checks, Omada devices/clients and recent ops
+    plans, joined. Reads jarvis.db only -- never probes -- so it stays fast when a box is
+    down, which is exactly when someone opens it."""
+    user = require_owner(request)
+    cfg = request.app.state.cfg
+    return network_overview.build(cfg.db_path, cfg, user["id"])

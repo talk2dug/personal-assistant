@@ -1,0 +1,177 @@
+/* Network — host checks, Omada and ops plans, as a section modal.
+   ----------------------------------------------------------------------------
+   Same HUD language as RF and the Crypto desk. Cyan is nominal; amber is the one
+   colour that means "wants Jack" (a suspect check, a plan to approve, a new device);
+   red is reserved for something actually down. */
+
+.net-page { color: var(--text); font-size: 13px; }
+.net-page.net-loading { color: var(--text-faint); padding: 20px 4px; }
+.net-muted { color: var(--text-faint); font-size: 12.5px; margin: 0; }
+.net-faint { color: var(--text-faint); }
+.net-mono { font-family: var(--font-mono); font-size: 12px; }
+.net-caption { margin-top: 10px; }
+.net-eyebrow {
+  font-family: var(--font-hud); font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--text-faint);
+}
+
+.net-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.net-header h2 {
+  font-family: var(--font-display); font-size: 18px; color: var(--cyan-bright);
+  text-shadow: 0 0 12px var(--cyan-glow); margin: 0; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.net-feeds { display: flex; flex-wrap: wrap; gap: 8px; }
+.net-feed {
+  font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--cyan-bright); border: 1px solid var(--cyan-dim); padding: 5px 12px;
+  clip-path: polygon(0 7px, 7px 0, 100% 0, 100% 100%, 0 100%);
+}
+.net-feed-stale { color: var(--amber); border-color: var(--amber-dim); }
+
+.net-page section { margin-top: 26px; }
+.net-page h3 {
+  font-family: var(--font-hud); font-size: 13px; color: var(--text-dim);
+  font-weight: 700; text-transform: uppercase; letter-spacing: 0.14em;
+  margin: 0 0 12px; display: flex; align-items: center; gap: 10px;
+}
+.net-page h3::before {
+  content: ''; width: 6px; height: 6px; background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan-glow); flex-shrink: 0;
+}
+.net-page h3::after {
+  content: ''; flex: 1; height: 1px;
+  background: linear-gradient(90deg, var(--border-dim), transparent);
+}
+
+/* tones */
+.net-ok { --tone: var(--cyan-bright); --tone-dim: var(--cyan-dim); }
+.net-info { --tone: var(--text-dim); --tone-dim: var(--border); }
+.net-warn { --tone: var(--amber); --tone-dim: var(--amber-dim); }
+.net-bad { --tone: var(--red); --tone-dim: var(--red-dim); }
+
+.net-pill {
+  display: inline-block; font-family: var(--font-hud); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 8px; white-space: nowrap;
+  color: var(--tone); border: 1px solid var(--tone-dim);
+}
+.net-status {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--tone);
+}
+.net-status::before {
+  content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--tone); flex-shrink: 0;
+}
+
+/* summary tiles */
+.net-tiles {
+  margin-top: 18px; display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+.net-tile {
+  background: var(--bg-panel); border: 1px solid var(--border-dim);
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 4px;
+  clip-path: polygon(0 10px, 10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+}
+.net-big { font-family: var(--font-mono); font-size: 24px; color: var(--cyan-bright); font-variant-numeric: tabular-nums; }
+.net-big small { font-size: 14px; color: var(--text-faint); }
+.net-big-warn { color: var(--amber); }
+
+/* attention */
+.net-alerts { display: flex; flex-direction: column; gap: 8px; }
+.net-alert {
+  display: flex; flex-direction: column; gap: 5px; padding: 10px 14px;
+  background: var(--bg-inset); border-left: 2px solid var(--tone-dim);
+}
+.net-alert p { margin: 0; color: var(--text-dim); font-size: 12.5px; max-width: 90ch; }
+.net-alert-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.net-alert-title { color: var(--text); font-weight: 600; font-size: 13.5px; }
+.net-alert .net-finding { color: var(--text); }
+.net-alert .net-finding::before { content: '→ '; color: var(--tone); }
+
+/* two columns */
+.net-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 0 28px; align-items: start; }
+@media (max-width: 1000px) { .net-split { grid-template-columns: 1fr; } }
+
+/* omada devices */
+.net-devices { display: flex; flex-direction: column; gap: 8px; }
+.net-device {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center;
+  padding: 10px 12px; background: var(--bg-inset); border: 1px solid var(--border-dim);
+}
+.net-device-ap { margin-left: 20px; }
+.net-device-name { font-family: var(--font-display); font-size: 15px; color: var(--text); letter-spacing: 0.03em; }
+.net-device-side { text-align: right; }
+.net-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan-glow); animation: hud-pulse 2.4s ease-in-out infinite;
+}
+.net-dot-bad { background: var(--red); box-shadow: 0 0 8px var(--red-dim); animation: none; }
+
+/* tables */
+.net-table-wrap { overflow-x: auto; }
+.net-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.net-table th {
+  text-align: left; font-family: var(--font-hud); font-size: 10px; color: var(--text-faint);
+  text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;
+  padding: 6px 10px; border-bottom: 1px solid var(--border-dim); white-space: nowrap;
+  position: sticky; top: 0; background: var(--bg-panel-solid);
+}
+.net-table td { padding: 8px 10px; border-bottom: 1px solid var(--border-dim); vertical-align: top; }
+.net-table .net-num { text-align: right; }
+.net-host-name { font-weight: 600; }
+.net-kind {
+  font-family: var(--font-hud); font-size: 10px; color: var(--text-faint);
+  text-transform: uppercase; letter-spacing: 0.1em;
+}
+.net-slow { color: var(--amber); }
+.net-tag {
+  margin-left: 6px; font-family: var(--font-hud); font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em; padding: 1px 6px;
+  color: var(--amber); border: 1px solid var(--amber-dim);
+}
+.net-clients { max-height: 420px; overflow: auto; border: 1px solid var(--border-dim); }
+
+/* client filters */
+.net-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+.net-search {
+  background: var(--bg-inset); border: 1px solid var(--border); color: var(--text);
+  font-family: var(--font-mono); font-size: 12px; padding: 6px 10px; width: min(240px, 100%);
+}
+.net-search::placeholder { color: var(--text-faint); }
+.net-seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--border); }
+.net-seg button {
+  background: transparent; border: 0; color: var(--text-dim); cursor: pointer;
+  font-family: var(--font-hud); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 6px 11px;
+}
+.net-seg button + button { border-left: 1px solid var(--border-dim); }
+.net-seg button[aria-pressed='true'] { background: var(--cyan-faint); color: var(--cyan-bright); }
+.net-seg button:focus-visible, .net-search:focus-visible, .net-plan summary:focus-visible {
+  outline: 1px solid var(--cyan); outline-offset: 1px;
+}
+
+/* ops plans */
+.net-plans { display: flex; flex-direction: column; gap: 6px; }
+.net-plan { background: var(--bg-inset); border: 1px solid var(--border-dim); }
+.net-plan summary {
+  display: grid; grid-template-columns: auto auto 1fr auto; gap: 10px; align-items: baseline;
+  padding: 9px 12px; cursor: pointer; list-style: none;
+}
+.net-plan summary::-webkit-details-marker { display: none; }
+.net-plan-summary { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net-plan[open] .net-plan-summary { white-space: normal; color: var(--text); }
+.net-plan-when { white-space: nowrap; }
+.net-steps { margin: 0; padding: 4px 14px 12px 34px; display: flex; flex-direction: column; gap: 10px; }
+.net-steps li { color: var(--text-dim); font-size: 12.5px; }
+.net-step-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 2px; }
+.net-output {
+  margin: 6px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border-dim);
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-faint);
+  white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: auto;
+}
+@media (max-width: 640px) {
+  .net-plan summary { grid-template-columns: auto 1fr; }
+  .net-plan-summary { grid-column: 1 / -1; }
+  .net-plan-when { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .net-dot { animation: none; } }

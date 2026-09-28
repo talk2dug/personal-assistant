@@ -239,6 +239,9 @@ export const api = {
 
   activeWork: () => request('/api/active-work'),
   sshHostsStatus: () => request('/api/infra/ssh-hosts'),
+  // Network section: recorded host checks + Omada devices/clients + ops plans, joined.
+  // Reads jarvis.db only (see core/network_overview.py), so it never waits on a dead box.
+  infraNetwork: () => request('/api/infra/network'),
 
   // RF / Around the house -- the jarvishackrf sensor node's street picture. The dashboard
   // is a cheap cached read; refresh re-polls the Pi over SSH; labelDevice names a

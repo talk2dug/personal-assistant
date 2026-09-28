@@ -96,7 +96,7 @@ export default function CommandCenter() {
         <div className="cc-col cc-col-left">
           <Roster onOpen={() => openSection('agents')} />
           <GpuPanel onOpen={() => openSection('agents')} />
-          <DeviceMesh hosts={hosts} error={slowErrors.hosts} onOpen={() => openSection('agents')} />
+          <DeviceMesh hosts={hosts} error={slowErrors.hosts} onOpen={() => openSection('network')} />
           <Presence
             home={snapshot?.home}
             onOpen={() => openSection('kitchen')}

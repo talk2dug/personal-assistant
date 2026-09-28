@@ -22,6 +22,7 @@ import Grocery from './pages/Grocery'
 import Kitchen from './pages/Kitchen'
 import Media from './pages/Media'
 import Needs from './pages/Needs'
+import Network from './pages/Network'
 import Pipelines from './pages/Pipelines'
 import Review from './pages/Review'
 import RfAround from './pages/RfAround'
@@ -92,6 +93,12 @@ export const SECTIONS = [
       + 'real empty shelves waiting to be filled, not invented content' },
   { key: 'agents', label: 'Office', element: Agents, wide: true,
     context: 'the Office, showing the full staff roster and what each agent is doing' },
+  { key: 'network', label: 'Network', element: Network, wide: true,
+    context: 'the Network section: every host and service check Jarvis runs every 15 '
+      + 'minutes, joined against what the TP-Link Omada controller sees (the ER605 gateway, '
+      + 'the access points and every connected client), so a failing check can be read as '
+      + 'either a dead machine or a broken check; new devices that joined in the last 24 '
+      + 'hours; and the sys-admin agent\'s recent ops plans with each step\'s output' },
   { key: 'rf', label: 'RF / Around the House', element: RfAround, wide: true,
     context: 'the RF / Around the House section, showing the sensor node\'s picture of the '
       + 'street: every transmitter classified (his own sensors, neighbours\' fixtures, '

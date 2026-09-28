@@ -20,7 +20,7 @@ import Email from './pages/Email'
 import Finance from './pages/Finance'
 import Grocery from './pages/Grocery'
 import Kitchen from './pages/Kitchen'
-import Media from './pages/Media'
+import Inventory from './pages/Inventory'
 import Needs from './pages/Needs'
 import Network from './pages/Network'
 import Pipelines from './pages/Pipelines'
@@ -84,8 +84,15 @@ export const SECTIONS = [
     context: 'the Pipelines board, showing each product concept from the trend that '
       + 'started it through art, listing and social posts, with the approvals waiting '
       + 'at each stage' },
-  { key: 'media', label: 'Media', element: Media, wide: true,
-    context: 'the Media section, showing the catalogue by kind and volume' },
+  // The old media import queue (pages/Media) is now the second tab inside this section.
+  { key: 'media', label: 'Media & drives', element: Inventory, wide: true,
+    context: 'Media & drives: an inventory of every folder on every drive on every machine '
+      + 'in the house, with each folder\'s total size, a breakdown of what kinds of files it '
+      + 'holds, and the category it belongs in (side hustle, photos, home video, music, '
+      + 'projects, documents, software, system & junk, unsorted). A solid category chip is '
+      + 'one he tagged, a dashed one is a suggestion; a tag applies to everything beneath '
+      + 'it. There is also a table of how much of each category sits on each drive, for '
+      + 'working out what to consolidate where. The old media import queue is a second tab' },
   { key: 'library', label: 'Design Library', element: DesignLibrary, wide: true,
     context: 'the Design Library, browsing the print business\'s creative asset shelf by '
       + 'category -- Designs and Local imports hold real data today; Decal icons, Cut '

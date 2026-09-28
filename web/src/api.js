@@ -311,6 +311,12 @@ export const api = {
   decideReview: (id, decision) =>
     request(`/api/review/items/${id}/decide`, { method: 'POST', body: JSON.stringify(decision) }),
 
+  // Drive inventory: every folder on every drive, with category tags. See routes/inventory.py.
+  inventoryOverview: () => request('/api/inventory/overview'),
+  inventoryFolder: (id) => request(`/api/inventory/folders/${id}`),
+  inventorySearch: (q) => request(`/api/inventory/search?q=${encodeURIComponent(q)}`),
+  inventoryTag: (id, category) =>
+    request(`/api/inventory/folders/${id}/tag`, { method: 'POST', body: JSON.stringify({ category }) }),
   mediaSummary: () => request('/api/media/summary'),
   mediaHosts: () => request('/api/media/hosts'),
   mediaFolders: ({ minFiles = 1, kind = '', decision = '', limit = 500, offset = 0 } = {}) =>

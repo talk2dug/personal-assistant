@@ -44,3 +44,10 @@ voip_node/bare/accounts
 # One-off migration backups (e.g. Home Assistant pre-wipe tarballs) -- large binaries,
 # never source, never belong in the repo history.
 backups/
+
+# Drive inventory (every filename on every drive) -- never commit
+inventory.db
+inventory.db-wal
+inventory.db-shm
+# Hand-made config.json backups hold every credential -- never commit
+config.json.bak*

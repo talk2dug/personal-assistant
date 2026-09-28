@@ -59,6 +59,7 @@ from .routes.notifications import router as notifications_router
 from .routes.finance import router as finance_router
 from .routes.grocery import router as grocery_router
 from .routes.infra import router as infra_router
+from .routes.inventory import router as inventory_router
 from .routes.kitchen import router as kitchen_router
 from .routes.library import router as library_router
 from .routes.media import router as media_router
@@ -131,6 +132,7 @@ def create_app(
     app.include_router(personal_tasks_router)
     app.include_router(grocery_router)
     app.include_router(infra_router)
+    app.include_router(inventory_router)
     app.include_router(email_router)
     app.include_router(email_drafts_router)
     app.include_router(kitchen_router)

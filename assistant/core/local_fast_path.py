@@ -154,6 +154,12 @@ def try_home_assistant_fast_path(
     text = user_text.lower()
     if not any(kw in text for kw in HOME_ASSISTANT_KEYWORDS):
         return None
+    # "Take the current bedroom lights and call it Bed TV Time" names lights but asks to
+    # SAVE them, and a one-shot local model reads it as "turn on the bedroom lights".
+    # Scene and automation requests always go to the main path, which has those tools.
+    from .ha_config_tools import CONFIG_INTENT_RE
+    if CONFIG_INTENT_RE.search(user_text):
+        return None
 
     try:
         entities = home_assistant.mcp_client.list_entities(None).get("entities", [])

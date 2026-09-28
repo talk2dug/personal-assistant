@@ -28,6 +28,7 @@ from .kitchen_tools import (
     KITCHEN_ALWAYS_TOOLS, KITCHEN_SYSTEM_NOTE, KITCHEN_TOOLS, _select_kitchen_gated_tools,
 )
 from .git_tools import GIT_SYSTEM_NOTE
+from .ha_config_tools import HA_CONFIG_KEYWORDS, HA_CONFIG_SENSITIVE, HA_CONFIG_TOOL_NAMES, HA_CONFIG_TOOLS
 from .omada_tools import OMADA_SYSTEM_NOTE
 
 logger = logging.getLogger(__name__)
@@ -174,7 +175,7 @@ class HomeAssistantContext:
 
     @property
     def tool_names(self) -> set[str]:
-        return {t["function"]["name"] for t in HOME_ASSISTANT_TOOLS}
+        return {t["function"]["name"] for t in HOME_ASSISTANT_TOOLS} | HA_CONFIG_TOOL_NAMES
 
 
 @dataclass
@@ -1044,14 +1045,16 @@ NOTIFICATION_TOOLS = [t for t in HOME_ASSISTANT_TOOLS if t["function"]["name"] =
 HOME_ASSISTANT_KEYWORDS = [
     "light", "lights", "lamp", "switch", "thermostat", "temperature", "climate", "lock", "unlock",
     "garage", "gate", "alarm", "turn on", "turn off", "home assistant", "smart home", "fan", "sensor",
-]
+] + HA_CONFIG_KEYWORDS
 
 
 def _select_home_assistant_tools(home_assistant: "HomeAssistantContext", user_text: str) -> list[dict]:
     text = user_text.lower()
     if not any(kw in text for kw in HOME_ASSISTANT_KEYWORDS):
         return []
-    return HOME_ASSISTANT_TOOLS
+    # Scene/automation tools ride along with the control tools. local_fast_path.py uses
+    # HOME_ASSISTANT_TOOLS directly and never sees these.
+    return HOME_ASSISTANT_TOOLS + HA_CONFIG_TOOLS
 
 
 # Where Jarvis's self-initiated notifications go. Stored in the settings table so a
@@ -1513,7 +1516,7 @@ def select_tools(
             + (phone.phone_tools if phone is not None else [])
             + (MAIL_TOOLS if mail is not None else [])
             + (OBSIDIAN_TOOLS if obsidian is not None else [])
-            + (HOME_ASSISTANT_TOOLS + LOCATION_TOOLS if home_assistant is not None else [])
+            + (HOME_ASSISTANT_TOOLS + HA_CONFIG_TOOLS + LOCATION_TOOLS if home_assistant is not None else [])
             + (BUSINESS_TOOLS + STORE_POLICY_TOOLS if business is not None else [])
             + (PERSONAL_TOOLS if personal is not None else [])
             + (KITCHEN_TOOLS if personal is not None else [])
@@ -2103,6 +2106,8 @@ def _dispatch_tool_call(
         })
 
     if home_assistant is not None and name in home_assistant.tool_names:
+        if name in HA_CONFIG_SENSITIVE:
+            return _stage_ha_config_change(db_path, requesting_user_id, home_assistant, name, arguments)
         # Sensitivity here depends on the *domain* argument, not the tool name — call_service
         # is one tool that can touch anything from a light to a door lock.
         if name == "call_service" and arguments.get("domain") in home_assistant.sensitive_domains:
@@ -2121,6 +2126,43 @@ def _dispatch_tool_call(
             return json.dumps({"error": str(e)})
 
     return json.dumps({"error": f"unknown tool {name}"})
+
+
+def _stage_ha_config_change(db_path: str, requesting_user_id: int, home_assistant: "HomeAssistantContext",
+                            name: str, arguments: dict) -> str:
+    """Creating an automation, or deleting a scene/automation, waits for his yes.
+
+    An automation is validated BEFORE it is staged: a card he approves that then fails on
+    a misspelled entity id wastes his yes, and failing at sunset with nobody watching is
+    the worst time to find out. Errors go back to the model to fix and re-propose."""
+    from . import ha_config
+    if name == "create_automation":
+        try:
+            check = ha_config.validate_automation(
+                home_assistant.mcp_client, arguments, home_assistant.sensitive_domains)
+        except Exception as e:
+            return json.dumps({"error": f"couldn't check the automation against Home Assistant: {e}"})
+        if not check["ok"]:
+            return json.dumps({
+                "error": "automation not staged -- fix these and call again",
+                "problems": check["errors"],
+            })
+        warning = ""
+        if check["sensitive"]:
+            warning = (f" It uses {', '.join(check['sensitive'])}, which normally needs his "
+                       "confirmation every time; running it from an automation removes that. "
+                       "Say so plainly.")
+        what = ("This writes an automation into Home Assistant that will run on its own. "
+                "Explain it in plain words: when it fires, only if what, and exactly what it "
+                "does." + warning)
+    else:
+        what = f"This permanently deletes {arguments.get('entity_id')} from Home Assistant."
+    create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
+    return json.dumps({
+        "status": "awaiting_confirmation",
+        "message": (f"Calling {name} does not execute it yet. {what} Then ask him to confirm "
+                    "yes or no before anything happens."),
+    })
 
 
 def _classify_confirmation(llm, user_text: str) -> str:

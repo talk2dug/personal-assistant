@@ -388,6 +388,10 @@ class HomeAssistantClient:
             )
         if name == "get_presence":
             return self.presence()
+        from . import ha_config
+        from .ha_config_tools import HA_CONFIG_TOOL_NAMES
+        if name in HA_CONFIG_TOOL_NAMES:
+            return ha_config.call_tool(self, name, arguments)
         return {"error": f"unknown home assistant tool {name}"}
 
 

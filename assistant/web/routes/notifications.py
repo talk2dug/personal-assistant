@@ -96,7 +96,7 @@ async def _handle(request: Request, body: dict) -> dict:
         # can't become a second, weaker path around the gate.
         call = functools.partial(
             _resolve_pending_action, cfg.db_path, request.app.state.llm,
-            request.app.state.era, request.app.state.phone, request.app.state.mail,
+            request.app.state.era, request.app.state.mail,
             request.app.state.home_assistant, pending, answer,
             kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
             letterstream=request.app.state.letterstream,
@@ -125,7 +125,7 @@ async def _handle(request: Request, body: dict) -> dict:
         call = functools.partial(
             handle_message, cfg.db_path, request.app.state.llm, owner, text,
             tz_name=cfg.timezone, era=request.app.state.era, calendar=request.app.state.calendar,
-            phone=request.app.state.phone, mail=request.app.state.mail,
+            mail=request.app.state.mail,
             obsidian=request.app.state.obsidian, home_assistant=request.app.state.home_assistant,
             business=request.app.state.business,
             airbnb=request.app.state.airbnb, ticketmaster=request.app.state.ticketmaster,

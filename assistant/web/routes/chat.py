@@ -46,7 +46,6 @@ async def send_message(request: Request):
     cfg = request.app.state.cfg
     is_owner = user["role"] == "owner"
     era = request.app.state.era if is_owner else None
-    phone = request.app.state.phone if is_owner else None
     mail = request.app.state.mail if is_owner else None
     obsidian = request.app.state.obsidian if is_owner else None
     home_assistant = request.app.state.home_assistant if is_owner else None
@@ -71,7 +70,7 @@ async def send_message(request: Request):
     loop = asyncio.get_running_loop()
     call = functools.partial(
         handle_message, cfg.db_path, request.app.state.llm, user["id"], text,
-        tz_name=cfg.timezone, era=era, calendar=request.app.state.calendar, phone=phone, mail=mail,
+        tz_name=cfg.timezone, era=era, calendar=request.app.state.calendar, mail=mail,
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         image_bytes=image_bytes, viewing_context=viewing_context,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,

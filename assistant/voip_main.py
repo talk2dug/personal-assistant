@@ -262,7 +262,7 @@ def build_runtime(cfg: Config):
         build_git_ops_context, build_gpu_bridge, build_home_assistant_context,
         build_kroger_context, build_letterstream_context, build_llm,
         build_local_llm_context, build_mail_context, build_obsidian_context, build_omada_context,
-        build_personal_context, build_phone_context, build_recipe_context,
+        build_personal_context, build_recipe_context,
         build_ticketmaster_context,
     )
 
@@ -278,7 +278,6 @@ def build_runtime(cfg: Config):
     contexts = {
         "era": build_era_context(cfg),
         "calendar": build_calendar_context(cfg),
-        "phone": build_phone_context(cfg),
         "mail": build_mail_context(cfg),
         "obsidian": build_obsidian_context(cfg),
         "home_assistant": build_home_assistant_context(cfg),

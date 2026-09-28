@@ -78,8 +78,7 @@ def _check_http(name: str, url: str | None, timeout: float = HTTP_TIMEOUT) -> di
     return {"name": name, "kind": "http", "reachable": reachable, "latency_ms": latency_ms}
 
 
-def check_all(ssh_hosts: dict, bridge=None, phone_mcp_url: str | None = None,
-             orpheus_url: str | None = None) -> list[dict]:
+def check_all(ssh_hosts: dict, bridge=None, orpheus_url: str | None = None) -> list[dict]:
     """Every device Jarvis is meant to know about, checked right now.
 
     Merges ssh_health's 11 registered SSH hosts with the handful of non-SSH services
@@ -100,8 +99,6 @@ def check_all(ssh_hosts: dict, bridge=None, phone_mcp_url: str | None = None,
                 "reachable": bridge.comfy.reachable(), "latency_ms": None,
             })
 
-    if phone_mcp_url:
-        results.append(_check_http("phone_mcp", phone_mcp_url))
     if orpheus_url:
         results.append(_check_http("orpheus", orpheus_url))
 

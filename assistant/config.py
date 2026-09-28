@@ -60,8 +60,6 @@ class Config:
     era_cache_interval_seconds: int = 3600
     web_session_secret: str | None = None
     web_port: int = 8080
-    phone_mcp_url: str | None = None
-    phone_sensitive_tools: list[str] = None
     # Whisper size for voice input. base.en by default, measured rather than assumed:
     # on this CPU, over 8 realistic Jarvis commands, base.en ran 3x faster than small.en
     # (7.5x vs 2.5x realtime) for a 9.3% vs 8.6% word error rate -- inside the noise.
@@ -451,12 +449,10 @@ def load_config(path: str = "config.json") -> Config:
         era_cache_interval_seconds=data.get("era_cache_interval_seconds", 3600),
         web_session_secret=data.get("web_session_secret"),
         web_port=data.get("web_port", 8080),
-        phone_mcp_url=data.get("phone_mcp_url"),
         # Default matches the confirmation-gating policy chosen for the phone MCP integration:
         # actions with real-world consequences (sending a text, placing a call, running a shell
         # command) require explicit confirmation; everything else (camera, mic, location, contacts,
         # SMS read, call log, device controls) executes immediately.
-        phone_sensitive_tools=data.get("phone_sensitive_tools", ["send_sms", "make_call", "shell"]),
         stt_model_size=data.get("stt_model_size", "base.en"),
         sms_allowed_numbers=data.get("sms_allowed_numbers") or [],
         sms_guest_numbers=data.get("sms_guest_numbers") or [],

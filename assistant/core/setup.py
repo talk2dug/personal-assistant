@@ -15,7 +15,7 @@ from .claude_cli import ClaudeCLIClient
 from .engine import (
     AirbnbContext, BusinessContext, CalendarContext, CCXTContext, EraContext, GitOpsContext,
     HomeAssistantContext, KrogerContext, LetterStreamContext, MailContext, ObsidianContext,
-    OmadaContext, PersonalContext, PhoneContext, RecipeContext, TicketmasterContext,
+    OmadaContext, PersonalContext, RecipeContext, TicketmasterContext,
 )
 from .git_ops import GitOpsClient
 from .git_tools import GIT_TOOLS
@@ -361,7 +361,7 @@ def build_cellular_context(cfg):
 def build_recipe_context(cfg) -> RecipeContext | None:
     """A third-party cloud MCP server, same class of dependency as Era/CalDAV -- but
     unlike those, a failure here must only disable recipe tools, never take down the
-    whole assistant (same reasoning as build_phone_context's docstring). A real startup
+    whole assistant (same reasoning as build_home_assistant_context's docstring). A real startup
     once looked hung for ~90s because phone and Kroger's own (unrelated) MCP checks each
     took their full retry/timeout to fail before this one's turn came; this one succeeded
     in under 2s once it ran -- but nothing before this fix stopped a genuinely-down
@@ -386,37 +386,11 @@ def build_recipe_context(cfg) -> RecipeContext | None:
     return RecipeContext(mcp_client=mcp_client, recipe_tools=recipe_tools)
 
 
-def build_phone_context(cfg) -> PhoneContext | None:
-    """Unlike Era/CalDAV (stable cloud APIs), the phone MCP server runs on an Android
-    phone that can be asleep, backgrounded, off wifi, or mid-reboot at any given moment —
-    far more likely to be unreachable at startup. That must only disable the phone
-    feature, never take down the whole assistant (Telegram/reminders/web), so failures
-    here are caught and logged rather than propagated."""
-    if not cfg.phone_mcp_url:
-        return None
-    try:
-        mcp_client = MCPClient(cfg.phone_mcp_url)
-        discovered = mcp_client.list_tools()
-    except Exception as e:
-        logger.warning("Phone MCP server unreachable at startup (%s) — phone tools disabled this session",
-                       _root_cause(e))
-        return None
-    phone_tools = [
-        {
-            "type": "function",
-            "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]},
-        }
-        for t in discovered
-    ]
-    logger.info("Phone: discovered %d tools, %d gated as sensitive", len(phone_tools), len(cfg.phone_sensitive_tools))
-    return PhoneContext(mcp_client=mcp_client, phone_tools=phone_tools, sensitive_tools=set(cfg.phone_sensitive_tools))
-
-
 def build_mail_context(cfg) -> MailContext | None:
     """iCloud Mail shares the CalDAV Apple ID/app-specific password (Phase 3) — same
     account, different protocol. A bad password or Apple-side account change should
     only disable mail, never take down the rest of the assistant, so the startup
-    connectivity check is guarded the same way build_phone_context's is."""
+    connectivity check is guarded the same way build_home_assistant_context's is."""
     if not cfg.apple_id or not cfg.apple_app_password:
         return None
     client = MailClient(cfg.apple_id, cfg.apple_app_password, junk_threshold=cfg.mail_junk_score_threshold)
@@ -456,8 +430,8 @@ def build_obsidian_context(cfg) -> ObsidianContext | None:
 
 def build_home_assistant_context(cfg) -> HomeAssistantContext | None:
     """Home Assistant is a real device on the LAN that could be off/rebooting/
-    unreachable at any moment — same reasoning as build_phone_context, only disable
-    the smart-home tools on failure, never take down the rest of the assistant."""
+    unreachable at any moment, so a failure here only disables the smart-home tools and
+    never takes down the rest of the assistant (Telegram/reminders/web)."""
     if not cfg.ha_base_url or not cfg.ha_token:
         return None
     try:

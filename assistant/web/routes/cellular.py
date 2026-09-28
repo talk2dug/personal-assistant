@@ -88,7 +88,7 @@ async def inbound(request: Request):
 
     contexts = {
         "era": request.app.state.era, "calendar": request.app.state.calendar,
-        "phone": request.app.state.phone, "mail": request.app.state.mail,
+        "mail": request.app.state.mail,
         "obsidian": request.app.state.obsidian,
         "home_assistant": request.app.state.home_assistant,
         "business": request.app.state.business, "personal": request.app.state.personal,

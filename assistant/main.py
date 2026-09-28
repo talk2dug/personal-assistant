@@ -11,7 +11,7 @@ from .core.setup import (
     build_era_context, build_git_ops_context, build_gpu_bridge, build_notifier,
     build_cellular_context, build_home_assistant_context, build_kroger_context, build_letterstream_context, build_llm,
     build_local_llm_context, build_mail_context, build_obsidian_context, build_omada_context, build_personal_context,
-    build_phone_context, build_recipe_context, build_ticketmaster_context,
+    build_recipe_context, build_ticketmaster_context,
 )
 from .transports import telegram_bot
 
@@ -69,7 +69,6 @@ def main() -> None:
     llm = build_llm(cfg, owner_user_id=owner_row["id"] if owner_row else None)
     era = build_era_context(cfg)
     calendar = build_calendar_context(cfg)
-    phone = build_phone_context(cfg)
     mail = build_mail_context(cfg)
     obsidian = build_obsidian_context(cfg)
     home_assistant = build_home_assistant_context(cfg)
@@ -108,7 +107,7 @@ def main() -> None:
     asyncio.set_event_loop(loop)
 
     application = telegram_bot.build_application(
-        cfg.telegram_bot_token, cfg.db_path, llm, cfg.timezone, era=era, calendar=calendar, phone=phone, mail=mail,
+        cfg.telegram_bot_token, cfg.db_path, llm, cfg.timezone, era=era, calendar=calendar, mail=mail,
         obsidian=obsidian, home_assistant=home_assistant, business=business, personal=personal,
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
         git_ops=git_ops, omada=omada, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,
@@ -179,7 +178,7 @@ def main() -> None:
         generated_media_path=cfg.generated_media_path,
         # Location watching needs HA for GPS and the other contexts so a routine's
         # prompt has the same tools a chat turn would.
-        home_assistant=home_assistant, phone=phone, mail=mail, obsidian=obsidian,
+        home_assistant=home_assistant, mail=mail, obsidian=obsidian,
         location_poll_seconds=cfg.location_poll_seconds,
         location_force_seconds=cfg.location_force_seconds,
         business_intervals={
@@ -236,7 +235,7 @@ def main() -> None:
         # Sys-admin monitoring (business_projects id 8): the mechanical health-check tick
         # needs the same host registry ops plans already use, plus Phone MCP's URL (the
         # one non-SSH service with no other reachability check anywhere in this process).
-        ssh_hosts=cfg.ssh_hosts, phone_mcp_url=cfg.phone_mcp_url,
+        ssh_hosts=cfg.ssh_hosts,
     )
 
     logger.info("Jarvis core starting, polling Telegram...")

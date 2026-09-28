@@ -81,7 +81,7 @@ async def chat_completions(request: Request):
         call = functools.partial(
             handle_message, cfg.db_path, request.app.state.llm, user_id, text,
             tz_name=cfg.timezone, era=request.app.state.era, calendar=request.app.state.calendar,
-            phone=request.app.state.phone, mail=request.app.state.mail, obsidian=request.app.state.obsidian,
+            mail=request.app.state.mail, obsidian=request.app.state.obsidian,
             home_assistant=request.app.state.home_assistant,
             # Owner-only, like every other surface — and this endpoint is owner-only by
             # construction: the bearer token is his and _owner_user_id resolves to him.

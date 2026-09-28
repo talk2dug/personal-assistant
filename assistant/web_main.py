@@ -10,7 +10,7 @@ from .core.setup import (
     build_airbnb_context, build_business_context, build_calendar_context, build_ccxt_context,
     build_era_context, build_git_ops_context, build_gpu_bridge, build_cellular_context, build_home_assistant_context,
     build_kroger_context, build_letterstream_context, build_llm, build_local_llm_context,
-    build_mail_context, build_obsidian_context, build_omada_context, build_personal_context, build_phone_context,
+    build_mail_context, build_obsidian_context, build_omada_context, build_personal_context,
     build_recipe_context, build_ticketmaster_context,
 )
 from .core.stt import Transcriber
@@ -67,7 +67,6 @@ def main() -> None:
     llm = build_llm(cfg, owner_user_id=owner_row["id"] if owner_row else None)
     era = build_era_context(cfg)
     calendar = build_calendar_context(cfg)
-    phone = build_phone_context(cfg)
     mail = build_mail_context(cfg)
     obsidian = build_obsidian_context(cfg)
     home_assistant = build_home_assistant_context(cfg)
@@ -99,7 +98,7 @@ def main() -> None:
                       orpheus_timeout=cfg.orpheus_timeout_seconds)
 
     app = create_app(
-        cfg, llm, era, calendar, phone, stt, mail=mail, obsidian=obsidian, home_assistant=home_assistant,
+        cfg, llm, era, calendar, stt=stt, mail=mail, obsidian=obsidian, home_assistant=home_assistant,
         business=business, personal=personal, bridge=bridge, speaker=speaker, static_dir="web/dist",
         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt, letterstream=letterstream,
         git_ops=git_ops, omada=omada, recipe=recipe, cellular_ctx=cellular_ctx, local_llm=local_llm,

@@ -138,7 +138,7 @@ async def decide(item_id: int, request: Request):
             if decision == "approved":
                 try:
                     result = execute_pending_action(
-                        pending, era=request.app.state.era, phone=request.app.state.phone,
+                        pending, era=request.app.state.era,
                         mail=request.app.state.mail, home_assistant=request.app.state.home_assistant,
                         kroger=request.app.state.kroger, ccxt=request.app.state.ccxt,
                         letterstream=request.app.state.letterstream, git_ops=request.app.state.git_ops,

@@ -14,7 +14,7 @@ from assistant.web.app import create_app
 
 SENTINEL_ERA = object()
 SENTINEL_PERSONAL = object()
-SENTINEL_PHONE = object()
+SENTINEL_OMADA = object()
 
 
 @dataclass
@@ -62,7 +62,7 @@ def cfg(db_path):
 @pytest.fixture
 def client(cfg):
     app = create_app(
-        cfg, FakeLLM(), era=SENTINEL_ERA, calendar=None, phone=SENTINEL_PHONE, stt=FakeSTT(),
+        cfg, FakeLLM(), era=SENTINEL_ERA, calendar=None, omada=SENTINEL_OMADA, stt=FakeSTT(),
         personal=SENTINEL_PERSONAL, static_dir=None,
     )
     return TestClient(app)
@@ -95,7 +95,7 @@ def test_unconfirmed_terminal_strips_sensitive_context_and_runs_as_guest(client,
     assert captured["era"] is None
     assert captured["personal"] is None
     # Never gated -- not personal/financial.
-    assert captured["phone"] is SENTINEL_PHONE
+    assert captured["omada"] is SENTINEL_OMADA
 
     owner = db.get_user_by_chat_id(cfg.db_path, "111")
     assert captured["user_id"] != owner["id"]
@@ -114,7 +114,7 @@ def test_flag_off_is_a_genuine_no_op_even_with_zero_camera_setup(db_path, monkey
         users=[UserConfig(telegram_chat_id="111", display_name="Dug", role="owner", web_password="ownerpass")],
     ), presence_identity_enabled=False)
     app = create_app(
-        off_cfg, FakeLLM(), era=SENTINEL_ERA, calendar=None, phone=SENTINEL_PHONE, stt=FakeSTT(),
+        off_cfg, FakeLLM(), era=SENTINEL_ERA, calendar=None, omada=SENTINEL_OMADA, stt=FakeSTT(),
         personal=SENTINEL_PERSONAL, static_dir=None,
     )
     client = TestClient(app)

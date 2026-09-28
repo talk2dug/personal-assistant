@@ -139,7 +139,7 @@ def test_passes_the_same_contexts_as_every_other_surface(db_path, user_id, monke
 
     seen = {}
 
-    def fake_dispatch(db_path, tz_name, requesting_user_id, name, arguments, era, calendar, phone=None, **kwargs):
+    def fake_dispatch(db_path, tz_name, requesting_user_id, name, arguments, era, calendar, **kwargs):
         seen.update(kwargs)
         return "{}"
 

@@ -54,7 +54,7 @@ def start(
     calendar=None, caldav_sync_interval_seconds: int = 300,
     era=None, era_cache_interval_seconds: int = 1200,
     business=None, llm=None, business_intervals=None, tz_name: str = "America/New_York",
-    business_agents_enabled: bool = False, home_assistant=None, phone=None, mail=None, obsidian=None,
+    business_agents_enabled: bool = False, home_assistant=None, mail=None, obsidian=None,
     location_poll_seconds: int = 120, location_force_seconds: int = 600,
     market_api_key: str | None = None, market_poll_seconds: int = 60,
     market_track_limit: int = 250, market_supplemental_poll_seconds: int = 300,
@@ -81,7 +81,7 @@ def start(
     speaker=None, voice_keepalive_interval_seconds: int = 420,
     mail_photo_scan_interval_seconds: int = 180, mail_photo_scan_limit: int = 20,
     mail_photo_from_address: str | None = None, generated_media_path: str = "generated",
-    ssh_hosts: dict | None = None, phone_mcp_url: str | None = None,
+    ssh_hosts: dict | None = None,
     host_health_interval_seconds: int = 900,
     omada=None, omada_health_interval_seconds: int = 900,
 ) -> BackgroundScheduler:
@@ -430,7 +430,7 @@ def start(
         def _review_watchdog_tick():
             results = run_review_watchdog(
                 db_path, llm, notify, hours=review_watchdog_stale_hours, tz_name=tz_name,
-                era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
+                era=era, calendar=calendar, mail=mail, obsidian=obsidian,
                 home_assistant=home_assistant, business=business, personal=personal,
                 airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
                 letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
@@ -453,7 +453,7 @@ def start(
         def _github_watchdog_tick():
             results = run_github_watchdog(
                 db_path, git_ops.mcp_client, llm, notify, tz_name=tz_name,
-                era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
+                era=era, calendar=calendar, mail=mail, obsidian=obsidian,
                 home_assistant=home_assistant, business=business, personal=personal,
                 airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
                 letterstream=letterstream, git_ops=git_ops, recipe=recipe, local_llm=local_llm,
@@ -544,7 +544,7 @@ def start(
                 try:
                     reply = handle_message(
                         db_path, llm, owner["id"], routine["prompt"], tz_name=tz_name,
-                        era=era, calendar=calendar, phone=phone, mail=mail, obsidian=obsidian,
+                        era=era, calendar=calendar, mail=mail, obsidian=obsidian,
                         home_assistant=home_assistant, business=business, personal=personal,
                         airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
                         letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
@@ -976,7 +976,7 @@ def start(
             _guarded_simple("host_health", lambda: run_host_health_tick(
                 db_path, ssh_hosts, notify,
                 _health_owner["telegram_chat_id"] if _health_owner is not None else None,
-                bridge=bridge, phone_mcp_url=phone_mcp_url, orpheus_url=_orpheus_url,
+                bridge=bridge, orpheus_url=_orpheus_url,
                 ssh_ops=_health_ssh_ops)),
             "interval", seconds=host_health_interval_seconds, id="host_health",
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
@@ -1191,7 +1191,7 @@ def record_junk_scan_results(db_path: str, folder: str, results: list[dict]) -> 
 
 
 def run_host_health_tick(db_path: str, ssh_hosts: dict, notify, owner_chat_id,
-                          bridge=None, phone_mcp_url: str | None = None,
+                          bridge=None,
                           orpheus_url: str | None = None, ssh_ops=None) -> list[dict]:
     """One pass of Layer 1 of the sys-admin monitoring build (business_projects id 8):
     probe every registered device, record what changed, attempt a whitelisted fix on a
@@ -1208,7 +1208,7 @@ def run_host_health_tick(db_path: str, ssh_hosts: dict, notify, owner_chat_id,
     from . import host_fixes, host_health
 
     results = host_health.check_all(
-        ssh_hosts, bridge=bridge, phone_mcp_url=phone_mcp_url, orpheus_url=orpheus_url)
+        ssh_hosts, bridge=bridge, orpheus_url=orpheus_url)
     changed = host_health.record_check(db_path, results)
     outcomes = []
 

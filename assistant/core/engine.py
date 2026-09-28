@@ -51,22 +51,6 @@ class EraContext:
 
 
 @dataclass
-class PhoneContext:
-    """Bundles what handle_message needs to expose the Android phone's MCP tools
-    (camera, mic, SMS, contacts, location, call log, device controls) to the owner.
-    Same shape as EraContext — sensitive_tools (send_sms, make_call, shell by default)
-    go through the same pending-confirmation gate."""
-
-    mcp_client: object
-    phone_tools: list[dict]
-    sensitive_tools: set[str]
-
-    @property
-    def tool_names(self) -> set[str]:
-        return {t["function"]["name"] for t in self.phone_tools}
-
-
-@dataclass
 class MailContext:
     """Bundles what handle_message needs for iCloud Mail (read + gated send). Unlike
     Era/phone, mail tools aren't MCP-discovered — they're the small fixed set in
@@ -406,46 +390,6 @@ def _select_era_tools(era: EraContext, user_text: str) -> list[dict]:
     return [t for t in era.era_tools if t["function"]["name"] in selected_names]
 
 
-# Same routing rationale as Era's: don't dump every phone tool into every request.
-# Phone tools don't share Era's "category__name" naming convention, so categories are
-# a direct name -> category map instead of a prefix split.
-PHONE_CATEGORY_KEYWORDS = {
-    "camera": ["photo", "picture", "camera", "selfie", "snap a"],
-    "audio": ["record", "recording", "microphone", " mic ", "audio clip", "listen"],
-    "sms": ["text message", "sms", "send a text", "read my texts", "my messages", "my texts"],
-    "calls": ["call ", "phone call", "dial", "call log", "call history", "who called"],
-    "contacts": ["contact", "phone number for", "who is"],
-    "location": ["where am i", "my location", "gps", "find my phone", "where's my phone"],
-    "device": [
-        "battery", "wifi", "wi-fi", "device info", "volume", "flashlight", "torch",
-        "vibrate", "clipboard", "notification",
-    ],
-    "shell": ["run a command", "shell command", "adb", "execute on my phone"],
-}
-
-PHONE_TOOL_CATEGORY = {
-    "send_sms": "sms",
-    "read_sms": "sms",
-    "get_contacts": "contacts",
-    "get_location": "location",
-    "get_battery": "device",
-    "get_wifi_info": "device",
-    "device_info": "device",
-    "get_volume": "device",
-    "set_volume": "device",
-    "flashlight": "device",
-    "vibrate": "device",
-    "send_notification": "device",
-    "get_clipboard": "device",
-    "set_clipboard": "device",
-    "take_photo": "camera",
-    "get_call_log": "calls",
-    "make_call": "calls",
-    "record_audio": "audio",
-    "shell": "shell",
-}
-
-
 AIRBNB_KEYWORDS = ["airbnb", "vacation rental", "place to stay", "cabin", "condo rental", "book a stay"]
 
 
@@ -516,15 +460,6 @@ def _select_ccxt_tools(ccxt: "CCXTContext", user_text: str) -> list[dict]:
     if not any(kw in text for kw in CCXT_KEYWORDS):
         return []
     return ccxt.ccxt_tools
-
-
-def _select_phone_tools(phone: "PhoneContext", user_text: str) -> list[dict]:
-    text = user_text.lower()
-    matched_categories = {cat for cat, keywords in PHONE_CATEGORY_KEYWORDS.items() if any(kw in text for kw in keywords)}
-    if not matched_categories:
-        return []
-    selected_names = {name for name, category in PHONE_TOOL_CATEGORY.items() if category in matched_categories}
-    return [t for t in phone.phone_tools if t["function"]["name"] in selected_names]
 
 
 MAIL_TOOLS = [
@@ -1251,7 +1186,7 @@ SYSTEM_PROMPT = (
     "opens a video window in the user's Jarvis web session; you never see or describe the footage "
     "yourself, just confirm it's open or report that no camera is registered for that room. "
     "list_cameras shows what's registered, and add_camera registers a new one from a stream URL."
-    "{era_note}{phone_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{kitchen_note}{web_note}"
+    "{era_note}{mail_note}{obsidian_note}{home_assistant_note}{business_note}{personal_note}{kitchen_note}{web_note}"
     "{airbnb_note}{ticketmaster_note}{kroger_note}{ccxt_note}{letterstream_note}{git_note}{omada_note}{recipe_note}"
     "{sms_note}{radio_note}"
 )
@@ -1316,18 +1251,6 @@ MAIL_SYSTEM_NOTE = (
     "read tool call, answer using the "
     "actual data returned — state it in plain language, as if you already knew it. Never describe the "
     "tool call itself."
-)
-
-PHONE_SYSTEM_NOTE = (
-    " You also have tools that operate the user's Android phone directly: camera (take_photo), "
-    "microphone (record_audio), SMS (read_sms/send_sms), calls (get_call_log/make_call), contacts, "
-    "GPS location, clipboard, notifications, flashlight, volume, and device info. send_sms, "
-    "make_call, and shell are sensitive — calling one of those does not execute it immediately; it "
-    "stages the action and you must clearly describe exactly what it will do and ask the user to "
-    "explicitly confirm before it happens. Every other phone tool executes immediately. After any "
-    "phone tool call, answer the user's actual question or confirm what happened directly using the "
-    "data returned — state it in plain language, as if you already knew it. Never describe the tool "
-    "call itself or say things like 'the tool response shows' — just give the answer."
 )
 
 ERA_SYSTEM_NOTE = (
@@ -1425,7 +1348,7 @@ VOICE_BRIEF_NOTE = (
 
 
 def build_system_prompt(
-    tz_name: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
+    tz_name: str, era=None, mail=None, obsidian=None, home_assistant=None,
     now: str | None = None, web_search: bool = False, business=None, personal=None,
     airbnb=None, ticketmaster=None, kroger=None, ccxt=None, letterstream=None, git_ops=None,
     omada=None, recipe=None, cellular_ctx=None, voice_brief: bool = False,
@@ -1447,7 +1370,6 @@ def build_system_prompt(
         time_note=time_note,
         tz_name=tz_name,
         era_note=ERA_SYSTEM_NOTE if era is not None else "",
-        phone_note=PHONE_SYSTEM_NOTE if phone is not None else "",
         mail_note=MAIL_SYSTEM_NOTE if mail is not None else "",
         # The digest is a FIXED string read once at startup, never re-read here. A
         # per-turn vault read would vary the prompt prefix and defeat the prompt cache --
@@ -1485,7 +1407,7 @@ def build_system_prompt(
 
 
 def select_tools(
-    user_text: str, era=None, phone=None, mail=None, obsidian=None, home_assistant=None,
+    user_text: str, era=None, mail=None, obsidian=None, home_assistant=None,
     route: bool = True, business=None, personal=None, airbnb=None, ticketmaster=None, kroger=None,
     ccxt=None, letterstream=None, git_ops=None, omada=None, recipe=None, cellular_ctx=None,
 ) -> list[dict]:
@@ -1513,7 +1435,6 @@ def select_tools(
             + CAMERA_TOOLS
             + CONTENT_TOOLS
             + (era.era_tools if era is not None else [])
-            + (phone.phone_tools if phone is not None else [])
             + (MAIL_TOOLS if mail is not None else [])
             + (OBSIDIAN_TOOLS if obsidian is not None else [])
             + (HOME_ASSISTANT_TOOLS + HA_CONFIG_TOOLS + LOCATION_TOOLS if home_assistant is not None else [])
@@ -1539,7 +1460,6 @@ def select_tools(
         + CAMERA_TOOLS
         + CONTENT_TOOLS
         + (_select_era_tools(era, user_text) if era is not None else [])
-        + (_select_phone_tools(phone, user_text) if phone is not None else [])
         + (_select_mail_tools(mail, user_text) if mail is not None else [])
         # Obsidian tools are always offered (not keyword-gated) when configured — proactive
         # capture only works if write_note is available on every turn, not just ones that
@@ -1605,7 +1525,7 @@ def _utc_to_local_iso(utc_iso: str, tz_name: str) -> str:
 
 def _dispatch_tool_call(
     db_path: str, tz_name: str, requesting_user_id: int, name: str, arguments: dict,
-    era: EraContext | None, calendar: CalendarContext | None, phone: PhoneContext | None = None,
+    era: EraContext | None, calendar: CalendarContext | None,
     mail: MailContext | None = None, obsidian: ObsidianContext | None = None,
     home_assistant: HomeAssistantContext | None = None, business: "BusinessContext | None" = None,
     personal: "PersonalContext | None" = None,
@@ -1828,22 +1748,6 @@ def _dispatch_tool_call(
             })
         try:
             return json.dumps(era.mcp_client.call_tool(name, arguments))
-        except Exception as e:
-            return json.dumps({"error": str(e)})
-
-    if phone is not None and name in phone.tool_names:
-        if name in phone.sensitive_tools:
-            create_pending_action_and_review(db_path, requesting_user_id, name, arguments)
-            return json.dumps({
-                "status": "awaiting_confirmation",
-                "message": (
-                    f"Calling {name} does not execute it — describe exactly what this will do "
-                    f"(tool: {name}, arguments: {arguments}) and ask the user to explicitly confirm "
-                    "yes or no before anything happens."
-                ),
-            })
-        try:
-            return json.dumps(phone.mcp_client.call_tool(name, arguments))
         except Exception as e:
             return json.dumps({"error": str(e)})
 
@@ -2302,7 +2206,7 @@ def create_pending_action_and_review(
 
 
 def execute_pending_action(
-    pending: dict, era: EraContext | None = None, phone: PhoneContext | None = None,
+    pending: dict, era: EraContext | None = None,
     mail: MailContext | None = None, home_assistant: HomeAssistantContext | None = None,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
@@ -2315,8 +2219,6 @@ def execute_pending_action(
     regardless of which one approved it."""
     if era is not None and pending["tool_name"] in era.tool_names:
         context = era
-    elif phone is not None and pending["tool_name"] in phone.tool_names:
-        context = phone
     elif mail is not None and pending["tool_name"] in mail.tool_names:
         context = mail
     elif kroger is not None and pending["tool_name"] in kroger.tool_names:
@@ -2348,7 +2250,7 @@ def _sync_review_item(db_path: str, pending: dict, decision: str) -> None:
 
 
 def _resolve_pending_action(
-    db_path: str, llm, era: EraContext | None, phone: PhoneContext | None, mail: MailContext | None,
+    db_path: str, llm, era: EraContext | None, mail: MailContext | None,
     home_assistant: HomeAssistantContext | None, pending: dict, user_text: str,
     kroger: KrogerContext | None = None, ccxt: "CCXTContext | None" = None,
     letterstream: "LetterStreamContext | None" = None, git_ops: "GitOpsContext | None" = None,
@@ -2363,7 +2265,7 @@ def _resolve_pending_action(
         _sync_review_item(db_path, pending, "approved")
         try:
             result = execute_pending_action(
-                pending, era=era, phone=phone, mail=mail, home_assistant=home_assistant,
+                pending, era=era, mail=mail, home_assistant=home_assistant,
                 kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops,
                 omada=omada, cellular_ctx=cellular_ctx)
             reply = f"Done. {pending['tool_name']} executed — result: {result}"
@@ -2386,7 +2288,7 @@ def _resolve_pending_action(
 
 def handle_message(
     db_path: str, llm, requesting_user_id: int, user_text: str, tz_name: str = "America/New_York",
-    era: EraContext | None = None, calendar: CalendarContext | None = None, phone: PhoneContext | None = None,
+    era: EraContext | None = None, calendar: CalendarContext | None = None,
     mail: MailContext | None = None, obsidian: ObsidianContext | None = None,
     home_assistant: HomeAssistantContext | None = None, business: BusinessContext | None = None,
     personal: "PersonalContext | None" = None,
@@ -2425,13 +2327,13 @@ def handle_message(
     Both halves are tagged deliberately: tagging only the question would leave its answer
     in the window as an orphan, which reads worse than either keeping or dropping the
     pair."""
-    if (era is not None or phone is not None or mail is not None or home_assistant is not None
+    if (era is not None or mail is not None or home_assistant is not None
             or kroger is not None or ccxt is not None or letterstream is not None or git_ops is not None
             or omada is not None):
         pending = db.get_pending_action(db_path, requesting_user_id)
         if pending is not None:
             return _resolve_pending_action(
-                db_path, llm, era, phone, mail, home_assistant, pending, user_text,
+                db_path, llm, era, mail, home_assistant, pending, user_text,
                 kroger=kroger, ccxt=ccxt, letterstream=letterstream, git_ops=git_ops,
                 omada=omada, cellular_ctx=cellular_ctx)
 
@@ -2463,7 +2365,7 @@ def handle_message(
     now = datetime.now(ZoneInfo(tz_name)).isoformat()
     agentic = getattr(llm, "agentic", False)
     tools = select_tools(
-        user_text, era, phone, mail, obsidian, home_assistant, route=not agentic, business=business,
+        user_text, era, mail, obsidian, home_assistant, route=not agentic, business=business,
         personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
         letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
         cellular_ctx=cellular_ctx)
@@ -2474,7 +2376,7 @@ def handle_message(
     # pending-action gate above, the same history, the same persistence below.
     if agentic:
         system_prompt = build_system_prompt(
-            tz_name, era, phone, mail, obsidian, home_assistant,
+            tz_name, era, mail, obsidian, home_assistant,
             web_search=getattr(llm, "web_search", False), business=business, personal=personal,
             airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
             letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
@@ -2493,7 +2395,7 @@ def handle_message(
 
     messages = [
         {"role": "system", "content": build_system_prompt(
-            tz_name, era, phone, mail, obsidian, home_assistant, now=now, business=business,
+            tz_name, era, mail, obsidian, home_assistant, now=now, business=business,
             personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
             letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,
             cellular_ctx=cellular_ctx, voice_brief=voice_brief)}
@@ -2507,7 +2409,7 @@ def handle_message(
     empty_retried = False
     for _ in range(max_tool_hops):
         think = (
-            era is not None or phone is not None or mail is not None or obsidian is not None
+            era is not None or mail is not None or obsidian is not None
             or home_assistant is not None
         )
         message = llm.chat(messages, tools=tools, think=think)
@@ -2535,7 +2437,7 @@ def handle_message(
         for call in tool_calls:
             fn = call["function"]
             result = _dispatch_tool_call(
-                db_path, tz_name, requesting_user_id, fn["name"], fn.get("arguments", {}), era, calendar, phone,
+                db_path, tz_name, requesting_user_id, fn["name"], fn.get("arguments", {}), era, calendar,
                 mail=mail, obsidian=obsidian, home_assistant=home_assistant, business=business,
                 personal=personal, airbnb=airbnb, ticketmaster=ticketmaster, kroger=kroger, ccxt=ccxt,
                 letterstream=letterstream, git_ops=git_ops, omada=omada, recipe=recipe,

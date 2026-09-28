@@ -1,7 +1,7 @@
 """Speech-to-text via a local Whisper model (faster-whisper / CTranslate2). Runs
 entirely on this machine — no audio ever leaves the LAN. The model loads lazily on
 first transcription request rather than at startup, same reasoning as
-build_phone_context: a slow/missing model download must only disable voice input,
+build_home_assistant_context: a slow/missing model download must only disable voice input,
 never block or crash the whole assistant.
 """
 import io

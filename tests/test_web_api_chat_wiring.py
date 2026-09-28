@@ -55,15 +55,15 @@ def cfg(db_path):
 @pytest.fixture
 def client(cfg):
     db.upsert_user(cfg.db_path, "111", "Dug", "owner")
-    era, phone, mail, obsidian, home_assistant = (Sentinel(), Sentinel(), Sentinel(), Sentinel(), Sentinel())
+    era, mail, obsidian, home_assistant = (Sentinel(), Sentinel(), Sentinel(), Sentinel())
     app = create_app(
-        cfg, FakeLLM(), era=era, calendar=None, phone=phone, mail=mail, obsidian=obsidian,
+        cfg, FakeLLM(), era=era, calendar=None, mail=mail, obsidian=obsidian,
         home_assistant=home_assistant, static_dir=None,
     )
     test_client = TestClient(app)
     resp = test_client.post("/api/login", json={"name": "Dug", "password": "ownerpass"})
     assert resp.status_code == 200
-    return test_client, {"era": era, "phone": phone, "mail": mail, "obsidian": obsidian, "home_assistant": home_assistant}
+    return test_client, {"era": era, "mail": mail, "obsidian": obsidian, "home_assistant": home_assistant}
 
 
 def test_every_owner_context_reaches_handle_message(client):

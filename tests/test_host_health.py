@@ -25,11 +25,10 @@ def test_check_all_merges_ssh_hosts_and_http_services():
             mock_get.return_value = MagicMock()
             results = host_health.check_all(
                 {"jarvisbox": {"host": "127.0.0.1"}},
-                phone_mcp_url="http://192.168.0.143:3000/mcp",
                 orpheus_url="http://127.0.0.1:8130/tts")
 
     names = {r["name"] for r in results}
-    assert names == {"jarvisbox", "phone_mcp", "orpheus"}
+    assert names == {"jarvisbox", "orpheus"}
     assert all(r["reachable"] for r in results)
 
 
@@ -37,11 +36,11 @@ def test_check_all_reports_unreachable_http_service_on_connection_failure():
     with patch("socket.create_connection", side_effect=OSError()):
         with patch("httpx.get", side_effect=Exception("connection refused")):
             results = host_health.check_all(
-                {"jarvisbox": {"host": "127.0.0.1"}}, phone_mcp_url="http://192.168.0.143:3000/mcp")
+                {"jarvisbox": {"host": "127.0.0.1"}}, orpheus_url="http://127.0.0.1:8130/tts")
 
-    phone = next(r for r in results if r["name"] == "phone_mcp")
-    assert phone["reachable"] is False
-    assert phone["latency_ms"] is None
+    orpheus = next(r for r in results if r["name"] == "orpheus")
+    assert orpheus["reachable"] is False
+    assert orpheus["latency_ms"] is None
 
 
 def test_check_all_includes_gpu_bridge_when_given():

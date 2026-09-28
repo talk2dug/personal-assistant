@@ -63,7 +63,7 @@ async def call_tool(request: Request):
     call = functools.partial(
         _dispatch_tool_call,
         cfg.db_path, cfg.timezone, int(user_id), name, arguments,
-        request.app.state.era, request.app.state.calendar, request.app.state.phone,
+        request.app.state.era, request.app.state.calendar,
         mail=request.app.state.mail, obsidian=request.app.state.obsidian,
         home_assistant=request.app.state.home_assistant, business=request.app.state.business,
         personal=request.app.state.personal,

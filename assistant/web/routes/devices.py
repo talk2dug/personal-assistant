@@ -38,7 +38,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
-from ...core import db, kitchen_db, presence, vision, wake_arbitration
+from ...core import db, kitchen_db, presence, touch_panel, vision, wake_arbitration
 from ...core.engine import handle_message
 
 logger = logging.getLogger(__name__)
@@ -310,3 +310,61 @@ async def say(request: Request):
     except Exception as e:
         raise HTTPException(500, f"speech synthesis failed: {e}")
     return Response(content=wav, media_type="audio/wav")
+
+
+# --- home-control panel -----------------------------------------------------------------
+# The touch terminals' room-by-room light/switch panel and its weather/traffic/schedule
+# strip. Under /home/ (two path segments) so none of these can be mistaken for a
+# /{device_id} route. See assistant/core/touch_panel.py for what is and isn't reachable.
+
+def _ha(request: Request):
+    ha = request.app.state.home_assistant
+    if ha is None:
+        raise HTTPException(503, "Home Assistant is not configured")
+    return ha
+
+
+async def _run(fn, *args, **kwargs):
+    return await asyncio.get_running_loop().run_in_executor(None, functools.partial(fn, *args, **kwargs))
+
+
+@router.get("/home/rooms")
+async def home_rooms(request: Request):
+    _require_device_key(request)
+    ha = _ha(request)
+    try:
+        view = await _run(touch_panel.rooms, ha.mcp_client, ha.sensitive_domains)
+    except Exception as e:
+        raise HTTPException(502, f"Home Assistant unreachable: {e}")
+    view["home_room"] = touch_panel.home_room(request.app.state.cfg.db_path,
+                                              request.client.host if request.client else None,
+                                              [r["name"] for r in view["rooms"]])
+    return view
+
+
+@router.post("/home/control")
+async def home_control(request: Request):
+    _require_device_key(request)
+    ha = _ha(request)
+    body = await request.json()
+    try:
+        if body.get("room_off"):
+            result = await _run(touch_panel.room_off, ha.mcp_client, body["room_off"], ha.sensitive_domains)
+        else:
+            result = await _run(touch_panel.control, ha.mcp_client, body.get("entity_id"),
+                                body.get("service"), body.get("data"), ha.sensitive_domains)
+    except touch_panel.PanelError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Home Assistant call failed: {e}")
+    logger.info("touch panel %s: %s", body.get("device_id") or "?", body)
+    return result
+
+
+@router.get("/home/info")
+async def home_info(request: Request):
+    _require_device_key(request)
+    ha = _ha(request)
+    cfg = request.app.state.cfg
+    return await _run(touch_panel.info, ha.mcp_client, cfg.db_path, _owner_user_id(request),
+                      cfg.timezone, getattr(request.app.state, "calendar", None))

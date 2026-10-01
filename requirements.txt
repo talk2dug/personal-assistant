@@ -52,3 +52,4 @@ Pillow>=10.0.0
 # hardware path needs it, and file generation works fine without a cutter attached.
 pyusb>=1.2.1
 pypdf
+websockets>=12.0

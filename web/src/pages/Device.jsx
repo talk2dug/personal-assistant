@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import HomePanel, { InfoStrip, useHomeInfo } from './HomePanel'
 
 /**
  * The screen on a voice terminal.
@@ -43,6 +44,37 @@ export default function Device() {
   const [cameraView, setCameraView] = useState(null)
   const [cameraFeedBroken, setCameraFeedBroken] = useState(false)
   const [recipeView, setRecipeView] = useState(null)
+  // Home controls beside the orb. ?panel=0 turns them off for a terminal with no touch
+  // screen; the ⌂ button hides them (remembered per terminal) without losing the strip.
+  const panelAllowed = params.get('panel') !== '0'
+  const [panelShown, setPanelShown] = useState(() => {
+    try { return localStorage.getItem(`hp-shown-${deviceId}`) !== '0' } catch { return true }
+  })
+  const togglePanel = () => {
+    setPanelShown((v) => {
+      try { localStorage.setItem(`hp-shown-${deviceId}`, v ? '0' : '1') } catch { /* storage off */ }
+      return !v
+    })
+  }
+  const { info, now } = useHomeInfo(key, panelAllowed)
+
+  // A kiosk runs this page for weeks and nobody is there to press F5, so a new frontend
+  // build would otherwise never reach it. Vite hashes the bundle name, so a changed name
+  // in index.html means a new build: reload, unless something is on screen mid-interaction.
+  useEffect(() => {
+    const loaded = document.querySelector('script[type="module"][src*="/assets/"]')?.getAttribute('src')
+    if (!loaded) return undefined
+    const timer = setInterval(async () => {
+      if (stateRef.current !== 'idle' && stateRef.current !== 'offline') return
+      try {
+        const html = await (await fetch('/index.html', { cache: 'no-store' })).text()
+        const current = html.match(/src="(\/assets\/[^"]+\.js)"/)?.[1]
+        if (current && current !== loaded) window.location.reload()
+      } catch { /* server restarting; try next time */ }
+    }, 5 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const withPanel = panelAllowed && panelShown
   const stateRef = useRef('offline')
   const canvasRef = useRef(null)
   const ampRef = useRef(new Float32Array(BAR_COUNT))
@@ -186,16 +218,22 @@ export default function Device() {
   const caption = device.caption || CAPTION[device.state] || ''
 
   return (
-    <div className={`device-screen state-${device.state}`}>
+    <div className={`device-screen state-${device.state} ${panelAllowed ? 'has-strip' : ''} ${withPanel ? 'with-panel' : ''}`}>
       <div className="device-top">
         <span className="device-name">{device.name || deviceId}</span>
         <span className={`device-dot ${device.online ? 'online' : 'offline'}`} />
       </div>
-      <div className="device-orb">
-        <div className={`device-glow glow-${device.state}`} />
-        <canvas ref={canvasRef} />
+      {panelAllowed && <InfoStrip info={info} now={now} panelShown={panelShown} onToggle={togglePanel} />}
+      <div className="device-main">
+        <div className="device-jarvis">
+          <div className="device-orb">
+            <div className={`device-glow glow-${device.state}`} />
+            <canvas ref={canvasRef} />
+          </div>
+          <div className="device-caption">{caption}</div>
+        </div>
+        {withPanel && <HomePanel deviceId={deviceId} deviceKey={key} />}
       </div>
-      <div className="device-caption">{caption}</div>
 
       {cameraView && (
         <div className="device-camera-view" onClick={closeCameraView}>

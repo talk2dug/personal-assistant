@@ -225,6 +225,15 @@ def build_business_context(cfg, owner_user_id: int | None, llm=None, bridge=None
     # separate enabled flag -- propose_ops_plan already refuses any step targeting an
     # unregistered host, so an empty registry is already a safe, self-explaining no-op.
     ssh_ops = SSHOpsClient(cfg.ssh_hosts) if cfg.ssh_hosts else None
+    # The Omada controller joins ops plans as one more host, "omada" (see omada_ops.py):
+    # the systems engineer's Wi-Fi fixes then go through the same single approval, test
+    # and rollback as his server fixes instead of ending as values for Jack to type in.
+    if (cfg.omada_controller_url and cfg.omada_client_id and cfg.omada_client_secret
+            and cfg.omada_id and cfg.omada_site_id):
+        from .omada_ops import OpsRouter
+        ssh_ops = OpsRouter(ssh_ops, OmadaClient(
+            cfg.omada_controller_url, cfg.omada_client_id, cfg.omada_client_secret,
+            cfg.omada_id, cfg.omada_site_id, db_path=cfg.db_path))
     # Constructed here but only started later, once main.py has a notifier -- see
     # work_queue.WorkQueue's docstring. BusinessClient only ever calls .submit() on it.
     queue = work_queue.WorkQueue(cfg.db_path)

@@ -11,6 +11,14 @@ import pytest
 from assistant.core import market_data, paper_trading
 
 
+@pytest.fixture(autouse=True)
+def _shorts_on(monkeypatch):
+    """The short-side mechanics are tested as built; SHORTS_ENABLED is the live desk's
+    policy switch, covered on its own in TestShortsSwitchedOff."""
+    monkeypatch.setattr(paper_trading, "SHORTS_ENABLED", True)
+    monkeypatch.setattr(paper_trading, "WATCHLIST_ONLY", False)
+
+
 @pytest.fixture
 def db(tmp_path):
     path = str(tmp_path / "paper.db")
@@ -823,17 +831,6 @@ class TestDirectionCircuitBreaker:
             conn.execute(f"UPDATE market_coins SET rate = 200.0 WHERE code = '{code}'")
             conn.commit(); conn.close()
 
-    def test_a_new_short_is_refused_once_short_expectancy_is_proven_negative(self, db, monkeypatch):
-        self._lose_five_shorts(db, monkeypatch)
-
-        result = paper_trading.execute_orders(db, [short("BTC", 500)])
-
-        assert result["fills"] == []
-        assert len(result["rejections"]) == 1
-        assert "circuit-broken" in result["rejections"][0]["reason"]
-        assert "short" in result["rejections"][0]["reason"]
-        assert paper_trading.portfolio(db)["positions"] == []
-
     def test_the_breaker_does_not_block_the_other_direction(self, db, monkeypatch):
         """A negative short expectancy says nothing about longs -- the gate is per
         direction, not a whole-desk kill switch."""
@@ -869,9 +866,21 @@ class TestDirectionCircuitBreaker:
         result = paper_trading.execute_orders(db, [short("BTC", 500)])
         assert len(result["fills"]) == 1
 
-    def test_long_side_trips_the_same_breaker_symmetrically(self, db, monkeypatch):
-        """Not a hardcoded short ban -- the same rule applies to longs the moment their
-        own trailing expectancy goes negative."""
+    def test_a_tripped_direction_opens_only_small_probes(self, db, monkeypatch):
+        """Probation (2026-09-28): a proven-negative direction no longer refuses every
+        open -- a desk that cannot trade cannot learn the regime changed. It opens a probe,
+        sized down to PROBE_SIZE_FRACTION of the normal per-order cap, and says so."""
+        self._lose_five_shorts(db, monkeypatch)
+        equity = paper_trading.portfolio(db)["equity"]
+
+        result = paper_trading.execute_orders(db, [short("BTC", 1000)])
+
+        assert len(result["fills"]) == 1 and result["fills"][0]["probe"] is True
+        probe_cap = equity * paper_trading.MAX_ORDER_PCT_OF_EQUITY / 100 * paper_trading.PROBE_SIZE_FRACTION
+        assert result["fills"][0]["usd"] == pytest.approx(probe_cap, abs=0.01)
+        assert "probation" in result["fills"][0]["reason"]
+
+    def test_long_side_goes_on_probation_symmetrically(self, db, monkeypatch):
         monkeypatch.setattr(paper_trading, "STOP_LOSS_COOLDOWN_HOURS", 0.0)
         for _ in range(5):
             paper_trading.execute_orders(db, [buy("SOL", 500)])   # default stop 180, target 260
@@ -883,33 +892,74 @@ class TestDirectionCircuitBreaker:
             conn.execute("UPDATE market_coins SET rate = 200.0 WHERE code = 'SOL'")
             conn.commit(); conn.close()
 
+        assert paper_trading.breaker_state(db, direction="long")["probation"]
         result = paper_trading.execute_orders(db, [buy("BTC", 500)])
+        assert result["fills"][0]["probe"] is True
 
-        assert result["fills"] == []
-        assert "circuit-broken" in result["rejections"][0]["reason"]
-        assert "long" in result["rejections"][0]["reason"]
-
-    def test_the_breaker_cannot_be_traded_out_of_by_a_lucky_winner(self, db, monkeypatch):
-        """It has to be a real cool-off, not a gate a model can talk its way past with one
-        good guess -- every new short stays refused while it's tripped, including the very
-        trade that would otherwise "prove" the direction again. Placing a winner is not a
-        path out (see the next test for what actually is)."""
+    def test_probe_slots_are_limited(self, db, monkeypatch):
+        """At most PROBE_MAX_OPEN probes per direction at once; the next is refused with
+        the reason spelled out so the trader can say why."""
         self._lose_five_shorts(db, monkeypatch)
-        blocked = paper_trading.execute_orders(db, [short("BTC", 500)])
-        assert blocked["fills"] == []
+        paper_trading.execute_orders(db, [short("BTC", 500), short("PEPE", 500)])
 
-        # Even a would-be big winner never gets the chance to open and prove itself.
-        result = paper_trading.execute_orders(db, [short("PEPE", 1000, stop=0.000014, target=0.000002)])
+        result = paper_trading.execute_orders(db, [short("SOL", 500)])
+
         assert result["fills"] == []
-        assert "circuit-broken" in result["rejections"][0]["reason"]
+        assert "on probation" in result["rejections"][0]["reason"]
+
+    def test_one_lucky_probe_does_not_reopen_the_direction(self, db, monkeypatch):
+        """The original breaker's point stands: no single good guess waves it off."""
+        self._lose_five_shorts(db, monkeypatch)
+        paper_trading.execute_orders(db, [short("SOL", 1000, stop=220.0, target=140.0)])
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = 140.0 WHERE code = 'SOL'")
+        conn.commit(); conn.close()
+        paper_trading.check_stops(db)                        # a winning probe
+
+        gate = paper_trading.breaker_state(db, direction="short")
+        assert gate["probe_stats"]["closed_trades"] == 1
+        assert gate["probation"] and not gate["reopened"]
+
+    def test_enough_winning_probes_reopen_full_size(self, db, monkeypatch):
+        self._lose_five_shorts(db, monkeypatch)
+        for _ in range(paper_trading.PROBE_MIN_TRADES):
+            paper_trading.execute_orders(db, [short("SOL", 1000, stop=220.0, target=140.0)])
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = 140.0 WHERE code = 'SOL'")
+            conn.commit(); conn.close()
+            paper_trading.check_stops(db)
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = 200.0 WHERE code = 'SOL'")
+            conn.commit(); conn.close()
+
+        gate = paper_trading.breaker_state(db, direction="short")
+        assert not gate["probation"]       # reopened by the probes (or the window turned positive)
+        result = paper_trading.execute_orders(db, [short("BTC", 500)])
+        assert result["fills"][0]["probe"] is False and result["fills"][0]["usd"] == 500
+
+    def test_winning_probes_reopen_even_while_the_week_is_still_negative(self, db, monkeypatch):
+        """The case probation exists for: big old losses still in the window, but the
+        regime has turned and the probes prove it."""
+        self._lose_five_shorts(db, monkeypatch)
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE paper_trades SET realized = -2000 WHERE realized IS NOT NULL")
+        conn.commit(); conn.close()
+        for _ in range(paper_trading.PROBE_MIN_TRADES):
+            paper_trading.execute_orders(db, [short("SOL", 1000, stop=220.0, target=140.0)])
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = 140.0 WHERE code = 'SOL'")
+            conn.commit(); conn.close()
+            paper_trading.check_stops(db)
+            conn = sqlite3.connect(db)
+            conn.execute("UPDATE market_coins SET rate = 200.0 WHERE code = 'SOL'")
+            conn.commit(); conn.close()
+
+        gate = paper_trading.breaker_state(db, direction="short")
+        assert gate["tripped"] and gate["reopened"] and not gate["probation"]
 
     def test_the_breaker_clears_once_the_losing_sample_ages_out_of_the_window(self, db, monkeypatch):
-        """The only way out: go quiet in that direction until the losses fall outside
-        CURRENT_PERFORMANCE_WINDOW_DAYS, the same trailing window expectancy() itself
-        uses. Mirrors test_days_narrows_to_a_trailing_window's exact technique."""
         self._lose_five_shorts(db, monkeypatch)
-        blocked = paper_trading.execute_orders(db, [short("BTC", 500)])
-        assert blocked["fills"] == []
+        assert paper_trading.breaker_state(db, direction="short")["probation"]
 
         conn = sqlite3.connect(db)
         old = (datetime.now(timezone.utc)
@@ -918,6 +968,21 @@ class TestDirectionCircuitBreaker:
         conn.commit(); conn.close()
 
         result = paper_trading.execute_orders(db, [short("BTC", 500)])
+        assert result["fills"][0]["probe"] is False
+
+
+class TestBoundaryRounding:
+    """Two real refusals at exactly the limit, both float noise (2026-09-25..27)."""
+
+    def test_exactly_the_minimum_reward_to_risk_is_accepted(self, db):
+        # 200 entry, stop 190 (risk 10), target 220 (reward 20): exactly 2.00x.
+        result = paper_trading.execute_orders(db, [buy("SOL", 100, stop=190.0, target=220.0)])
+        assert len(result["fills"]) == 1
+
+    def test_an_order_sized_exactly_to_the_cap_is_accepted(self, db):
+        equity = paper_trading.portfolio(db)["equity"]
+        cap = equity * paper_trading.MAX_ORDER_PCT_OF_EQUITY / 100
+        result = paper_trading.execute_orders(db, [buy("SOL", cap * (1 + 1e-12))])
         assert len(result["fills"]) == 1
 
 
@@ -1433,3 +1498,96 @@ class TestRunningABook:
         assert "never from lowering it" in out
         # And the old doubled "an empty list is often correct" thumb on the scale is gone.
         assert "often correct" not in out
+
+
+class TestShortsSwitchedOff:
+    """The live desk's policy since 2026-09-30: no new shorts, but a short already held
+    can still be managed and closed -- switching the policy off must strand nothing."""
+
+    def test_a_new_short_is_refused(self, db, monkeypatch):
+        monkeypatch.setattr(paper_trading, "SHORTS_ENABLED", False)
+        r = paper_trading.execute_orders(db, [short("SOL", 500)])
+        assert not r["fills"]
+        assert "shorting is switched off" in r["rejections"][0]["reason"]
+
+    def test_a_short_already_held_can_still_be_covered(self, db, monkeypatch):
+        assert paper_trading.execute_orders(db, [short("SOL", 500)])["fills"]
+        monkeypatch.setattr(paper_trading, "SHORTS_ENABLED", False)
+        r = cover(db, "SOL")  # the helper places the order itself
+        assert r["fills"], r["rejections"]
+        assert paper_trading.portfolio(db)["positions"] == []
+
+    def test_longs_are_unaffected(self, db, monkeypatch):
+        monkeypatch.setattr(paper_trading, "SHORTS_ENABLED", False)
+        assert paper_trading.execute_orders(db, [buy("SOL", 500)])["fills"]
+
+    def test_the_instructions_say_shorting_is_off(self, monkeypatch):
+        monkeypatch.setattr(paper_trading, "SHORTS_ENABLED", False)
+        text = paper_trading.render_order_instructions()
+        assert "SHORTING IS SWITCHED OFF" in text
+        assert "YOU CAN ALSO GO SHORT" not in text
+        monkeypatch.setattr(paper_trading, "SHORTS_ENABLED", True)
+        assert "YOU CAN ALSO GO SHORT" in paper_trading.render_order_instructions()
+
+
+class TestWatchlistOnly:
+    """New positions only on the coins the desk has a long-range chart for."""
+
+    def test_a_coin_off_the_watchlist_is_refused(self, db, monkeypatch):
+        from assistant.core import chart_history
+        monkeypatch.setattr(paper_trading, "WATCHLIST_ONLY", True)
+        monkeypatch.setattr(chart_history, "watchlist", lambda db_path: ["BTC", "ETH"])
+        r = paper_trading.execute_orders(db, [buy("SOL", 500)])
+        assert not r["fills"]
+        assert "not on the desk's watchlist" in r["rejections"][0]["reason"]
+
+    def test_a_watchlist_coin_is_allowed(self, db, monkeypatch):
+        from assistant.core import chart_history
+        monkeypatch.setattr(paper_trading, "WATCHLIST_ONLY", True)
+        monkeypatch.setattr(chart_history, "watchlist", lambda db_path: ["SOL"])
+        assert paper_trading.execute_orders(db, [buy("SOL", 500)])["fills"]
+
+    def test_an_off_list_holding_can_still_be_sold(self, db, monkeypatch):
+        from assistant.core import chart_history
+        assert paper_trading.execute_orders(db, [buy("SOL", 500)])["fills"]
+        monkeypatch.setattr(paper_trading, "WATCHLIST_ONLY", True)
+        monkeypatch.setattr(chart_history, "watchlist", lambda db_path: ["BTC"])
+        assert close(db, "SOL")["fills"]
+
+
+class TestRuns:
+    """Starting over keeps the old run's history and sets the BTC bar for the new one."""
+
+    def test_archive_and_reset_keeps_history_and_clears_the_book(self, db):
+        paper_trading.execute_orders(db, [buy("SOL", 500)])
+        close(db, "SOL")
+        paper_trading.execute_orders(db, [buy("SOL", 300)])   # left open at the reset
+        out = paper_trading.archive_and_reset(db, starting_cash=1000.0, note="run 2")
+        conn = sqlite3.connect(db)
+        assert conn.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM paper_positions").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM paper_trades_archive WHERE run_id = ?",
+                            (out["archived_run"],)).fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM paper_positions_archive").fetchone()[0] == 1
+        ended = conn.execute("SELECT ended_at, end_equity FROM paper_runs WHERE id = ?",
+                             (out["archived_run"],)).fetchone()
+        conn.close()
+        assert ended[0] and ended[1] > 0
+        assert paper_trading.portfolio(db)["equity"] == pytest.approx(1000.0)
+        assert paper_trading.current_run(db)["note"] == "run 2"
+
+    def test_benchmark_against_holding_btc(self, db):
+        paper_trading.archive_and_reset(db, starting_cash=1000.0)
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE market_coins SET rate = rate * 1.10 WHERE code = 'BTC'")
+        conn.commit(); conn.close()
+        b = paper_trading.benchmark(db)
+        assert b["btc_return_pct"] == pytest.approx(10.0)
+        assert b["ahead_of_btc"] == pytest.approx(-100.0)
+        assert "BEHIND" in paper_trading.render_order_instructions(db)
+
+    def test_a_second_reset_archives_under_the_new_run(self, db):
+        first = paper_trading.archive_and_reset(db, starting_cash=1000.0)
+        paper_trading.execute_orders(db, [buy("SOL", 200)])
+        second = paper_trading.archive_and_reset(db, starting_cash=1000.0)
+        assert second["archived_run"] == first["new_run"]

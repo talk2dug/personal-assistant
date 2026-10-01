@@ -3075,3 +3075,17 @@ body::after {
 .blueprint > .corner.tr { top: -6px; right: -6px; }
 .blueprint > .corner.bl { bottom: -6px; left: -6px; }
 .blueprint > .corner.br { bottom: -6px; right: -6px; }
+
+/* --- crypto desk: equity charts + BTC lab --- */
+.crypto-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.crypto-chart { padding: 12px 14px 6px; }
+.crypto-chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
+.crypto-chart-gap { font-family: var(--font-mono); font-size: 12px; color: var(--text-dim); }
+.crypto-chart-gap.up { color: var(--cyan-bright); }
+.crypto-chart-gap.down { color: var(--amber); }
+.crypto-lab { display: grid; gap: 16px; }
+.crypto-lab-vs { text-align: right; font-family: var(--font-mono); font-size: 18px; }
+.crypto-lab-reading .crypto-lab-text {
+  margin-top: 8px; white-space: pre-wrap; font-size: 13px; line-height: 1.55; color: var(--text);
+  max-height: 320px; overflow-y: auto;
+}

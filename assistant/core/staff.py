@@ -580,7 +580,7 @@ def set_data_feeds(db_path: str, key: str, feeds: str) -> bool:
     # "architecture" is pure retrieval like "policy" -- the owner's own architecture notes
     # read into the prompt, nothing written anywhere. See architecture_briefing.py.
     valid = {"market", "paper", "journal", "policy", "finance", "credit", "radio",
-             "health", "architecture"}
+             "health", "architecture", "network", "btc_lab"}
     wanted = [f.strip().lower() for f in (feeds or "").split(",") if f.strip()]
     unknown = [f for f in wanted if f not in valid]
     if unknown:
@@ -772,9 +772,18 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 # supplemental Kraken poll (market_data.refresh_supplemental) so they show
                 # up in this same list rather than needing a separate carve-out sentence.
                 tracked = market_data.list_tracked_codes(db_path)
-                lines.append(f"  TRADEABLE ON THIS FEED ({len(tracked)} codes) -- propose "
-                             "trades ONLY from this list, anything else will be rejected:")
-                lines.append("    " + ", ".join(tracked))
+                from . import chart_history, paper_trading as _pt
+                if _pt.WATCHLIST_ONLY:
+                    watch = [c for c in chart_history.watchlist(db_path) if c in tracked]
+                    lines.append(f"  YOUR WATCHLIST ({len(watch)} coins) -- new positions ONLY "
+                                 "on these; anything else is rejected. The movers above are "
+                                 "market context, not candidates:")
+                    lines.append("    " + ", ".join(watch))
+                else:
+                    watch = tracked
+                    lines.append(f"  TRADEABLE ON THIS FEED ({len(tracked)} codes) -- propose "
+                                 "trades ONLY from this list, anything else will be rejected:")
+                    lines.append("    " + ", ".join(tracked))
 
                 # The chart. Positions first -- knowing when to get OUT is the half it
                 # kept getting wrong, and 90 of its first 92 exits were it closing a
@@ -791,7 +800,28 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
                 # extended chart. Screen and rule cancelled out: six trades in four days,
                 # with the desk itself writing "only three coins have technicals this run"
                 # on run after run while 242 coins sat tradeable and unlooked-at.
-                desk = technicals.desk_briefing(db_path, tracked, held)
+                # The long view first: day/week/month/year for every coin it may trade or
+                # holds, so the 15-minute screen below is read inside its bigger trend.
+                try:
+                    long_codes = list(dict.fromkeys(["BTC"] + watch + held))
+                    live = {c["code"]: c["price_usd"] for c in
+                            market_data.snapshot(db_path, codes=long_codes, limit=len(long_codes))}
+                    lines.append(
+                        "THE LONG VIEW -- each coin's 4h, daily and weekly chart (from two years "
+                        "of Kraken history), read this BEFORE the 15-minute screen. Trade with "
+                        "the weekly and daily trend, not against it. 'Typical swing' is how far "
+                        "the coin normally moves in a day and in 4 hours: a stop closer than "
+                        "the 4h swing sits inside ordinary noise and will be hit by it -- that "
+                        "is why most of your stops have been. 'Habits' is what THIS coin did "
+                        "after moves like that in the past, with the number of times it "
+                        "happened: weigh it by that count, a 1-of-1 is not a habit.\n"
+                        + chart_history.briefing(db_path, long_codes, live))
+                except Exception as e:
+                    logger.warning("long-view briefing failed: %s", e)
+                    lines.append("THE LONG VIEW: unavailable this run -- say so, and be more "
+                                 "cautious rather than trading blind.")
+                desk = technicals.desk_briefing(db_path, watch, held,
+                                                allow_short=paper_trading.SHORTS_ENABLED)
                 if desk:
                     lines.append(desk)
                 market_parts.append("\n".join(lines))
@@ -893,6 +923,33 @@ def build_feed_briefing(db_path: str, feeds: str | None) -> str:
         except Exception as e:
             health_parts.append(f"HOST HEALTH: unavailable ({type(e).__name__}).")
 
+    # "network" is read-only like "health": the latest snapshot omada_health_tick stored
+    # (controller state, APs, every Wi-Fi client's signal, a ping sweep of every host).
+    # Before this the systems engineer could see hosts up/down and nothing about Wi-Fi.
+    if "network" in feeds:
+        try:
+            from . import omada_health
+            snap = omada_health.latest_snapshot(db_path)
+            ctrl = omada_health.controller_state(db_path)
+            if snap is None:
+                health_parts.append("NETWORK: no snapshot stored yet -- the omada_health job "
+                                    "takes one every 15 minutes once the controller answers.")
+            else:
+                health_parts.append("NETWORK (Omada controller + ping sweep):\n"
+                                    + omada_health.render_snapshot(snap, ctrl))
+        except Exception as e:
+            health_parts.append(f"NETWORK: unavailable ({type(e).__name__}).")
+
+    # The BTC lab's whole world: its own account and BTC's candles, nothing else (see
+    # btc_lab.py). Kept apart from the paper/market feeds on purpose -- an employee holding
+    # btc_lab must not also be shown movers, news or the main desk's record.
+    if "btc_lab" in feeds:
+        try:
+            from . import btc_lab
+            health_parts.append(btc_lab.briefing(db_path))
+        except Exception as e:
+            health_parts.append(f"BTC LAB: unavailable ({type(e).__name__}: {e}). Do not trade this run.")
+
     # Finance first for the same reason the paper portfolio leads: an employee should
     # read its own situation before it reads anything it might react to.
     parts = credit_parts + finance_parts + paper_parts + market_parts + radio_parts + health_parts
@@ -964,7 +1021,12 @@ def _record_journal(db_path: str, obsidian, emp: dict, output: str,
         entry = crypto_journal.parse_journal_entry(output)
         fills = (exec_result or {}).get("fills") or []
         stats = None
-        if role == "trader":
+        lab = "btc_lab" in (emp.get("data_feeds") or "")
+        if role == "trader" and lab:
+            # Its own ledger -- the RECORD line must never show the main desk's numbers.
+            from . import btc_lab
+            stats = btc_lab.performance(db_path)
+        elif role == "trader":
             from . import paper_trading
             stats = paper_trading.performance(db_path)
         if entry is None and (role in ("analyst", "engineer") or fills):
@@ -973,7 +1035,9 @@ def _record_journal(db_path: str, obsidian, emp: dict, output: str,
             logger.warning("%s produced no ```journal block on a run that needed one",
                            emp["key"])
         result = crypto_journal.record_run(obsidian, emp["title"], entry, role=role,
-                                           fills=fills, stats=stats, db_path=db_path,
+                                           fills=fills, stats=stats,
+                                           # opening-day links read paper_trades: not the lab's
+                                           db_path=None if lab else db_path,
                                            work=work, output=output)
         logger.info("journal for %s: %s (%s)", emp["key"],
                     "written" if result.get("journaled") else "skipped", result.get("reason"))
@@ -1091,6 +1155,7 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
                     "employees cannot be given real tool access on it")
             from .git_tools import GIT_TOOLS
             from .business_tools import OPS_PLAN_TOOLS, OWNER_REQUEST_TOOLS, REQUEST_CAPABILITY_TOOLS
+            run_started = _now()
             output = llm.engineer(
                 prompt, system_prompt=emp["system_prompt"],
                 tools=GIT_TOOLS + OPS_PLAN_TOOLS + REQUEST_CAPABILITY_TOOLS + OWNER_REQUEST_TOOLS,
@@ -1109,11 +1174,24 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
             if "credit" in (emp.get("data_feeds") or ""):
                 from .personal_tools import CREDIT_TRACKING_TOOLS
                 research_tools = research_tools + CREDIT_TRACKING_TOOLS
+            research_kwargs = {"web_search": False} if "btc_lab" in feeds else {}
             output = llm.research(
                 prompt, system_prompt=emp["system_prompt"], timeout=timeout,
                 tools=research_tools,
-                employee_key=emp["key"])
+                employee_key=emp["key"], **research_kwargs)
         status, error = "delivered", None
+
+        if emp["capability_tier"] == "execute" and output:
+            # Same rule as the paper desk below: the employee reports, the ledger decides.
+            # 2026-10-01 the systems engineer wrote "all four plans are proposed and
+            # awaiting your approval" after a run that never called propose_ops_plan --
+            # no plan existed. The record now says what was really filed.
+            output += _ops_plan_ledger(db_path, run_started)
+
+        if "btc_lab" in feeds and output:
+            from . import btc_lab
+            report, exec_result = btc_lab.apply_orders(db_path, output)
+            output += report
 
         if "paper" in feeds and output:
             # The employee proposed; the ledger decides. What actually happened is
@@ -1145,6 +1223,25 @@ def assign(db_path: str, llm, key: str, assignment: str, timeout: int = 10800,
 
     return {"ok": status == "delivered", "work_id": work_id, "employee": emp["title"],
             "output": output, "error": error}
+
+
+def _ops_plan_ledger(db_path: str, since: str) -> str:
+    """Ops plans actually created since `since`, as a report appended to the output."""
+    try:
+        with closing(_connect(db_path)) as conn:
+            rows = conn.execute(
+                "SELECT id, status, summary, review_item_id FROM ops_plans WHERE created_at >= ? "
+                "ORDER BY id", (since,)).fetchall()
+    except sqlite3.OperationalError:
+        return ""
+    lines = ["", "--- OPS PLANS CREATED THIS RUN (by the ledger, not the employee) ---"]
+    if not rows:
+        lines.append("NONE. Any plan described above as proposed or awaiting approval was NOT "
+                     "filed -- it does not exist on the Review page.")
+    for r in rows:
+        lines.append(f"plan {r['id']} ({r['status']}, review item {r['review_item_id']}): "
+                     f"{(r['summary'] or '')[:120]}")
+    return "\n".join(lines) + "\n"
 
 
 def reconcile_orphaned_work(db_path: str) -> int:

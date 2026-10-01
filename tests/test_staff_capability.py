@@ -141,3 +141,37 @@ class TestAssignRoutesByCapabilityTier:
 
         assert result["ok"] is False
         assert "engineer" in result["error"].lower()
+
+
+class TestOpsPlanLedger:
+    """2026-10-01: the systems engineer reported four plans 'proposed and awaiting your
+    approval' after a run that never called propose_ops_plan. The ledger now says so."""
+
+    def _engineer(self, db):
+        from assistant.core import ops_plans
+        ops_plans.init_ops_plans_db(db)
+        staff.hire(db, "Systems Engineer", "Runs our infrastructure.")
+        staff.set_capability_override(db, "systems_engineer", "execute")
+
+    def test_a_claimed_plan_that_was_never_filed_is_called_out(self, db):
+        self._engineer(db)
+        llm = FakeLLMWithEngineer("All four plans are proposed and awaiting your approval.")
+        out = staff.assign(db, llm, "systems_engineer", "fix the wifi")["output"]
+        assert "OPS PLANS CREATED THIS RUN" in out and "NONE." in out
+
+    def test_plans_really_filed_during_the_run_are_listed(self, db):
+        from assistant.core import ops_plans
+        self._engineer(db)
+        ops_plans.create_plan(db, 1, "old plan from yesterday", [
+            {"phase": "change", "host": "h", "command": "x"}, {"phase": "rollback", "host": "h", "command": "y"}])
+
+        class Filing(FakeLLMWithEngineer):
+            def engineer(self, prompt, **kwargs):
+                ops_plans.create_plan(db, 1, "front AP 2.4GHz to Medium", [
+                    {"phase": "change", "host": "omada", "command": "{}"},
+                    {"phase": "rollback", "host": "omada", "command": "{}"}])
+                return "Filed one plan."
+
+        out = staff.assign(db, Filing(), "systems_engineer", "fix the wifi")["output"]
+        assert "front AP 2.4GHz to Medium" in out
+        assert "old plan from yesterday" not in out and "NONE." not in out

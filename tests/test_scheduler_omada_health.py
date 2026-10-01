@@ -99,3 +99,67 @@ def test_run_omada_health_tick_never_calls_notify_without_an_owner_chat_id(db_pa
     client = FakeOmadaClient(devices=[{"mac": "AA", "name": "front AP", "status": 0, "type": "ap"}])
     scheduler.run_omada_health_tick(
         db_path, client, lambda chat_id, text: pytest.fail("should not notify with no owner"), None)
+
+
+class DeadController:
+    def list_devices(self):
+        raise TimeoutError("timed out")
+
+    def list_clients(self):
+        raise TimeoutError("timed out")
+
+
+def test_an_unreachable_controller_is_reported_once_and_its_return_too(db_path):
+    """2026-09-30: the controller was unplugged ~9h and nobody was told."""
+    notified = []
+    say = lambda chat_id, text: notified.append(text)
+    first = scheduler.run_omada_health_tick(db_path, DeadController(), say, "111")
+    assert first and first[0]["transition"] == "down"
+    assert any("controller isn't answering" in t for t in notified)
+    notified.clear()
+    assert scheduler.run_omada_health_tick(db_path, DeadController(), say, "111") == []
+    assert notified == []
+    back = scheduler.run_omada_health_tick(
+        db_path, FakeOmadaClient(devices=[{"mac": "AA", "name": "front AP", "status": 1, "type": "ap"}]),
+        say, "111")
+    assert {"name": "omada controller", "transition": "recovered", "told": True} in back
+    # and an unreachable controller never marked the devices themselves offline
+    assert omada_health.feed_status(db_path)["devices_online"] == 1
+
+
+def test_a_device_heard_from_recently_is_online_whatever_status_says(db_path):
+    import time
+    now_ms = time.time() * 1000
+    client = FakeOmadaClient(devices=[
+        {"mac": "AA", "name": "main AP", "status": 0, "type": "ap", "lastSeen": now_ms - 5000},
+        {"mac": "BB", "name": "front AP", "status": 0, "type": "ap", "lastSeen": now_ms - 3_600_000},
+    ])
+    results = {r["name"]: r["reachable"] for r in omada_health.check_devices(client)}
+    assert results == {"main AP": True, "front AP": False}
+
+
+def test_the_tick_stores_a_snapshot_the_network_feed_renders(db_path, monkeypatch):
+    monkeypatch.setattr(omada_health, "ping_sweep", lambda targets: [
+        {"name": n, "ip": ip, "loss_pct": 0.0 if n != "touch2" else 20.0, "avg_ms": 3.0, "max_ms": 9.0}
+        for n, ip in targets.items()])
+    client = FakeOmadaClient(
+        devices=[{"mac": "AA", "name": "main AP", "status": 1, "type": "ap", "ip": "192.168.0.115"}],
+        clients=[{"mac": "C1", "name": "touch2", "ip": "192.168.0.136", "wireless": True,
+                  "apName": "main AP", "radioId": 0, "rssi": -78, "snr": 15, "channel": 6}])
+    scheduler.run_omada_health_tick(db_path, client, lambda *a: None, "111",
+                                    ping_targets={"touch2": "192.168.0.136"})
+    snap = omada_health.latest_snapshot(db_path)
+    assert {p["name"] for p in snap["ping"]} == {"touch2", "main AP"}
+    text = omada_health.render_snapshot(snap, omada_health.controller_state(db_path))
+    assert "touch2 192.168.0.136: loss 20.0%" in text and "<-- problem" in text
+    assert "rssi -78" in text and "2.4GHz" in text
+
+
+def test_the_network_feed_reaches_an_employee_briefing(db_path, monkeypatch):
+    from assistant.core import staff
+    monkeypatch.setattr(omada_health, "ping_sweep", lambda targets: [])
+    scheduler.run_omada_health_tick(
+        db_path, FakeOmadaClient(devices=[{"mac": "AA", "name": "main AP", "status": 1, "type": "ap"}]),
+        lambda *a: None, "111")
+    out = staff.build_feed_briefing(db_path, "network")
+    assert "NETWORK (Omada controller + ping sweep)" in out and "main AP" in out

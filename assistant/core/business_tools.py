@@ -94,6 +94,18 @@ OPS_PLAN_TOOLS = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
     {"type": "function", "function": {
+        "name": "omada_radio_status",
+        "description": (
+            "Read-only: every Wi-Fi access point's configured radio settings (channel, "
+            "channel width, txPowerLevel/txPower) next to what each radio is ACTUALLY doing "
+            "(live channel, live dBm, airtime utilisation), plus the site's band-steering "
+            "mode. Read this before proposing an Omada change, and put the values you read "
+            "into the plan's rollback steps. Changes go through propose_ops_plan with "
+            "host \"omada\" -- see list_ssh_hosts for the step format."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
+    {"type": "function", "function": {
         "name": "list_ops_plans",
         "description": "Ops plans and their status -- proposed/awaiting approval, running, succeeded, or failed.",
         "parameters": {"type": "object", "properties": {
@@ -1475,6 +1487,15 @@ class BusinessClient:
         if name == "list_ssh_hosts":
             return {"hosts": self.ssh_ops.describe_hosts() if self.ssh_ops is not None else []}
 
+        if name == "omada_radio_status":
+            omada = getattr(self.ssh_ops, "omada", None)
+            if omada is None:
+                return {"ok": False, "error": "the Omada controller is not configured for ops plans"}
+            try:
+                return {"ok": True, **omada.status()}
+            except Exception as e:
+                return {"ok": False, "error": f"controller unreachable: {type(e).__name__}: {e}"}
+
         if name == "propose_ops_plan":
             steps = arguments.get("steps") or []
             if self.ssh_ops is not None:
@@ -1484,6 +1505,15 @@ class BusinessClient:
                     return {"ok": False, "error": (
                         f"unknown host(s) {', '.join(unknown)}; registered hosts: "
                         f"{', '.join(sorted(known)) or '(none configured)'}")}
+            # An `omada` step's command is a JSON action, checked now so a malformed one is
+            # refused at proposal time rather than failing after the owner approved it.
+            from . import omada_ops
+            for i, step in enumerate(steps):
+                if step.get("host") == omada_ops.OMADA_HOST:
+                    try:
+                        omada_ops.parse(step.get("command"))
+                    except omada_ops.OmadaActionError as e:
+                        return {"ok": False, "error": f"step {i} (omada): {e}"}
             try:
                 plan_id = ops_plans.create_plan(db_path, owner, arguments["summary"], steps)
             except ValueError as e:

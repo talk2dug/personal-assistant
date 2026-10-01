@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { EquityVsHold, LabSection } from './CryptoLab'
 
 // Trades happen on a 5-15 minute employee cadence, so sub-second push would be theater —
 // this just needs to feel current when the tab is open, same reasoning as the office's
@@ -238,6 +239,15 @@ export default function Crypto() {
         </p>
       )}
 
+      <section>
+        <h3>Performance vs just holding BTC</h3>
+        <div className="crypto-chart-grid">
+          <EquityVsHold title={`Main desk${data.run ? ` · run ${data.run.id} since ${new Date(data.run.started_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : ''}`}
+            points={data.curves?.desk} />
+          <EquityVsHold title="Bitcoin lab · BTC only, chart only" points={data.curves?.btc_lab} />
+        </div>
+      </section>
+
       {data.traders.length > 0 && (
         <section>
           <h3>Paper Book</h3>
@@ -251,6 +261,13 @@ export default function Crypto() {
           <div className="hud-panel">
             <TradeLog trades={data.trades} rejections={data.rejections} />
           </div>
+        </section>
+      )}
+
+      {data.lab && (
+        <section>
+          <h3>Bitcoin Lab</h3>
+          <LabSection lab={data.lab} />
         </section>
       )}
 

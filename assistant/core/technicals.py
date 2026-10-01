@@ -496,7 +496,7 @@ def briefing(db_path: str, codes: list[str], bucket: str = "15m",
 
 
 def desk_briefing(db_path: str, tracked: list[str], held: list[str],
-                  bucket: str = "15m", shortlist: int = 14) -> str:
+                  bucket: str = "15m", shortlist: int = 14, allow_short: bool = True) -> str:
     """Charts for everything held, plus a screened shortlist from the whole tracked set.
 
     Replaces a `held + top-few-1h-movers` focus list that quietly guaranteed no entries.
@@ -523,7 +523,11 @@ def desk_briefing(db_path: str, tracked: list[str], held: list[str],
                      "anything new:\n"
                      + briefing(db_path, held, bucket, readings))
 
-    picks = rank_setups(readings, exclude=set(held), order=tracked, limit=shortlist)
+    picks = rank_setups(readings, exclude=set(held), order=tracked,
+                        limit=shortlist if allow_short else shortlist * 3)
+    if not allow_short:
+        # Screening shorts the desk may not open would only invite refused orders.
+        picks = [p for p in picks if p["direction"] == "long"][:shortlist]
     if picks:
         longs = sum(1 for p in picks if p["direction"] == "long")
         shorts = len(picks) - longs

@@ -10,7 +10,7 @@ Owner-only, like finance: this is money (simulated, but the desk's judgement cal
 still not partner-facing) and it is read-only — trading happens on the employees' own
 schedule or from chat, never from this page.
 """
-from ...core import market_data, paper_trading, staff
+from ...core import btc_lab, desk_equity, market_data, paper_trading, staff
 from ..auth import require_owner
 from fastapi import APIRouter, Request
 
@@ -71,7 +71,32 @@ async def dashboard(request: Request, runs_limit: int = 8, trades_limit: int = 3
     except Exception:
         book = None
 
+    # The BTC lab: its own account and its trader, who holds the btc_lab feed rather than
+    # market, so it is not in the roster above -- see btc_lab.py.
+    lab = None
+    try:
+        acct = btc_lab.account(db_path)
+        if acct:
+            lab_staff = [p for p in staff.list_staff(db_path) if _has_feed(p, "btc_lab")]
+            with __import__("contextlib").closing(btc_lab._connect(db_path)) as conn:
+                lab_trades = [dict(r) for r in conn.execute(
+                    "SELECT * FROM btc_lab_trades ORDER BY id DESC LIMIT ?", (trades_limit,))]
+            lab = {"account": acct, "performance": btc_lab.performance(db_path),
+                   "trades": lab_trades,
+                   "trader": _employee_feed(db_path, lab_staff[0], runs_limit) if lab_staff else None}
+    except Exception:
+        lab = None
+
+    run = paper_trading.current_run(db_path)
+    curves = {
+        "desk": desk_equity.curve(db_path, desk_equity.DESK, since=run["started_at"] if run else None),
+        "btc_lab": desk_equity.curve(db_path, desk_equity.LAB),
+    }
+
     return {
+        "lab": lab,
+        "curves": curves,
+        "run": run,
         "feed_status": market_data.feed_status(db_path),
         "analysts": analysts,
         "traders": traders,

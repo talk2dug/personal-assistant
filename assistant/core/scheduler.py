@@ -923,6 +923,15 @@ def start(
             for fill in result.get("fills", []):
                 logger.info("paper trading: auto-closed %s %s @ %s (%s)",
                            fill["code"], fill.get("realized"), fill["price"], fill["reason"])
+            # The BTC lab's optional resting exits, on the same fresh price.
+            from . import btc_lab
+            lab_fill = btc_lab.check_levels(db_path)
+            if lab_fill:
+                logger.info("btc lab: %s sold %.8f @ %s (realized %s)", lab_fill["trigger"],
+                            lab_fill["qty"], lab_fill["price"], lab_fill.get("realized"))
+            # Equity curves for the Crypto modal's charts; throttled inside to one per 5 min.
+            from . import desk_equity
+            desk_equity.record(db_path)
 
         scheduler.add_job(
             _guarded_simple("paper_stop_loss", _check_stops_tick), "interval",
@@ -947,6 +956,27 @@ def start(
             _guarded_simple("market_supplemental", _market_supplemental_tick), "interval",
             seconds=market_supplemental_poll_seconds, id="market_supplemental",
             next_run_time=datetime.now(timezone.utc) + timedelta(seconds=20),
+        )
+
+        # The desk's long view (chart_history.py): 4h/daily/weekly candles from Kraken for
+        # the watchlist and whatever is held. Every 4 hours is enough -- the shortest
+        # candle stored is 4h, and the 15-minute view still comes from the live poll.
+        def _chart_history_tick():
+            from . import chart_history
+            codes = chart_history.watchlist(db_path)
+            try:
+                codes += [p["code"] for p in paper_trading.portfolio(db_path)["positions"]]
+            except Exception:
+                logger.exception("chart history: could not read held positions")
+            result = chart_history.refresh(db_path, list(dict.fromkeys(codes)))
+            if result["errors"] or result["missing"]:
+                logger.warning("chart history refresh: errors %s, not on Kraken %s",
+                               result["errors"], result["missing"])
+
+        scheduler.add_job(
+            _guarded_simple("chart_history", _chart_history_tick), "interval",
+            hours=4, id="chart_history",
+            next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
         )
 
     if ssh_hosts:
@@ -993,11 +1023,16 @@ def start(
 
         omada_health.init_omada_health_db(db_path)
         _omada_owner = next((u for u in db.all_users(db_path) if u["role"] == "owner"), None)
+        # Every LAN host Jarvis knows, so the snapshot's ping sweep covers wired and Wi-Fi
+        # machines alike, not just the Omada gear.
+        _omada_ping_targets = {name: h["host"] for name, h in (ssh_hosts or {}).items()
+                               if str(h.get("host", "")).startswith("192.168.")}
 
         scheduler.add_job(
             _guarded_simple("omada_health", lambda: run_omada_health_tick(
                 db_path, omada.mcp_client, notify,
-                _omada_owner["telegram_chat_id"] if _omada_owner is not None else None)),
+                _omada_owner["telegram_chat_id"] if _omada_owner is not None else None,
+                ping_targets=_omada_ping_targets)),
             "interval", seconds=omada_health_interval_seconds, id="omada_health",
             next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
         )
@@ -1249,7 +1284,8 @@ def run_host_health_tick(db_path: str, ssh_hosts: dict, notify, owner_chat_id,
     return outcomes
 
 
-def run_omada_health_tick(db_path: str, client, notify, owner_chat_id) -> list[dict]:
+def run_omada_health_tick(db_path: str, client, notify, owner_chat_id,
+                          ping_targets: dict | None = None) -> list[dict]:
     """One pass of the network-layer sibling of run_host_health_tick: polls the Omada
     controller for device and client state, records what changed, and notifies on a
     device transition or a brand-new client joining the network. No auto-fix (see
@@ -1262,9 +1298,6 @@ def run_omada_health_tick(db_path: str, client, notify, owner_chat_id) -> list[d
     """
     from . import omada_health
 
-    results = omada_health.check_devices(client)
-    changed = omada_health.record_device_check(db_path, results)
-    new_clients = omada_health.check_and_record_clients(db_path, client)
     outcomes = []
 
     def _say(topic: str, body: str, priority: str) -> bool:
@@ -1272,6 +1305,32 @@ def run_omada_health_tick(db_path: str, client, notify, owner_chat_id) -> list[d
         if verdict["say"] and owner_chat_id is not None:
             notify(owner_chat_id, verdict["body"])
         return verdict["say"]
+
+    # The controller first. Unreachable used to raise straight out of this tick into
+    # _guarded_simple's log line -- 2026-09-30 it was unplugged for ~9 hours and nobody
+    # was told. Now it is a state with its own transition notices, and the tick stops
+    # there: an unreachable controller is not "every device offline".
+    try:
+        results = omada_health.check_devices(client)
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"[:200]
+        if omada_health.record_controller(db_path, False, err) == "down":
+            told = _say("omada_controller",
+                        "The Omada network controller isn't answering. Wi-Fi keeps running on "
+                        "its last settings, but network monitoring and changes are blind until "
+                        "it's back -- check its power and cable.", "high")
+            outcomes.append({"name": "omada controller", "transition": "down", "told": told})
+        return outcomes
+    if omada_health.record_controller(db_path, True) == "recovered":
+        told = _say("omada_controller", "The Omada network controller is answering again.", "notice")
+        outcomes.append({"name": "omada controller", "transition": "recovered", "told": told})
+
+    changed = omada_health.record_device_check(db_path, results)
+    new_clients = omada_health.check_and_record_clients(db_path, client)
+    try:
+        omada_health.store_snapshot(db_path, omada_health.take_snapshot(client, ping_targets))
+    except Exception:
+        logger.exception("network snapshot failed")
 
     for entry in changed:
         name = entry["name"]

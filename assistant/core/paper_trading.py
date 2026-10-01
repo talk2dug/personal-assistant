@@ -82,6 +82,20 @@ STOP_LOSS_COOLDOWN_HOURS = 2.0
 # chooses what to buy, when, and how much -- it just cannot snatch a winner back.
 MIN_REWARD_RISK = 2.0
 
+# Opening NEW shorts. Off since 2026-09-30: 41 closed shorts at a 29% win rate with the
+# average win ($1.50) smaller than the average loss ($1.64) -- -$29.45, the whole of the
+# book's realized loss -- over 25 days in which BTC rose 4.9% and SOL 14.6%. The desk was
+# shorting a rising market from a 15-minute chart it could not see past. Covering or
+# trailing a short already held still works, so nothing open is stranded. Turn back on only
+# once the desk can see the daily/weekly trend and shorts are limited to a downtrend.
+SHORTS_ENABLED = False
+
+# New positions only on the desk's watchlist (chart_history.desk_watchlist), the coins it
+# has a long-range chart for. It used to screen ~270 coins on fifteen hours of 15-minute
+# candles each; this trades ten it can actually read. A position already held off-list is
+# still managed and closed normally.
+WATCHLIST_ONLY = True
+
 # A thesis that has not worked in two days is not going to be rescued by a third day of
 # the model looking at it. This also bounds how long capital can sit in a position that
 # is drifting sideways, neither stopping out nor reaching its target.
@@ -196,6 +210,36 @@ CREATE TABLE IF NOT EXISTS paper_rejections (
 CREATE INDEX IF NOT EXISTS idx_paper_rej_acct ON paper_rejections(account_id, id DESC);
 """
 
+SHORT_SECTION = """YOU CAN ALSO GO SHORT -- profit when a coin falls, not just when it rises. Open one with
+`short` instead of `buy`; everything else about how a position leaves is the mirror image
+of a long, not a different set of rules:
+
+  {{"side": "short", "code": "DOGE", "usd": 70, "stop_loss": 0.24, "take_profit": 0.19, "reason": "why, in one line"}}
+
+A short's stop sits ABOVE your entry (price rising against you) and its target sits BELOW
+it (price falling your way) -- the exact opposite of a long's. Close one with `cover`, not
+`sell` -- no cash moves at all when a short opens, not even the fee (this ledger has no
+margin or collateral modeling; think of it as a notional bet, not literally borrowed
+coins), and covering is what turns the price move -- and the fee -- into real, realized
+P&L, all at once. The one thing you can still do to a working short is trail
+its stop DOWN, never up, with `lower_stop` -- the exact mirror of `raise_stop`, same fee-
+free treatment, same {min_trail:g}x-the-original-risk floor on how close it may trail:
+
+  {{"side": "lower_stop", "code": "DOGE", "stop_loss": 0.205, "reason": "why, in one line"}}
+
+A coin can be long or short, never both at once in this book -- close the one you have
+before taking the other side. Everything below (slot sizing, the reward:risk floor, the
+re-entry cooldown, the maximum hold) applies to both directions equally; where a rule
+differs by direction it says so.
+"""
+
+SHORTS_PAUSED_SECTION = """SHORTING IS SWITCHED OFF. Over 41 closed shorts it won 29% of the time and lost
+more per loss than it made per win, in a market that was rising. A `short` order is refused.
+If you still hold a short, manage it as before -- `cover` closes it and `lower_stop` trails
+its stop down -- but do not plan around opening new ones. Everything below that mentions
+shorts applies only to one you already hold.
+"""
+
 ORDER_INSTRUCTIONS = """
 
 --- PLACING PAPER TRADES ---
@@ -238,28 +282,7 @@ limits: a stop only ever moves up, and a raised stop must stay at least
 {min_trail:g}x the original risk (entry minus your first stop) below the current price.
 Raising it to just under spot is not a trail, it is selling at market, and it is refused.
 
-YOU CAN ALSO GO SHORT -- profit when a coin falls, not just when it rises. Open one with
-`short` instead of `buy`; everything else about how a position leaves is the mirror image
-of a long, not a different set of rules:
-
-  {{"side": "short", "code": "DOGE", "usd": 70, "stop_loss": 0.24, "take_profit": 0.19, "reason": "why, in one line"}}
-
-A short's stop sits ABOVE your entry (price rising against you) and its target sits BELOW
-it (price falling your way) -- the exact opposite of a long's. Close one with `cover`, not
-`sell` -- no cash moves at all when a short opens, not even the fee (this ledger has no
-margin or collateral modeling; think of it as a notional bet, not literally borrowed
-coins), and covering is what turns the price move -- and the fee -- into real, realized
-P&L, all at once. The one thing you can still do to a working short is trail
-its stop DOWN, never up, with `lower_stop` -- the exact mirror of `raise_stop`, same fee-
-free treatment, same {min_trail:g}x-the-original-risk floor on how close it may trail:
-
-  {{"side": "lower_stop", "code": "DOGE", "stop_loss": 0.205, "reason": "why, in one line"}}
-
-A coin can be long or short, never both at once in this book -- close the one you have
-before taking the other side. Everything below (slot sizing, the reward:risk floor, the
-re-entry cooldown, the maximum hold) applies to both directions equally; where a rule
-differs by direction it says so.
-
+{short_section}
 Shorting is NOT the same bet as a long pointed the other way, whatever the mirrored rules
 above suggest. A market drifts up more often than it drifts down, so a bounce you are
 shorting is fighting the tape in a way a pullback you are buying is not, and a short's
@@ -309,14 +332,15 @@ Rules enforced in code, not by you:
     that failed thesis needs to cool off, not get re-entered on the next momentum call. A
     stop on the long side does not block a short on the same coin, or the reverse -- that
     is a reversal call, not the whipsaw this cools off.
-  * A whole DIRECTION cools off the same way: once {min_direction_trades} or more closed
-    round-trips on one side (long or short) in the current-performance window show negative
-    expectancy, every NEW open on that side is refused -- not just the one coin, the whole
-    direction -- until the losing sample ages out of the window on its own. This does not
-    lift early for a winner; there is no order that reopens it sooner. If your shorts (or
-    longs) are being refused with "circuit-broken" as the reason, that is why -- say so
-    plainly rather than guessing at a different cause, and manage what is already open
-    instead of trying another entry on that side.
+  * A whole DIRECTION goes on PROBATION the same way: once {min_direction_trades} or more
+    closed round-trips on one side (long or short) in the current-performance window show
+    negative expectancy, new opens on that side become small PROBES -- automatically sized
+    down to a quarter of a normal slot, with at most {probe_max_open} open on that side at
+    once. Keep proposing your best setups on that side as normal; the sizing is handled for
+    you. The side reopens at full size only once {probe_min_trades} probes have closed at a
+    non-negative expectancy -- one lucky winner does not do it. If an entry is refused with
+    "on probation" as the reason, the probe slots are full: say so plainly and manage what
+    is open.
   * Churn costs {fee_pct}% per side. That is an argument against trading the same coin
     repeatedly, not against holding several different ones.
 
@@ -342,6 +366,16 @@ CURRENT_PERFORMANCE_WINDOW_DAYS = 7
 # error on the combined win rate.
 MIN_TRADES_FOR_DIRECTION_LINE = 5
 
+# Probation (Jack, 2026-09-28): a tripped direction used to refuse EVERY new open until the
+# losing sample aged out of the window -- ~3 days for longs, ~6 for shorts the first time it
+# tripped -- and a desk that cannot trade cannot learn whether the regime changed. While
+# tripped it may now hold a few small PROBE positions, and it reopens at full size only once
+# those probes, judged on their own, show a non-negative expectancy over a real sample. One
+# lucky probe cannot wave it off: PROBE_MIN_TRADES of them must close first.
+PROBE_SIZE_FRACTION = 0.25    # of the normal per-order cap
+PROBE_MAX_OPEN = 2            # per direction, at once
+PROBE_MIN_TRADES = 10         # closed probes needed before they can reopen the direction
+
 
 def _current_performance_line(db_path: str | None, name: str = "crypto") -> str:
     """The 42.4%/+$61.83/etc figures above are dated history -- true the day they were
@@ -361,8 +395,19 @@ def _current_performance_line(db_path: str | None, name: str = "crypto") -> str:
         return ("CURRENT MEASURED PERFORMANCE: not available for this render -- treat the "
                 "history above as context, not your current odds.")
     stats = expectancy(db_path, name, days=CURRENT_PERFORMANCE_WINDOW_DAYS)
+    bench = benchmark(db_path, name)
+    bench_line = ""
+    if bench:
+        verdict = "ahead of" if bench["ahead_of_btc"] >= 0 else "BEHIND"
+        bench_line = (
+            f"\nTHE BAR THIS RUN IS JUDGED AGAINST: since {bench['started_at'][:10]} the book is "
+            f"{bench['desk_return_pct']:+.2f}% while simply holding BTC would be "
+            f"{bench['btc_return_pct']:+.2f}% -- ${abs(bench['ahead_of_btc']):.2f} {verdict} "
+            f"doing nothing. Trading only earns its keep if it beats that; a trade you are not "
+            f"confident beats sitting still is a trade not to place.")
     if not stats["closed_trades"]:
-        return "CURRENT MEASURED PERFORMANCE: no closed round-trips yet -- nothing to measure."
+        return ("CURRENT MEASURED PERFORMANCE: no closed round-trips yet -- nothing to measure."
+                + bench_line)
     rr = f"{stats['reward_risk_realized']:.1f}x" if stats["reward_risk_realized"] else "n/a"
     line = (
         f"CURRENT MEASURED PERFORMANCE, last {CURRENT_PERFORMANCE_WINDOW_DAYS:g} days: over "
@@ -393,7 +438,7 @@ def _current_performance_line(db_path: str | None, name: str = "crypto") -> str:
             f"with no breathing room gets found by ordinary noise before the thesis is even "
             f"wrong."
         )
-    return line
+    return line + bench_line
 
 
 def render_order_instructions(db_path: str | None = None) -> str:
@@ -418,7 +463,10 @@ def render_order_instructions(db_path: str | None = None) -> str:
         min_trail=MIN_TRAIL_RISK_FRACTION,
         max_hold_hours=MAX_HOLD_HOURS,
         min_direction_trades=MIN_TRADES_FOR_DIRECTION_LINE,
-        current_performance=_current_performance_line(db_path))
+        probe_max_open=PROBE_MAX_OPEN, probe_min_trades=PROBE_MIN_TRADES,
+        current_performance=_current_performance_line(db_path),
+        short_section=(SHORT_SECTION.format(min_trail=MIN_TRAIL_RISK_FRACTION)
+                       if SHORTS_ENABLED else SHORTS_PAUSED_SECTION))
 
 
 def init_paper_db(db_path: str) -> None:
@@ -455,7 +503,11 @@ def init_paper_db(db_path: str) -> None:
             # correct backfill, not a guess.
             conn.execute("ALTER TABLE paper_positions ADD COLUMN direction TEXT NOT NULL "
                          "DEFAULT 'long'")
+        if "probe" not in pos_cols:
+            conn.execute("ALTER TABLE paper_positions ADD COLUMN probe INTEGER NOT NULL DEFAULT 0")
         trade_cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trades)")}
+        if "probe" not in trade_cols:
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN probe INTEGER NOT NULL DEFAULT 0")
         if "exit_kind" not in trade_cols:
             conn.execute("ALTER TABLE paper_trades ADD COLUMN exit_kind TEXT")
         if "direction" not in trade_cols:
@@ -952,6 +1004,17 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
 
             if side in ("buy", "short"):
                 direction = "short" if side == "short" else "long"
+                if WATCHLIST_ONLY and (pos is None or pos["qty"] <= 0):
+                    from . import chart_history
+                    listed = chart_history.watchlist(db_path)
+                    if code not in listed:
+                        reject(order, f"{code} is not on the desk's watchlist; new positions only "
+                                      f"on: {', '.join(listed)}")
+                        continue
+                if direction == "short" and not SHORTS_ENABLED and (pos is None or pos["qty"] <= 0):
+                    reject(order, "shorting is switched off for this desk (see SHORTS_ENABLED); "
+                                  "only longs may be opened")
+                    continue
                 # Circuit breaker: a direction with a proven, measured negative edge over a
                 # large-enough recent sample stops opening NEW positions until it earns the
                 # right back. The SHORTS SPECIFICALLY line in _current_performance_line below
@@ -970,23 +1033,25 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 # re-evaluates empty, below MIN_TRADES_FOR_DIRECTION_LINE, and opens again. It
                 # only blocks opening a brand-new position; managing or closing one already
                 # held is unaffected.
+                is_probe = False
                 if pos is None or pos["qty"] <= 0:
-                    dir_stats = expectancy(
-                        db_path, name, days=CURRENT_PERFORMANCE_WINDOW_DAYS, direction=direction)
-                    if (dir_stats["closed_trades"] >= MIN_TRADES_FOR_DIRECTION_LINE
-                            and dir_stats["expectancy_per_trade"] is not None
-                            and dir_stats["expectancy_per_trade"] < 0):
-                        reject(order, (
-                            f"{direction} entries are circuit-broken right now: over the last "
-                            f"{dir_stats['closed_trades']} closed {direction} round-trips in "
-                            f"the last {CURRENT_PERFORMANCE_WINDOW_DAYS:g} days, expectancy is "
-                            f"${dir_stats['expectancy_per_trade']:.3f}/trade at "
-                            f"{dir_stats['win_rate_pct']:g}% win rate -- a real, measured "
-                            f"negative edge, not noise. No new {direction} opens until this "
-                            f"window's expectancy turns non-negative again; managing existing "
-                            f"positions is unaffected."
-                        ))
-                        continue
+                    gate = breaker_state(db_path, name, direction)
+                    if gate["probation"]:
+                        st, pb = gate["stats"], gate["probe_stats"]
+                        if gate["open_probes"] >= PROBE_MAX_OPEN:
+                            reject(order, (
+                                f"{direction} entries are on probation: over the last "
+                                f"{st['closed_trades']} closed {direction} round-trips in the last "
+                                f"{CURRENT_PERFORMANCE_WINDOW_DAYS:g} days, expectancy is "
+                                f"${st['expectancy_per_trade']:.3f}/trade at {st['win_rate_pct']:g}% "
+                                f"win rate. Only {PROBE_MAX_OPEN} small probe positions may be open "
+                                f"on that side at once, and {gate['open_probes']} already are -- "
+                                f"let them resolve. Probes so far: {pb['closed_trades']} closed"
+                                + (f", ${pb['expectancy_per_trade']:.3f}/trade" if pb['closed_trades'] else "")
+                                + f"; {PROBE_MIN_TRADES} closed at non-negative expectancy reopens "
+                                f"full size."))
+                            continue
+                        is_probe = True
                 # Scoped to (code, direction): a stop-out on the long side and then a
                 # short on the same coin is a reversal thesis, not the whipsaw this cools
                 # off -- see the migration note on paper_trades.direction above.
@@ -1015,7 +1080,16 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                     reject(order, "buy amount must be positive")
                     continue
                 cap = equity * MAX_ORDER_PCT_OF_EQUITY / 100
-                if usd > cap:
+                if is_probe:
+                    # Sized down rather than refused: the probe is the point, the size is ours.
+                    probe_cap = cap * PROBE_SIZE_FRACTION
+                    if usd > probe_cap:
+                        reason = (reason + f" [probe: sized down from ${usd:,.2f} to "
+                                  f"${probe_cap:,.2f} while {direction}s are on probation]")[:300]
+                        usd = probe_cap
+                # Half a cent of slack: "$155.00 exceeds the cap of $155.00" was a real
+                # refusal, a float a hair over the cap it was sized to.
+                if usd > cap + 0.005:
                     reject(order, f"${usd:,.2f} exceeds the {MAX_ORDER_PCT_OF_EQUITY}% "
                                   f"per-order cap of ${cap:,.2f} -- the book is meant to "
                                   f"run about {TARGET_CONCURRENT_POSITIONS} names at once, "
@@ -1178,7 +1252,9 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                     risk, reward = stop_loss - price, price - take_profit
                 else:
                     risk, reward = price - stop_loss, take_profit - price
-                if reward < risk * MIN_REWARD_RISK:
+                # Relative slack for float noise: exactly 2.00x was being refused as
+                # "only 2.00x" (7 times in three days) when the levels were set to the rule.
+                if reward < risk * MIN_REWARD_RISK * (1 - 1e-9):
                     reject(order, f"target is only {reward / risk:.2f}x the risk "
                                   f"(${reward:,.6g} up vs ${risk:,.6g} down); "
                                   f"{MIN_REWARD_RISK:g}x is the minimum -- either move the "
@@ -1221,8 +1297,8 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 conn.execute(
                     """INSERT INTO paper_positions (account_id, code, qty, avg_cost,
                                                      stop_loss, take_profit, initial_stop_loss,
-                                                     opened_at, updated_at, direction)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)
+                                                     opened_at, updated_at, direction, probe)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(account_id, code) DO UPDATE SET
                            qty = excluded.qty, avg_cost = excluded.avg_cost,
                            stop_loss = excluded.stop_loss, take_profit = excluded.take_profit,
@@ -1231,16 +1307,19 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                            updated_at = excluded.updated_at,
                            direction = excluded.direction""",
                     (acct["id"], code, new_qty, new_cost, stop_loss, take_profit, initial_stop,
-                     opened_at, now, direction))
+                     opened_at, now, direction,
+                     int(is_probe) if pos is None or pos["qty"] <= 0
+                     else int(pos["probe"]) if "probe" in pos.keys() else 0))
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
-                                                 quote_age_sec, at, direction)
-                       VALUES (?,?,'buy',?,?,?,?,NULL,?,?,?,?,?,?)""",
+                                                 quote_age_sec, at, direction, probe)
+                       VALUES (?,?,'buy',?,?,?,?,NULL,?,?,?,?,?,?,?)""",
                     (acct["id"], code, qty, price, fee, usd, cash, reason, staff_key, age, now,
-                     direction))
+                     direction, int(is_probe)))
                 fills.append({"side": side, "code": code, "qty": qty, "price": price,
-                              "usd": round(usd, 2), "fee": round(fee, 2), "reason": reason})
+                              "usd": round(usd, 2), "fee": round(fee, 2), "reason": reason,
+                              "probe": is_probe})
 
             else:
                 # side is "sell" or "cover" here (the gate above admits nothing else to
@@ -1310,10 +1389,11 @@ def execute_orders(db_path: str, orders: list[dict], name: str = "crypto",
                 conn.execute(
                     """INSERT INTO paper_trades (account_id, code, side, qty, price, fee, gross,
                                                  realized, cash_after, reason, staff_key,
-                                                 quote_age_sec, exit_kind, at, direction)
-                       VALUES (?,?,'sell',?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                                 quote_age_sec, exit_kind, at, direction, probe)
+                       VALUES (?,?,'sell',?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (acct["id"], code, qty, price, fee, gross, realized, cash, reason,
-                     staff_key, age, exit_kind, now, held_dir))
+                     staff_key, age, exit_kind, now, held_dir,
+                     int(pos["probe"]) if "probe" in pos.keys() else 0))
                 fills.append({"side": side, "code": code, "qty": qty, "price": price,
                               "usd": round(gross, 2), "fee": round(fee, 2),
                               "realized": round(realized, 2), "reason": reason})
@@ -1481,8 +1561,34 @@ def performance(db_path: str, name: str = "crypto") -> dict:
     return snap
 
 
+def breaker_state(db_path: str, name: str = "crypto", direction: str = "long") -> dict:
+    """Whether new opens in a direction are gated, and on what terms.
+
+    tripped: the window's full record is negative over a real sample.
+    reopened: tripped, but the probes taken during probation have themselves shown a
+        non-negative expectancy over PROBE_MIN_TRADES closes -- the regime is judged to have
+        changed, and full-size opens resume.
+    The caller treats tripped-and-not-reopened as probation: probe-sized opens only.
+    """
+    days = CURRENT_PERFORMANCE_WINDOW_DAYS
+    stats = expectancy(db_path, name, days=days, direction=direction)
+    probes = expectancy(db_path, name, days=days, direction=direction, probe=True)
+    tripped = (stats["closed_trades"] >= MIN_TRADES_FOR_DIRECTION_LINE
+               and stats["expectancy_per_trade"] is not None and stats["expectancy_per_trade"] < 0)
+    reopened = (tripped and probes["closed_trades"] >= PROBE_MIN_TRADES
+                and probes["expectancy_per_trade"] is not None and probes["expectancy_per_trade"] >= 0)
+    acct = ensure_account(db_path, name)
+    with closing(_connect(db_path)) as conn:
+        open_probes = conn.execute(
+            "SELECT COUNT(*) FROM paper_positions WHERE account_id = ? AND direction = ? "
+            "AND probe = 1 AND qty > 0", (acct["id"], direction)).fetchone()[0]
+    return {"direction": direction, "tripped": tripped, "reopened": reopened,
+            "probation": tripped and not reopened, "stats": stats, "probe_stats": probes,
+            "open_probes": open_probes}
+
+
 def expectancy(db_path: str, name: str = "crypto", days: int | None = None,
-               direction: str | None = None) -> dict:
+               direction: str | None = None, probe: bool | None = None) -> dict:
     """Win rate, average win/loss, and per-trade expectancy from actual closed round-trips
     -- the number every claim about the desk's edge should be checked against instead of
     trusted from memory.
@@ -1517,6 +1623,9 @@ def expectancy(db_path: str, name: str = "crypto", days: int | None = None,
     if days:
         query += " AND at >= ?"
         params.append((datetime.now(timezone.utc) - timedelta(days=days)).isoformat())
+    if probe is not None:
+        query += " AND probe = ?"
+        params.append(int(probe))
     with closing(_connect(db_path)) as conn:
         rows = [dict(r) for r in conn.execute(query, params)]
 
@@ -1588,3 +1697,107 @@ def reset(db_path: str, name: str = "crypto",
                      "updated_at = ? WHERE id = ?", (starting_cash, starting_cash, now, acct["id"]))
         conn.commit()
     return portfolio(db_path, name)
+
+
+# --- runs: archive a finished attempt, start a fresh one, and benchmark it ------------
+#
+# reset() above wipes the book. That was fine for a test account; it is not fine for 25
+# days of real paper history that explain why the rules are what they are. A "run" is one
+# attempt at the desk: when it ends, every row is copied into *_archive tables under its
+# run id before the book is cleared, and the new run records BTC's price at its start so
+# it can be judged against simply holding BTC -- the bar a trading desk has to clear to
+# be worth running at all. (Run 1, 2026-09-05..09-30: -2.3% while BTC rose 4.9%.)
+
+_RUN_TABLES = ("paper_trades", "paper_rejections", "paper_stop_raises", "paper_positions")
+
+
+def _init_runs(conn) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS paper_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL,
+        started_at TEXT NOT NULL,
+        starting_cash REAL NOT NULL,
+        btc_start_price REAL,
+        ended_at TEXT,
+        end_equity REAL,
+        btc_end_price REAL,
+        note TEXT)""")
+    for table in _RUN_TABLES:
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {table}_archive AS "
+                     f"SELECT 0 AS run_id, {', '.join(cols)} FROM {table} WHERE 0")
+        archived = {r[1] for r in conn.execute(f"PRAGMA table_info({table}_archive)")}
+        for col in cols:  # a column added to the live table since the archive was made
+            if col not in archived:
+                conn.execute(f"ALTER TABLE {table}_archive ADD COLUMN {col}")
+
+
+def _btc_price(conn) -> float | None:
+    row = conn.execute("SELECT rate FROM market_coins WHERE code = 'BTC'").fetchone()
+    return float(row[0]) if row and row[0] else None
+
+
+def current_run(db_path: str, name: str = "crypto") -> dict | None:
+    acct = ensure_account(db_path, name)
+    with closing(_connect(db_path)) as conn:
+        _init_runs(conn)
+        row = conn.execute("SELECT * FROM paper_runs WHERE account_id = ? AND ended_at IS NULL "
+                           "ORDER BY id DESC LIMIT 1", (acct["id"],)).fetchone()
+    return dict(row) if row else None
+
+
+def archive_and_reset(db_path: str, name: str = "crypto", starting_cash: float | None = None,
+                      note: str = "") -> dict:
+    """End the current run (archiving everything in it) and start a fresh one.
+
+    Destructive to the live book but not to history. Never called automatically."""
+    acct = ensure_account(db_path, name)
+    before = portfolio(db_path, name)
+    now = _now()
+    cash = starting_cash if starting_cash is not None else acct["starting_cash"]
+    with closing(_connect(db_path)) as conn:
+        _init_runs(conn)
+        btc = _btc_price(conn)
+        run = conn.execute("SELECT * FROM paper_runs WHERE account_id = ? AND ended_at IS NULL "
+                           "ORDER BY id DESC LIMIT 1", (acct["id"],)).fetchone()
+        if run is None:  # the run that predates run tracking
+            run_id = conn.execute(
+                "INSERT INTO paper_runs (account_id, started_at, starting_cash, note) "
+                "VALUES (?,?,?,?)", (acct["id"], acct["created_at"], acct["starting_cash"],
+                                     "before run tracking")).lastrowid
+        else:
+            run_id = run["id"]
+        for table in _RUN_TABLES:
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            conn.execute(f"INSERT INTO {table}_archive (run_id, {', '.join(cols)}) "
+                         f"SELECT ?, {', '.join(cols)} FROM {table} WHERE account_id = ?",
+                         (run_id, acct["id"]))
+            conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (acct["id"],))
+        conn.execute("UPDATE paper_runs SET ended_at = ?, end_equity = ?, btc_end_price = ? "
+                     "WHERE id = ?", (now, before["equity"], btc, run_id))
+        conn.execute("UPDATE paper_accounts SET cash = ?, starting_cash = ?, realized_pnl = 0, "
+                     "updated_at = ? WHERE id = ?", (cash, cash, now, acct["id"]))
+        new_id = conn.execute(
+            "INSERT INTO paper_runs (account_id, started_at, starting_cash, btc_start_price, note) "
+            "VALUES (?,?,?,?,?)", (acct["id"], now, cash, btc, note)).lastrowid
+        conn.commit()
+    return {"archived_run": run_id, "archived_equity": before["equity"],
+            "new_run": new_id, "starting_cash": cash, "btc_start_price": btc}
+
+
+def benchmark(db_path: str, name: str = "crypto") -> dict | None:
+    """This run's equity against putting the same starting cash into BTC on day one."""
+    run = current_run(db_path, name)
+    if not run or not run.get("btc_start_price"):
+        return None
+    with closing(_connect(db_path)) as conn:
+        btc_now = _btc_price(conn)
+    if not btc_now:
+        return None
+    equity = portfolio(db_path, name)["equity"]
+    hold = run["starting_cash"] * btc_now / run["btc_start_price"]
+    return {"run_id": run["id"], "started_at": run["started_at"],
+            "equity": round(equity, 2), "btc_hold_equity": round(hold, 2),
+            "desk_return_pct": round((equity / run["starting_cash"] - 1) * 100, 2),
+            "btc_return_pct": round((btc_now / run["btc_start_price"] - 1) * 100, 2),
+            "ahead_of_btc": round(equity - hold, 2)}

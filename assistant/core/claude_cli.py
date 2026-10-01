@@ -275,6 +275,7 @@ class ClaudeCLIClient:
     def research(
         self, instructions: str, system_prompt: str | None = None, timeout: int | None = None,
         tools: list[dict] | None = None, employee_key: str | None = None,
+        web_search: bool = True,
     ) -> str:
         """One-shot research task with web search, for the background agents and every
         non-execute-tier employee.
@@ -296,12 +297,15 @@ class ClaudeCLIClient:
             command = self._base_command()
             command += ["--system-prompt-file", self._write_system_prompt(
                 workdir, system_prompt or "You are a research assistant. Be accurate and concise.")]
-            allowed = "mcp__jarvis,WebSearch" if tools else "WebSearch"
+            # web_search=False is for an employee whose inputs are meant to be ONLY its
+            # briefing -- the BTC lab, which is told "the candles are the whole game".
+            allowed = ",".join(p for p in ("mcp__jarvis" if tools else "",
+                                           "WebSearch" if web_search else "") if p)
             if tools:
                 self._setup_tool_bridge(workdir, tools, env, command, employee_key=employee_key)
-            command += [
-                "--allowed-tools", allowed,
-                "--disallowed-tools", ",".join(t for t in DENIED_TOOLS if t != "WebSearch"),
+            denied = [t for t in DENIED_TOOLS if t != "WebSearch"] + ([] if web_search else ["WebSearch", "WebFetch"])
+            command += (["--allowed-tools", allowed] if allowed else []) + [
+                "--disallowed-tools", ",".join(dict.fromkeys(denied)),
             ]
             previous_timeout = self.timeout
             try:

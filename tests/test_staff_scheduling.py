@@ -99,12 +99,23 @@ class TestFeedBriefingContent:
         conn.close()
         return db
 
-    def test_market_briefing_lists_every_tradeable_code(self, market_db):
+    def test_market_briefing_lists_every_tradeable_code(self, market_db, monkeypatch):
+        from assistant.core import paper_trading
+        monkeypatch.setattr(paper_trading, "WATCHLIST_ONLY", False)
         out = staff.build_feed_briefing(market_db, "market")
         assert "TRADEABLE ON THIS FEED" in out
         assert "BTC" in out and "SOL" in out
 
-    def test_market_briefing_includes_kraken_sourced_gap_coins_as_tradeable(self, market_db):
+    def test_watchlist_mode_lists_only_the_watchlist_and_the_long_view(self, market_db, monkeypatch):
+        from assistant.core import chart_history, paper_trading
+        monkeypatch.setattr(paper_trading, "WATCHLIST_ONLY", True)
+        monkeypatch.setattr(chart_history, "watchlist", lambda db_path: ["SOL"])
+        out = staff.build_feed_briefing(market_db, "market")
+        assert "YOUR WATCHLIST (1 coins)" in out
+        assert "TRADEABLE ON THIS FEED" not in out
+        assert "THE LONG VIEW" in out
+
+    def test_market_briefing_includes_kraken_sourced_gap_coins_as_tradeable(self, market_db, monkeypatch):
         """TAO/WLD/AERO/etc. used to be called out as a permanent "KNOWN GAPS" watch-only
         carve-out in this briefing. Now that a supplemental Kraken poll prices them
         (source='kraken'), they must appear in the ordinary tradeable list like any other
@@ -119,6 +130,8 @@ class TestFeedBriefingContent:
                VALUES ('TAO','TAO',237.5,1,'kraken',?,?,?)""", (now, now, now))
         conn.commit()
         conn.close()
+        from assistant.core import paper_trading
+        monkeypatch.setattr(paper_trading, "WATCHLIST_ONLY", False)
         out = staff.build_feed_briefing(market_db, "market")
         assert "TAO" in out
         assert "KNOWN GAPS" not in out

@@ -79,7 +79,8 @@ def role_for(employee: dict) -> str:
     analyst only reports -- and that distinction sets what gets recorded, how often, and
     where it lands.
     """
-    if "paper" in (employee.get("data_feeds") or ""):
+    feeds = employee.get("data_feeds") or ""
+    if "paper" in feeds or "btc_lab" in feeds:
         return "trader"
     if (employee.get("department") or "") == "engineering":
         return "engineer"

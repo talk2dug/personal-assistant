@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import Media from './Media'
+import MovePlan from './MovePlan'
 import './inventory.css'
 
 // Category colours carry meaning across the whole page: a folder's chip, a drive's bar and
@@ -460,11 +461,13 @@ export default function Inventory() {
         <h2>Media &amp; drives</h2>
         <div className="inv-tabs" role="tablist">
           <button type="button" role="tab" aria-selected={tab === 'inventory'} onClick={() => setTab('inventory')}>Drive inventory</button>
+          <button type="button" role="tab" aria-selected={tab === 'plan'} onClick={() => setTab('plan')}>Move plan</button>
           <button type="button" role="tab" aria-selected={tab === 'import'} onClick={() => setTab('import')}>Old import queue</button>
         </div>
       </div>
 
       {tab === 'import' && <Media />}
+      {tab === 'plan' && <MovePlan />}
 
       {tab === 'inventory' && (
         <>

@@ -9,6 +9,7 @@ Owner-only: this is a list of every file on every machine in the house.
 from fastapi import APIRouter, HTTPException, Request
 
 from ...core import drive_inventory as inv
+from ...core import storage_plan
 from ..auth import require_owner
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
@@ -51,3 +52,37 @@ async def tag(request: Request, dir_id: int):
         raise HTTPException(400, str(e))
     except LookupError:
         raise HTTPException(404, "no such folder")
+
+
+# ------------------------------------------------------------------ move plan
+# The consolidation plan (core/storage_plan.py): proposals only. Approving a group here
+# marks it for the mover; nothing on any drive changes from these endpoints.
+
+@router.get("/plan")
+async def plan(request: Request):
+    return storage_plan.summary(_db(request))
+
+
+@router.post("/plan/rebuild")
+async def plan_rebuild(request: Request):
+    """Recompute from the current inventory, keeping approvals and exclusions."""
+    db = _db(request)
+    return storage_plan.build(db, protected=storage_plan.default_protected(request.app.state.cfg.db_path))
+
+
+@router.get("/plan/units")
+async def plan_units(request: Request, section: str, bucket: str, source_volume_id: int):
+    return {"units": storage_plan.units(_db(request), section, bucket, source_volume_id)}
+
+
+@router.post("/plan/status")
+async def plan_status(request: Request):
+    """{"status": "approved"|"excluded"|"proposed", "ids": [...]} or {..., "group":
+    {"section", "bucket", "source_volume_id"}}."""
+    db = _db(request)
+    body = await request.json() or {}
+    try:
+        n = storage_plan.set_status(db, body.get("status"), ids=body.get("ids"), group=body.get("group"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "changed": n}

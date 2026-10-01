@@ -51,3 +51,6 @@ inventory.db-wal
 inventory.db-shm
 # Hand-made config.json backups hold every credential -- never commit
 config.json.bak*
+
+# runtime lock for scripts/storage_mover.py
+storage_mover.lock

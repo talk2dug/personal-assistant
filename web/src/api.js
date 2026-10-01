@@ -315,6 +315,12 @@ export const api = {
   inventoryOverview: () => request('/api/inventory/overview'),
   inventoryFolder: (id) => request(`/api/inventory/folders/${id}`),
   inventorySearch: (q) => request(`/api/inventory/search?q=${encodeURIComponent(q)}`),
+  inventoryPlan: () => request('/api/inventory/plan'),
+  inventoryPlanRebuild: () => request('/api/inventory/plan/rebuild', { method: 'POST' }),
+  inventoryPlanUnits: (g) => request(`/api/inventory/plan/units?section=${encodeURIComponent(g.section)}` +
+    `&bucket=${encodeURIComponent(g.bucket)}&source_volume_id=${g.source_volume_id}`),
+  inventoryPlanStatus: (status, target) =>
+    request('/api/inventory/plan/status', { method: 'POST', body: JSON.stringify({ status, ...target }) }),
   inventoryTag: (id, category) =>
     request(`/api/inventory/folders/${id}/tag`, { method: 'POST', body: JSON.stringify({ category }) }),
   mediaSummary: () => request('/api/media/summary'),

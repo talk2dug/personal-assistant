@@ -176,3 +176,28 @@ def test_reclassify_reproduces_scan_time_suggestions_and_keeps_tags(db_path):
     after = dirs_by_path(db_path, vol)
     assert {p: r["suggested"] for p, r in after.items()} == before
     assert after["misc"]["category"] == "side_hustle"
+
+
+def test_only_files_sharing_a_size_are_hash_candidates_and_hashes_find_true_duplicates(db_path):
+    big = 5 << 20
+    a = scan(db_path, [f("Art/logo.svg", big), f("Art/unique.png", big + 1), f("tiny.txt", 10)], uid="A")
+    b = scan(db_path, [f("Backup/logo copy.svg", big), f("Backup/other.png", big)], uid="B", host="box2")
+
+    cands_a = {c["rel_path"] for c in inv.hash_candidates(db_path, a)}
+    assert cands_a == {"Art/logo.svg"}            # unique size and <1MB files never read
+
+    inv.record_hashes(db_path, "A", [("Art/logo.svg", big, 1_600_000_000.0, "h1")])
+    inv.record_hashes(db_path, "B", [("Backup/logo copy.svg", big, 1_600_000_000.0, "h1"),
+                                     ("Backup/other.png", big, 1_600_000_000.0, "h2")])
+    assert inv.hash_candidates(db_path, a) == []  # resumable: already hashed
+
+    s = inv.duplicate_summary(db_path)
+    assert (s["groups"], s["extra_files"], s["extra_bytes"]) == (1, 1, big)   # same size != duplicate
+
+
+def test_holiday_bundles_inside_design_assets_stay_side_hustle(db_path):
+    vol = scan(db_path, [f("Share/Saved SHit/Design_Assets/28- Podfriendly - Events 2/Christmas/tree.jpg", 50_000),
+                         f("Share/Saved SHit/Design_Assets/Birthday 75/cake.png", 50_000)])
+    d = dirs_by_path(db_path, vol)
+    assert d["Share/Saved SHit/Design_Assets/28- Podfriendly - Events 2/Christmas"]["suggested"] == "side_hustle"
+    assert d["Share/Saved SHit/Design_Assets/Birthday 75"]["suggested"] == "side_hustle"

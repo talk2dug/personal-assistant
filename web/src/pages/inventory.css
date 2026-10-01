@@ -165,3 +165,27 @@
   .inv-types-col, .inv-table td:nth-child(5), .inv-table th:nth-child(5) { display: none; }
   .inv-size-col { width: auto; }
 }
+
+/* move plan tab */
+.plan-tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.plan-tile {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 12px;
+  background: var(--bg-panel); border: 1px solid var(--border-dim);
+}
+.plan-tile b { font-family: var(--font-mono); font-size: 18px; color: var(--cyan-bright); font-weight: 500; }
+.plan-tile span { font-size: 12px; color: var(--text-faint); }
+.plan-dest { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.02em; text-transform: none; color: var(--text-faint); font-weight: 400; }
+.plan-actions { white-space: nowrap; display: flex; gap: 10px; align-items: center; }
+.plan-btn {
+  background: var(--cyan-faint); border: 1px solid var(--cyan-dim); color: var(--cyan-bright); cursor: pointer;
+  font-family: var(--font-hud); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; padding: 4px 10px;
+}
+.plan-btn:disabled { opacity: 0.4; cursor: default; }
+.plan-btn:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1px; }
+.plan-units-row > td { padding: 0 0 10px 18px; }
+.plan-units { max-height: 380px; overflow: auto; border: 1px solid var(--border-dim); margin-top: 0; }
+.plan-path { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-approved { color: var(--cyan-bright); }
+.plan-excluded { color: var(--text-faint); text-decoration: line-through; }
+.plan-done { color: var(--cyan); }
+.plan-failed { color: var(--amber); }

@@ -121,6 +121,19 @@ CREATE TABLE IF NOT EXISTS inv_files (
 CREATE INDEX IF NOT EXISTS idx_inv_files_dir ON inv_files(dir_id);
 CREATE INDEX IF NOT EXISTS idx_inv_files_scan ON inv_files(scan_id);
 
+-- Content hashes, keyed like tags (drive uid + path) so a rescan doesn't throw them
+-- away. size+mtime are kept so a file that changed since hashing is re-hashed.
+CREATE TABLE IF NOT EXISTS inv_hashes (
+    volume_uid TEXT NOT NULL,
+    rel_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    mtime REAL,
+    sha256 TEXT NOT NULL,
+    hashed_at TEXT NOT NULL,
+    PRIMARY KEY (volume_uid, rel_path)
+);
+CREATE INDEX IF NOT EXISTS idx_inv_hashes_sha ON inv_hashes(sha256);
+
 CREATE TABLE IF NOT EXISTS inv_tags (
     volume_uid TEXT NOT NULL,
     path TEXT NOT NULL,
@@ -210,7 +223,11 @@ _MARKERS = [
         r"msocache|config\.msi|drivers|temp|tmp|cache|caches|thumbnails|\.thumbnails|"
         r"system32|syswow64|winsxs|intel|amd|nvidia|esd|\$windows\.~bt|\$winreagent)$", re.I)),
     ("side_hustle", re.compile(
+        # design[_ ]assets / podfriendly: the NAS's Share/Saved SHit/Design_Assets tree is
+        # all bought design bundles, and without these its "Christmas"/"Birthday" bundles
+        # were read as personal photos (6 folders filed under Personal/Photos, 2026-09-29).
         r"(etsy|shopify|printify|printful|blue ?ridge|brcc|custom ?co|cricut|silhouette|"
+        r"design[_ -]?assets|podfriendly|"
         r"decal|sticker|vinyl|sublimat|mockup|tumbler|t-?shirt|svg|cut ?files?|design bundle|"
         r"creative ?fabrica|designbundles|so fontsy|collected art|print ?station|laser|"
         r"glowforge|lightburn|products?|listings?|merch|pod\b|dtf|htv|patterns?|templates?|"
@@ -744,6 +761,70 @@ def set_tag(db_path: str, dir_id: int, category: str | None, note: str | None = 
         conn.commit()
     changed = apply_tags(db_path, d["volume_id"], under_path=d["path"] or None)
     return {"ok": True, "changed": changed}
+
+
+# ====================================================================== duplicates
+#
+# A duplicate can only ever be a file of exactly the same size, so only files whose size
+# appears more than once are read at all -- a fraction of the data. Hashes are SHA-256 of
+# the whole file: this decides what gets deleted, so no partial-hash shortcuts.
+
+DUP_MIN_BYTES = 1 << 20   # below 1MB the space isn't worth the reads
+
+
+def hash_candidates(db_path: str, volume_id: int, min_bytes: int = DUP_MIN_BYTES) -> list[dict]:
+    """Files on one (non-OS) drive that share their exact size with some other file in
+    the inventory and have no current hash. [{rel_path, size_bytes, mtime}]"""
+    with closing(connect(db_path)) as conn:
+        v = conn.execute("SELECT uid, current_scan_id FROM inv_volumes WHERE id = ?", (volume_id,)).fetchone()
+        if v is None or v["current_scan_id"] is None:
+            return []
+        rows = conn.execute(
+            """WITH shared AS (
+                   SELECT f.size_bytes FROM inv_files f
+                     JOIN inv_volumes vv ON vv.current_scan_id = f.scan_id AND vv.is_system = 0
+                    WHERE f.size_bytes >= ? GROUP BY f.size_bytes HAVING COUNT(*) > 1)
+               SELECT CASE WHEN d.path = '' THEN f.name ELSE d.path || '/' || f.name END AS rel_path,
+                      f.size_bytes, f.mtime
+                 FROM inv_files f JOIN inv_dirs d ON d.id = f.dir_id
+                WHERE f.scan_id = ? AND f.size_bytes IN (SELECT size_bytes FROM shared)""",
+            (min_bytes, v["current_scan_id"])).fetchall()
+        have = {(r["rel_path"], r["size_bytes"], r["mtime"]) for r in conn.execute(
+            "SELECT rel_path, size_bytes, mtime FROM inv_hashes WHERE volume_uid = ?", (v["uid"],))}
+    return [dict(r) for r in rows if (r["rel_path"], r["size_bytes"], r["mtime"]) not in have]
+
+
+def record_hashes(db_path: str, volume_uid: str, rows: list[tuple]) -> None:
+    """rows: (rel_path, size_bytes, mtime, sha256)."""
+    now = _now()
+    with closing(connect(db_path)) as conn:
+        conn.executemany(
+            """INSERT INTO inv_hashes (volume_uid, rel_path, size_bytes, mtime, sha256, hashed_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(volume_uid, rel_path) DO UPDATE SET size_bytes=excluded.size_bytes,
+                   mtime=excluded.mtime, sha256=excluded.sha256, hashed_at=excluded.hashed_at""",
+            [(volume_uid, p, s, m, h, now) for p, s, m, h in rows])
+        conn.commit()
+
+
+def duplicate_summary(db_path: str) -> dict:
+    """Confirmed (same SHA-256) duplicates across every drive: how much space the extra
+    copies take, and where those extra copies sit."""
+    with closing(connect(db_path)) as conn:
+        r = conn.execute(
+            """SELECT COUNT(*) AS groups, COALESCE(SUM(n - 1), 0) AS extra_files,
+                      COALESCE(SUM((n - 1) * size_bytes), 0) AS extra_bytes
+                 FROM (SELECT sha256, MAX(size_bytes) AS size_bytes, COUNT(*) AS n
+                         FROM inv_hashes GROUP BY sha256 HAVING COUNT(*) > 1)""").fetchone()
+        per_drive = [dict(x) for x in conn.execute(
+            """SELECT h.volume_uid, v.mount, v.label, ho.name AS host, COUNT(*) AS files,
+                      SUM(h.size_bytes) AS bytes
+                 FROM inv_hashes h JOIN inv_volumes v ON v.uid = h.volume_uid
+                 JOIN inv_hosts ho ON ho.id = v.host_id
+                WHERE h.sha256 IN (SELECT sha256 FROM inv_hashes GROUP BY sha256 HAVING COUNT(*) > 1)
+                GROUP BY h.volume_uid ORDER BY bytes DESC""")]
+        hashed = conn.execute("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM inv_hashes").fetchone()
+    return {**dict(r), "per_drive": per_drive, "hashed_files": hashed[0], "hashed_bytes": hashed[1]}
 
 
 # ========================================================================= queries

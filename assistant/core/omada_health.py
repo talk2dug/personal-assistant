@@ -322,8 +322,25 @@ def latest_snapshot(db_path: str) -> dict | None:
     return json.loads(row["body"]) if row else None
 
 
-def _ping_is_bad(p: dict) -> bool:
-    return p.get("avg_ms") is None or (p.get("loss_pct") or 0) > 0 or (p.get("avg_ms") or 0) > 30
+# Plain wired-infrastructure bar: router/APs/NAS/servers on Ethernet have no business
+# averaging above this on a 10-ping sweep from a wired box.
+WIRED_LATENCY_BAD_MS = 30
+
+# Confirmed-wireless clients (matched against the Omada client list's own `wireless` flag,
+# by IP) get a looser bar. touch1/touch2 -- the wake-word/presence terminal Pis, which are
+# Wi-Fi by design -- were flagged '<-- problem' repeatedly (6 consecutive network-feed
+# reviews, 2026-09 into 2026-10) purely for averaging 35-45ms at 0% packet loss: ordinary
+# indoor RF jitter, not a real fault. Loss-based and unreachable detection below is
+# unchanged for every device; this only loosens the latency-only trigger, and only for
+# targets the controller itself confirms are on Wi-Fi.
+WIRELESS_LATENCY_BAD_MS = 70
+
+
+def _ping_is_bad(p: dict, wireless_ips: frozenset[str] = frozenset()) -> bool:
+    if p.get("avg_ms") is None or (p.get("loss_pct") or 0) > 0:
+        return True
+    bar = WIRELESS_LATENCY_BAD_MS if p.get("ip") in wireless_ips else WIRED_LATENCY_BAD_MS
+    return (p.get("avg_ms") or 0) > bar
 
 
 def render_snapshot(snap: dict, controller: dict | None = None) -> str:
@@ -344,11 +361,12 @@ def render_snapshot(snap: dict, controller: dict | None = None) -> str:
     for d in snap["devices"]:
         lines.append(f"  {'UP  ' if d['online'] else 'DOWN'} {d['name']} {d['model']} {d['ip']} "
                      f"fw {d['firmware']} (last heard {d['last_seen_s']}s ago)")
-    bad = [p for p in snap["ping"] if _ping_is_bad(p)]
+    wireless_ips = frozenset(c["ip"] for c in snap["clients"] if c.get("wireless") and c.get("ip"))
+    bad = [p for p in snap["ping"] if _ping_is_bad(p, wireless_ips)]
     lines.append(f"PING SWEEP ({PING_COUNT} pings each from jarvisbox, which is wired): "
                  f"{len(snap['ping']) - len(bad)} of {len(snap['ping'])} clean")
-    for p in sorted(snap["ping"], key=lambda p: (not _ping_is_bad(p), p["name"])):
-        flag = "  <-- problem" if _ping_is_bad(p) else ""
+    for p in sorted(snap["ping"], key=lambda p: (not _ping_is_bad(p, wireless_ips), p["name"])):
+        flag = "  <-- problem" if _ping_is_bad(p, wireless_ips) else ""
         lines.append(f"  {p['name']} {p['ip']}: loss {p.get('loss_pct')}%, avg {p.get('avg_ms')}ms, "
                      f"max {p.get('max_ms')}ms{flag}")
     wl = [c for c in snap["clients"] if c["wireless"]]
